@@ -1,0 +1,7 @@
+{
+    "host": "127.0.0.1",
+    "port": 9999,
+    "log_level": "debug",
+    "mods_path": "./workspace_data/mods",
+    "tick_rate": 30
+}

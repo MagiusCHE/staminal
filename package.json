@@ -25,6 +25,6 @@
     "doc": "docs"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "server:debug": "cd apps/stam_server && cargo run --bin stam_server -- --config workspace_data/configs/develop.json"
   }
 }

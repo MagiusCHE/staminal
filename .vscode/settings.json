@@ -1,0 +1,6 @@
+{
+    "rust-analyzer.linkedProjects": [
+        "apps/stam_server/Cargo.toml"
+    ],
+    "rust-analyzer.workspace.discoverConfig": null
+}
