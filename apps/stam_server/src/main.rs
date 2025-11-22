@@ -1,5 +1,6 @@
 use std::thread;
 use std::time::Duration;
+use std::env;
 
 use clap::Parser;
 use tracing::{Level, info, debug};
@@ -8,10 +9,24 @@ use tracing_subscriber::fmt::time::OffsetTime;
 use time::macros::format_description;
 
 use stam_schema::Validatable;
-use stam_server::config::Config;
+
+mod config;
+use config::Config;
 
 const VERSION: &str = "0.1.0-alpha";
-const DEFAULT_CONFIG_PATH: &str = "./workspace_data/configs/zygote.json";
+
+/// Get default config path based on executable location
+fn default_config_path() -> String {
+    env::current_exe()
+        .ok()
+        .and_then(|exe_path| {
+            let stem = exe_path.file_stem()?;
+            let parent = exe_path.parent()?;
+            Some(parent.join(stem).with_extension("json"))
+        })
+        .and_then(|path| path.to_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "./stam_server.json".to_string())
+}
 
 /// Staminal Core Server - Undifferentiated Game Engine
 #[derive(Parser, Debug)]
@@ -21,7 +36,7 @@ const DEFAULT_CONFIG_PATH: &str = "./workspace_data/configs/zygote.json";
 #[command(about = "Staminal Game Engine Core Server", long_about = None)]
 struct Args {
     /// Path to configuration file (JSON)
-    #[arg(short, long, default_value = DEFAULT_CONFIG_PATH)]
+    #[arg(short, long, default_value_t = default_config_path())]
     config: String,
 }
 

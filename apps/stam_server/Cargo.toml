@@ -3,14 +3,6 @@ name = "stam_server"
 version = "0.1.0"
 edition = "2024"
 
-[lib]
-name = "stam_server"
-path = "src/lib.rs"
-
-[[bin]]
-name = "stam_server"
-path = "src/main.rs"
-
 [dependencies]
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["time", "local-time"] }
