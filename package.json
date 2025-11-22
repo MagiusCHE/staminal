@@ -1,0 +1,30 @@
+{
+  "name": "staminal",
+  "version": "0.0.1",
+  "description": "Game Sarver-Client Engine entirely based on Mods",
+  "keywords": [
+    "Game",
+    "Engine",
+    "Mod",
+    "Client",
+    "Server"
+  ],
+  "homepage": "https://github.com/MagiusCHE/staminal#readme",
+  "bugs": {
+    "url": "https://github.com/MagiusCHE/staminal/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/MagiusCHE/staminal.git"
+  },
+  "license": "MIT",
+  "author": "MagiusCHE",
+  "type": "commonjs",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  }
+}
