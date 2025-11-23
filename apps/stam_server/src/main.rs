@@ -4,9 +4,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
 use tracing::{Level, info, debug, warn, error};
-use tracing_subscriber::FmtSubscriber;
 use tracing_subscriber::fmt::time::OffsetTime;
+use tracing_subscriber::fmt::{self, format::Writer, FmtContext, FormatEvent, FormatFields};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::registry::LookupSpan;
 use time::macros::format_description;
+use std::fmt as std_fmt;
 use tokio::time::{Duration, interval};
 use tokio::signal;
 use tokio::net::TcpListener;
@@ -25,6 +29,65 @@ mod client_manager;
 use client_manager::ClientManager;
 
 const VERSION: &str = "0.1.0-alpha";
+
+/// Custom event formatter that displays thread IDs as #N instead of ThreadId(N)
+/// Replicates the default tracing formatter behavior with ANSI color support
+struct CustomFormatter<T> {
+    timer: T,
+    ansi: bool,
+}
+
+impl<S, N, T> FormatEvent<S, N> for CustomFormatter<T>
+where
+    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+    N: for<'a> FormatFields<'a> + 'static,
+    T: fmt::time::FormatTime,
+{
+    fn format_event(
+        &self,
+        ctx: &FmtContext<'_, S, N>,
+        mut writer: Writer<'_>,
+        event: &tracing::Event<'_>,
+    ) -> std_fmt::Result {
+        let metadata = event.metadata();
+
+        // Color codes (matching tracing's default colors)
+        let (dim_start, dim_end) = if self.ansi { ("\x1b[2m", "\x1b[0m") } else { ("", "") };
+        let (level_color, level_str) = match *metadata.level() {
+            Level::ERROR => (if self.ansi { "\x1b[31m" } else { "" }, "ERROR"),
+            Level::WARN  => (if self.ansi { "\x1b[33m" } else { "" }, " WARN"),
+            Level::INFO  => (if self.ansi { "\x1b[32m" } else { "" }, " INFO"),
+            Level::DEBUG => (if self.ansi { "\x1b[34m" } else { "" }, "DEBUG"),
+            Level::TRACE => (if self.ansi { "\x1b[35m" } else { "" }, "TRACE"),
+        };
+        let color_end = if self.ansi { "\x1b[0m" } else { "" };
+
+        // Write timestamp (dimmed)
+        write!(writer, "{}", dim_start)?;
+        self.timer.format_time(&mut writer)?;
+        write!(writer, "{} ", dim_end)?;
+
+        // Write level (colored)
+        write!(writer, "{}{}{} ", level_color, level_str, color_end)?;
+
+        // Write thread ID as #N instead of ThreadId(N)
+        let thread_id = format!("{:?}", std::thread::current().id());
+        if let Some(num_str) = thread_id.strip_prefix("ThreadId(").and_then(|s| s.strip_suffix(")")) {
+            // Parse to number for proper padding
+            if let Ok(num) = num_str.parse::<u64>() {
+                write!(writer, "#{:03} ", num)?;
+            }
+        }
+
+        // Write target (dimmed)
+        write!(writer, "{}{}{}: ", dim_start, metadata.target(), dim_end)?;
+
+        // Write fields
+        ctx.field_format().format_fields(writer.by_ref(), event)?;
+
+        writeln!(writer)
+    }
+}
 
 /// Get default config path based on executable location
 fn default_config_path() -> String {
@@ -84,15 +147,24 @@ async fn main() {
         format_description!("[year]/[month]/[day] [hour]:[minute]:[second].[subsecond digits:4]"),
     );
 
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(log_level)
-        .with_timer(timer)
-        .with_thread_ids(true)
-        .with_target(true)
-        .with_ansi(atty::is(atty::Stream::Stdout))  // Auto-detect if stdout is a terminal
-        .finish();
+    // Auto-detect if stdout is a terminal for ANSI color support
+    let use_ansi = atty::is(atty::Stream::Stdout);
 
-    tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
+    // Create custom formatter with #N thread IDs
+    let formatter = CustomFormatter {
+        timer,
+        ansi: use_ansi,
+    };
+
+    // Build subscriber with custom formatter
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .event_format(formatter)
+                .with_writer(std::io::stdout)
+        )
+        .with(tracing_subscriber::filter::LevelFilter::from_level(log_level))
+        .init();
 
     info!("========================================");
     info!("   STAMINAL CORE SERVER v{}", VERSION);
