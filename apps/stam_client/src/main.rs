@@ -20,6 +20,9 @@ use stam_protocol::{PrimalMessage, PrimalStream, IntentType, GameMessage, GameSt
 mod locale;
 use locale::LocaleManager;
 
+mod js_runtime;
+use js_runtime::JsRuntime;
+
 const VERSION: &str = "0.1.0-alpha";
 
 /// Get the Staminal config directory
@@ -378,6 +381,34 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                 info!("All bootstrap mods validated successfully");
             } else {
                 info!("No bootstrap mods required");
+            }
+
+            // Initialize JavaScript runtime and load bootstrap mods
+            if !bootstrap_mods.is_empty() {
+                info!("Initializing JavaScript runtime...");
+                let mut js_runtime = JsRuntime::new()?;
+
+                info!("Loading bootstrap mods...");
+                for mod_info in &bootstrap_mods {
+                    let mod_dir = mods_dir.join(&mod_info.mod_id);
+                    let manifest_path = mod_dir.join("manifest.json");
+
+                    // Read manifest to get entry_point
+                    let manifest_content = fs::read_to_string(&manifest_path)?;
+                    let manifest: ModManifest = serde_json::from_str(&manifest_content)?;
+
+                    // Load JavaScript module
+                    let entry_point_path = mod_dir.join(&manifest.entry_point);
+                    info!("  Loading {} ({})", mod_info.mod_id, manifest.entry_point);
+
+                    js_runtime.load_module(&entry_point_path, &mod_info.mod_id)?;
+                }
+
+                // Call onAttach lifecycle hook for all mods
+                info!("Attaching bootstrap mods...");
+                js_runtime.call_function("onAttach")?;
+
+                info!("Bootstrap mods attached successfully");
             }
 
             // TODO: Validate and download remaining (non-bootstrap) mods
