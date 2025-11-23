@@ -1,0 +1,9 @@
+{
+    "name": "mods-manager",
+    "version": "1.0.0",
+    "description": "Initial Client interface used to inform user about Mods downloading progress",    
+    "entry_point": "main.js",
+    "priority": 0,
+    "// type_comment": "The type of mod determines how it integrates with the engine. 'bootstrap' mods are loaded at startup and can provide core functionality. Bootstrap mods will be ensured before any game mods are loaded and executed.",
+    "type": "bootstrap"
+}
