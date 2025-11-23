@@ -1,5 +1,5 @@
 use clap::Parser;
-use tracing::{Level, info, error, warn};
+use tracing::{Level, info, error, warn, debug};
 use tracing_subscriber::fmt::time::OffsetTime;
 use tracing_subscriber::fmt::{self, format::Writer, FmtContext, FormatEvent, FormatFields};
 use tracing_subscriber::layer::SubscriberExt;
@@ -10,7 +10,11 @@ use std::fmt as std_fmt;
 use tokio::net::TcpStream;
 use sha2::{Sha512, Digest};
 
-use stam_protocol::{PrimalMessage, PrimalStream, IntentType};
+use stam_protocol::{PrimalMessage, PrimalStream, IntentType, GameMessage, GameStream};
+
+#[macro_use]
+mod locale;
+use locale::LocaleManager;
 
 const VERSION: &str = "0.1.0-alpha";
 
@@ -73,6 +77,145 @@ where
     }
 }
 
+/// Connect to game server and maintain connection
+async fn connect_to_game_server(uri: &str, username: &str, password: &str, locale: &LocaleManager) -> Result<(), Box<dyn std::error::Error>> {
+    // Parse game server URI (stam://host:port)
+    if !uri.starts_with("stam://") {
+        return Err(locale.get_with_args("error-invalid-uri", Some(&fluent_args!{
+            "uri" => uri
+        })).into());
+    }
+
+    let host_port = uri.strip_prefix("stam://").unwrap();
+    info!("{}", locale.get_with_args("game-connecting", Some(&fluent_args!{
+        "host" => host_port
+    })));
+
+    // Connect to game server
+    let mut stream = TcpStream::connect(host_port).await?;
+    info!("{}", locale.get("game-connected"));
+
+    // Read Welcome message
+    match stream.read_primal_message().await {
+        Ok(PrimalMessage::Welcome { version }) => {
+            info!("{}", locale.get_with_args("server-welcome", Some(&fluent_args!{
+                "version" => version.as_str()
+            })));
+
+            // Check version compatibility
+            let client_version_parts: Vec<&str> = VERSION.split('.').collect();
+            let server_version_parts: Vec<&str> = version.split('.').collect();
+
+            if client_version_parts.len() >= 2 && server_version_parts.len() >= 2 {
+                let client_major_minor = format!("{}.{}", client_version_parts[0], client_version_parts[1]);
+                let server_major_minor = format!("{}.{}", server_version_parts[0], server_version_parts[1]);
+
+                if client_major_minor != server_major_minor {
+                    error!("{}", locale.get_with_args("version-mismatch", Some(&fluent_args!{
+                        "client" => VERSION,
+                        "server" => version.as_str()
+                    })));
+                    return Err(locale.get("disconnect-version-mismatch").into());
+                }
+
+                info!("{}", locale.get_with_args("version-compatible", Some(&fluent_args!{
+                    "client" => VERSION,
+                    "server" => version.as_str()
+                })));
+            }
+        }
+        Ok(msg) => {
+            error!("{}: {:?}", locale.get("error-unexpected-message"), msg);
+            return Err(locale.get("error-unexpected-message").into());
+        }
+        Err(e) => {
+            error!("{}: {}", locale.get("error-parse-failed"), e);
+            return Err(e.into());
+        }
+    }
+
+    // Send GameLogin Intent
+    info!("{}", locale.get("login-sending"));
+    let password_hash = sha512_hash(password);
+
+    let intent = PrimalMessage::Intent {
+        intent_type: IntentType::GameLogin,
+        client_version: VERSION.to_string(),
+        username: username.to_string(),
+        password_hash,
+    };
+
+    stream.write_primal_message(&intent).await?;
+
+    // Wait for LoginSuccess
+    match stream.read_game_message().await {
+        Ok(GameMessage::LoginSuccess) => {
+            info!("{}", locale.get("game-login-success"));
+        }
+        Ok(GameMessage::Error { message }) => {
+            // Message from server could be a locale ID
+            let localized_msg = locale.get(&message);
+            error!("{}", locale.get_with_args("server-error", Some(&fluent_args!{
+                "message" => localized_msg.as_str()
+            })));
+            return Err(localized_msg.into());
+        }
+        Ok(msg) => {
+            error!("{}: {:?}", locale.get("error-unexpected-message"), msg);
+            return Err(locale.get("error-unexpected-message").into());
+        }
+        Err(e) => {
+            error!("{}: {}", locale.get("error-parse-failed"), e);
+            return Err(e.into());
+        }
+    }
+
+    // Maintain connection - wait for messages or Ctrl+C
+    info!("{}", locale.get("game-client-ready"));
+
+    tokio::select! {
+        _ = maintain_game_connection(&mut stream, locale) => {
+            info!("{}", locale.get("connection-closed"));
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("{}", locale.get("ctrl-c-received"));
+        }
+    }
+
+    info!("{}", locale.get("game-shutdown"));
+    Ok(())
+}
+
+/// Maintain game connection - read messages from server
+async fn maintain_game_connection(stream: &mut TcpStream, locale: &LocaleManager) {
+    loop {
+        match stream.read_game_message().await {
+            Ok(GameMessage::Disconnect { message }) => {
+                // Message is a locale ID (e.g., "disconnect-server-shutdown")
+                let localized_msg = locale.get(&message);
+                info!("{}", localized_msg);
+                break;
+            }
+            Ok(GameMessage::Error { message }) => {
+                // Message could be a locale ID
+                let localized_msg = locale.get(&message);
+                error!("{}", locale.get_with_args("server-error", Some(&fluent_args!{
+                    "message" => localized_msg.as_str()
+                })));
+                break;
+            }
+            Ok(msg) => {
+                debug!("Received game message: {:?}", msg);
+                // TODO: Handle other game messages
+            }
+            Err(e) => {
+                debug!("Connection closed: {}", e);
+                break;
+            }
+        }
+    }
+}
+
 /// Staminal Client - Connect to Staminal servers
 #[derive(Parser, Debug)]
 #[command(name = "stam_client")]
@@ -83,6 +226,14 @@ struct Args {
     /// Server URI (e.g., stam://username:password@host:port or from STAM_URI env)
     #[arg(short, long, env = "STAM_URI")]
     uri: String,
+
+    /// Assets directory path (default: ./assets)
+    #[arg(short, long, default_value = "assets")]
+    assets: String,
+
+    /// Language/Locale to use (e.g., en-US, it-IT) - overrides system locale
+    #[arg(short, long, env = "STAM_LANG")]
+    lang: Option<String>,
 }
 
 #[tokio::main]
@@ -111,9 +262,24 @@ async fn main() {
     info!("   STAMINAL CLIENT v{}", VERSION);
     info!("========================================");
 
+    // Initialize locale manager
+    let locale = match LocaleManager::new(&args.assets, args.lang.as_deref()) {
+        Ok(lm) => {
+            info!("Locale system initialized: {}", lm.current_locale());
+            lm
+        }
+        Err(e) => {
+            error!("Failed to initialize locale system: {}", e);
+            error!("Continuing without localization support");
+            return;
+        }
+    };
+
     // Parse URI
     if !args.uri.starts_with("stam://") {
-        error!("Invalid URI scheme. Expected 'stam://', got: {}", args.uri);
+        error!("{}", locale.get_with_args("error-invalid-uri", Some(&fluent_args!{
+            "uri" => args.uri.as_str()
+        })));
         return;
     }
 
@@ -125,7 +291,9 @@ async fn main() {
         let host = &uri_without_scheme[at_pos + 1..];
         (Some(creds), host)
     } else {
-        error!("URI must include credentials: stam://username:password@host:port");
+        error!("{}", locale.get_with_args("error-invalid-uri", Some(&fluent_args!{
+            "uri" => args.uri.as_str()
+        })));
         return;
     };
 
@@ -135,24 +303,34 @@ async fn main() {
             let pass = &creds[colon_pos + 1..];
             (user.to_string(), pass.to_string())
         } else {
-            error!("Credentials must be in format username:password");
+            error!("{}", locale.get_with_args("error-invalid-uri", Some(&fluent_args!{
+                "uri" => args.uri.as_str()
+            })));
             return;
         }
     } else {
-        error!("Missing credentials");
+        error!("{}", locale.get_with_args("error-invalid-uri", Some(&fluent_args!{
+            "uri" => args.uri.as_str()
+        })));
         return;
     };
 
-    info!("Connecting to {} as user '{}'", host_port, username);
+    info!("{}", locale.get_with_args("connecting", Some(&fluent_args!{
+        "host" => host_port
+    })));
 
     // Connect to server
     let mut stream = match TcpStream::connect(host_port).await {
         Ok(s) => {
-            info!("Connected to {}", host_port);
+            info!("{}", locale.get_with_args("connected", Some(&fluent_args!{
+                "host" => host_port
+            })));
             s
         }
         Err(e) => {
-            error!("Failed to connect to {}: {}", host_port, e);
+            error!("{}", locale.get_with_args("connection-failed", Some(&fluent_args!{
+                "error" => e.to_string().as_str()
+            })));
             return;
         }
     };
@@ -160,7 +338,9 @@ async fn main() {
     // Read Welcome message
     match stream.read_primal_message().await {
         Ok(PrimalMessage::Welcome { version }) => {
-            info!("Received Welcome from server, version: {}", version);
+            info!("{}", locale.get_with_args("server-welcome", Some(&fluent_args!{
+                "version" => version.as_str()
+            })));
 
             // Check version compatibility (major.minor must match)
             let client_version_parts: Vec<&str> = VERSION.split('.').collect();
@@ -171,26 +351,31 @@ async fn main() {
                 let server_major_minor = format!("{}.{}", server_version_parts[0], server_version_parts[1]);
 
                 if client_major_minor != server_major_minor {
-                    error!("Version mismatch! Client: {}, Server: {}", VERSION, version);
-                    error!("Major.minor versions must match");
+                    error!("{}", locale.get_with_args("version-mismatch", Some(&fluent_args!{
+                        "client" => VERSION,
+                        "server" => version.as_str()
+                    })));
                     return;
                 }
 
-                info!("Version compatible: {} ~ {}", VERSION, version);
+                info!("{}", locale.get_with_args("version-compatible", Some(&fluent_args!{
+                    "client" => VERSION,
+                    "server" => version.as_str()
+                })));
             }
         }
         Ok(msg) => {
-            error!("Expected Welcome message, got: {:?}", msg);
+            error!("{}: {:?}", locale.get("error-unexpected-message"), msg);
             return;
         }
         Err(e) => {
-            error!("Failed to read Welcome: {}", e);
+            error!("{}: {}", locale.get("error-parse-failed"), e);
             return;
         }
     }
 
     // Send Intent with PrimalLogin
-    info!("Sending PrimalLogin intent...");
+    info!("{}", locale.get("login-sending"));
 
     // Hash password with SHA-512
     let password_hash = sha512_hash(&password);
@@ -203,17 +388,19 @@ async fn main() {
     };
 
     if let Err(e) = stream.write_primal_message(&intent).await {
-        error!("Failed to send Intent: {}", e);
+        error!("{}: {}", locale.get("login-failed"), e);
         return;
     }
 
     // Wait for ServerList or Error
     match stream.read_primal_message().await {
         Ok(PrimalMessage::ServerList { servers }) => {
-            info!("Received server list with {} server(s)", servers.len());
+            info!("{}", locale.get_with_args("server-list-received", Some(&fluent_args!{
+                "count" => servers.len()
+            })));
 
             if servers.is_empty() {
-                warn!("Server list is empty, no game servers available");
+                warn!("{}", locale.get("server-list-empty"));
                 return;
             }
 
@@ -225,23 +412,23 @@ async fn main() {
             let first_server = &servers[0];
             info!("Attempting to connect to game server: {} ({})", first_server.name, first_server.uri);
 
-            // TODO: Parse game server URI and connect
-            // For now, just wait
-            info!("Game client connection not yet implemented");
-            info!("Client will now wait for Ctrl+C...");
-
-            // Wait for shutdown signal
-            tokio::signal::ctrl_c().await.ok();
-            info!("Shutting down client...");
+            // Parse game server URI and connect
+            if let Err(e) = connect_to_game_server(&first_server.uri, &username, &password, &locale).await {
+                error!("{}: {}", locale.get("connection-failed"), e);
+            }
         }
         Ok(PrimalMessage::Error { message }) => {
-            error!("Server error: {}", message);
+            // Message could be a locale ID
+            let localized_msg = locale.get(&message);
+            error!("{}", locale.get_with_args("server-error", Some(&fluent_args!{
+                "message" => localized_msg.as_str()
+            })));
         }
         Ok(msg) => {
-            error!("Expected ServerList or Error, got: {:?}", msg);
+            error!("{}: {:?}", locale.get("error-unexpected-message"), msg);
         }
         Err(e) => {
-            error!("Failed to read server response: {}", e);
+            error!("{}: {}", locale.get("error-parse-failed"), e);
         }
     }
 }

@@ -1,0 +1,5 @@
+# Ignore everything in workspace_data except configs
+*
+!configs/
+!configs/*-example.json
+!.gitignore

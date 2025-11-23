@@ -12,6 +12,10 @@ stam_protocol = { path = "../shared/stam_protocol" }
 tokio = { version = "1.0", features = ["rt-multi-thread", "signal", "macros", "net", "io-util"] }
 atty = "0.2"
 sha2 = "0.10"
+fluent = "0.16"
+fluent-bundle = "0.15"
+unic-langid = "0.9"
+sys-locale = "0.3"
 
 [[bin]]
 name = "stam_client"
