@@ -120,7 +120,14 @@ async fn main() {
 
     // Load and validate configuration
     let config = match Config::from_json_file(&args.config) {
-        Ok(cfg) => cfg,
+        Ok(mut cfg) => {
+            // Validate mod configuration and build mod lists
+            if let Err(e) = cfg.validate_mods() {
+                eprintln!("Configuration validation error: {}", e);
+                std::process::exit(1);
+            }
+            cfg
+        },
         Err(e) => {
             eprintln!("Failed to load config from '{}': {}", args.config, e);
             eprintln!("Using default configuration");

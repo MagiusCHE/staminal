@@ -1,11 +1,27 @@
 use serde::{Deserialize, Serialize};
 
+/// Mod information sent to client
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModInfo {
+    /// Mod ID (unique identifier)
+    pub mod_id: String,
+    /// Minimum required version (major.minor.patch)
+    pub min_version: String,
+    /// Maximum supported version (major.minor.patch)
+    pub max_version: String,
+    /// Download URL for this mod
+    pub download_url: String,
+}
+
 /// Game protocol messages for authenticated game clients
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum GameMessage {
     // Server -> Client messages
     /// Authentication successful (sent immediately after GameLogin Intent)
-    LoginSuccess,
+    LoginSuccess {
+        /// List of required mods for this game
+        mods: Vec<ModInfo>,
+    },
 
     /// Error message
     Error {

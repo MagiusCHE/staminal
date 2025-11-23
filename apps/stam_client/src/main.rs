@@ -150,8 +150,25 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
 
     // Wait for LoginSuccess
     match stream.read_game_message().await {
-        Ok(GameMessage::LoginSuccess) => {
+        Ok(GameMessage::LoginSuccess { mods }) => {
             info!("{}", locale.get("game-login-success"));
+
+            // Log mod list received
+            if !mods.is_empty() {
+                info!("Received {} required mod(s):", mods.len());
+                for mod_info in &mods {
+                    info!("  - {} (v{} - v{}): {}",
+                        mod_info.mod_id,
+                        mod_info.min_version,
+                        mod_info.max_version,
+                        mod_info.download_url
+                    );
+                }
+            } else {
+                info!("No mods required for this game");
+            }
+
+            // TODO: Validate and download required mods
         }
         Ok(GameMessage::Error { message }) => {
             // Message from server could be a locale ID

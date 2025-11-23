@@ -1,10 +1,12 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tracing::{info, debug, error};
 
-use stam_protocol::{GameMessage, GameStream};
+use stam_protocol::{GameMessage, GameStream, ModInfo};
 use crate::client_manager::{ClientManager, ClientType, ClientCommand};
+use crate::config::Config;
 
 /// GameClient represents an authenticated game client connection
 /// Handles game-specific protocol messages
@@ -17,15 +19,17 @@ pub struct GameClient {
     username: String,
     /// Game ID the client is connected to
     game_id: String,
+    /// Server configuration
+    config: Arc<Config>,
     /// Client manager for tracking connections
     client_manager: ClientManager,
 }
 
 impl GameClient {
     /// Create a new GameClient from an authenticated connection
-    pub fn new(stream: TcpStream, addr: SocketAddr, username: String, game_id: String, client_manager: ClientManager) -> Self {
+    pub fn new(stream: TcpStream, addr: SocketAddr, username: String, game_id: String, config: Arc<Config>, client_manager: ClientManager) -> Self {
         info!("Game client created for user '{}' on game '{}' from {}", username, game_id, addr);
-        Self { stream, addr, username, game_id, client_manager }
+        Self { stream, addr, username, game_id, config, client_manager }
     }
 
     /// Get the client's remote address
@@ -43,6 +47,19 @@ impl GameClient {
         &self.game_id
     }
 
+    /// Get pre-built mod list from configuration for this game
+    fn get_mod_list(&self) -> &[ModInfo] {
+        // Get the game configuration
+        if let Some(game_config) = self.config.games.get(&self.game_id) {
+            // Return reference to pre-built mod list
+            &game_config.mod_list
+        } else {
+            // Game not found in config (shouldn't happen since we validated earlier)
+            error!("Game '{}' not found in configuration", self.game_id);
+            &[]
+        }
+    }
+
     /// Handle the game client connection
     /// Client is already authenticated, send LoginSuccess and maintain connection
     pub async fn handle(mut self) {
@@ -54,8 +71,11 @@ impl GameClient {
 
         debug!("Handling authenticated game client from {}", addr);
 
-        // Send LoginSuccess immediately (already authenticated via Intent)
-        if let Err(e) = self.stream.write_game_message(&GameMessage::LoginSuccess).await {
+        // Get pre-built mod list from config
+        let mods = self.get_mod_list().to_vec();
+
+        // Send LoginSuccess with mod list (already authenticated via Intent)
+        if let Err(e) = self.stream.write_game_message(&GameMessage::LoginSuccess { mods }).await {
             error!("Failed to send LoginSuccess to {}: {}", addr, e);
             self.client_manager.unregister_client(&addr).await;
             return;

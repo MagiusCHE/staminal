@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tracing::{info, debug, error, warn};
 
@@ -194,7 +195,7 @@ impl PrimalClient {
         info!("Game user '{}' authenticated for game '{}', transitioning to GameClient", username, game_id);
 
         // Create GameClient and hand off the connection
-        let game_client = GameClient::new(self.stream, self.addr, username, game_id, self.client_manager);
+        let game_client = GameClient::new(self.stream, self.addr, username, game_id, Arc::new(self.config.clone()), self.client_manager);
         game_client.handle().await;
     }
 
