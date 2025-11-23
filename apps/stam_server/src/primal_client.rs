@@ -41,7 +41,8 @@ impl PrimalClient {
         let client_manager = self.client_manager.clone();  // Clone client_manager before moves
 
         // Register as Primal client (temporary, will transition to Game if needed)
-        client_manager.register_client(addr, ClientType::Primal, None).await;
+        let _command_rx = client_manager.register_client(addr, ClientType::Primal, None).await;
+        // Note: PrimalClient connections are short-lived, so we don't need to handle commands
 
         debug!("Handling client {}", addr);
 

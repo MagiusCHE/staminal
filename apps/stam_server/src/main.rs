@@ -285,8 +285,12 @@ async fn main() {
 
     info!("[CORE] Shutting down server gracefully...");
 
-    // Disconnect all active clients
-    client_manager.disconnect_all("Server is shutting down").await;
+    // Disconnect all active clients with locale ID
+    client_manager.disconnect_all("disconnect-server-shutdown").await;
+
+    // Give clients time to receive disconnect message before closing
+    tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+
     // TODO: Cleanup resources, save state, etc.
     info!("[CORE] Shutdown complete.");
 }

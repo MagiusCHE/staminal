@@ -1,9 +1,10 @@
 use std::net::SocketAddr;
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 use tracing::{info, debug, error};
 
 use stam_protocol::{GameMessage, GameStream};
-use crate::client_manager::{ClientManager, ClientType};
+use crate::client_manager::{ClientManager, ClientType, ClientCommand};
 
 /// GameClient represents an authenticated game client connection
 /// Handles game-specific protocol messages
@@ -41,8 +42,8 @@ impl GameClient {
         let addr = self.addr;
         let username = self.username.clone();
 
-        // Register as Game client
-        self.client_manager.register_client(addr, ClientType::Game, Some(username.clone())).await;
+        // Register as Game client and get command receiver
+        let mut command_rx = self.client_manager.register_client(addr, ClientType::Game, Some(username.clone())).await;
 
         debug!("Handling authenticated game client from {}", addr);
 
@@ -55,8 +56,8 @@ impl GameClient {
 
         info!("Sent LoginSuccess to user '{}'", username);
 
-        // Keep connection alive - wait for game messages
-        self.maintain_connection().await;
+        // Keep connection alive - wait for game messages or commands
+        self.maintain_connection(&mut command_rx).await;
 
         // Unregister when connection ends
         self.client_manager.unregister_client(&addr).await;
@@ -64,18 +65,37 @@ impl GameClient {
     }
 
     /// Maintain the connection alive until client disconnects or server shuts down
-    async fn maintain_connection(&mut self) {
+    async fn maintain_connection(&mut self, command_rx: &mut mpsc::UnboundedReceiver<ClientCommand>) {
         debug!("Maintaining connection for {}", self.addr);
 
         loop {
-            match self.stream.read_game_message().await {
-                Ok(msg) => {
-                    debug!("Received message from {}: {:?}", self.addr, msg);
-                    // TODO: Handle game messages
+            tokio::select! {
+                // Handle incoming game messages from client
+                msg_result = self.stream.read_game_message() => {
+                    match msg_result {
+                        Ok(msg) => {
+                            debug!("Received message from {}: {:?}", self.addr, msg);
+                            // TODO: Handle game messages
+                        }
+                        Err(e) => {
+                            debug!("Connection closed for {}: {}", self.addr, e);
+                            break;
+                        }
+                    }
                 }
-                Err(e) => {
-                    debug!("Connection closed for {}: {}", self.addr, e);
-                    break;
+                // Handle commands from server (e.g., disconnect)
+                Some(command) = command_rx.recv() => {
+                    match command {
+                        ClientCommand::Disconnect { message_id } => {
+                            info!("Sending disconnect message to {}: {}", self.addr, message_id);
+                            if let Err(e) = self.stream.write_game_message(&GameMessage::Disconnect {
+                                message: message_id,
+                            }).await {
+                                error!("Failed to send disconnect to {}: {}", self.addr, e);
+                            }
+                            break;
+                        }
+                    }
                 }
             }
         }

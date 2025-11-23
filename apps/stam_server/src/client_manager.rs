@@ -1,11 +1,8 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
-use tokio::net::TcpStream;
+use tokio::sync::{RwLock, mpsc};
 use tracing::info;
-use stam_protocol::{PrimalMessage, GameMessage};
-use stam_protocol::stream::{PrimalStream, GameStream};
 
 /// Type of client connection
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -15,12 +12,21 @@ pub enum ClientType {
     Server,
 }
 
+/// Commands that can be sent to client handlers
+#[derive(Debug, Clone)]
+pub enum ClientCommand {
+    /// Disconnect with a message ID
+    Disconnect { message_id: String },
+}
+
 /// Client connection handle
 #[derive(Debug)]
 pub struct ClientHandle {
     pub addr: SocketAddr,
     pub client_type: ClientType,
     pub username: Option<String>,
+    /// Channel to send commands to this client's handler
+    pub command_tx: mpsc::UnboundedSender<ClientCommand>,
 }
 
 /// Manager for tracking active client connections
@@ -39,18 +45,24 @@ impl ClientManager {
     }
 
     /// Register a new client connection
-    pub async fn register_client(&self, addr: SocketAddr, client_type: ClientType, username: Option<String>) {
+    /// Returns a receiver for commands that should be handled by the client handler
+    pub async fn register_client(&self, addr: SocketAddr, client_type: ClientType, username: Option<String>) -> mpsc::UnboundedReceiver<ClientCommand> {
         let mut clients = self.clients.write().await;
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
+
         let handle = ClientHandle {
             addr,
             client_type,
             username: username.clone(),
+            command_tx,
         };
         clients.insert(addr, handle);
 
         let total = clients.len();
         let user_info = username.as_ref().map(|u| format!(" ({})", u)).unwrap_or_default();
         info!("Registered {:?} client from {}{} - Total active: {}", client_type, addr, user_info, total);
+
+        command_rx
     }
 
     /// Unregister a client connection
@@ -75,8 +87,8 @@ impl ClientManager {
         clients.len()
     }
 
-    /// Disconnect all clients with a custom message
-    pub async fn disconnect_all(&self, message: &str) {
+    /// Disconnect all clients with a message ID
+    pub async fn disconnect_all(&self, message_id: &str) {
         let clients = self.clients.read().await;
         let count = clients.len();
 
@@ -84,36 +96,20 @@ impl ClientManager {
             return;
         }
 
-        info!("Disconnecting {} clients: {}", count, message);
+        info!("Sending disconnect command to {} clients with message ID: {}", count, message_id);
 
-        // Disconnect each client based on type
+        // Send disconnect command to all client handlers
         for (addr, handle) in clients.iter() {
-            match handle.client_type {
-                ClientType::Primal => {
-                    // For Primal clients, try to reconnect and send disconnect message
-                    if let Ok(stream) = TcpStream::connect(addr).await {
-                        let mut stream = stream;
-                        let _ = stream.write_primal_message(&PrimalMessage::Disconnect {
-                            message: message.to_string(),
-                        }).await;
-                    }
-                }
-                ClientType::Game => {
-                    // For Game clients, try to reconnect and send disconnect message
-                    if let Ok(stream) = TcpStream::connect(addr).await {
-                        let mut stream = stream;
-                        let _ = stream.write_game_message(&GameMessage::Disconnect {
-                            message: message.to_string(),
-                        }).await;
-                    }
-                }
-                ClientType::Server => {
-                    // Server-to-server disconnect logic (future implementation)
-                }
+            let command = ClientCommand::Disconnect {
+                message_id: message_id.to_string(),
+            };
+
+            if let Err(e) = handle.command_tx.send(command) {
+                info!("Failed to send disconnect command to {}: {}", addr, e);
             }
         }
 
-        info!("All clients disconnected");
+        info!("Disconnect commands sent to all clients");
     }
 
     /// Get list of client addresses by type
