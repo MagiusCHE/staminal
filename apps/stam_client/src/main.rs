@@ -20,80 +20,14 @@ use stam_protocol::{PrimalMessage, PrimalStream, IntentType, GameMessage, GameSt
 mod locale;
 use locale::LocaleManager;
 
+mod app_paths;
+mod runtime_api;
 mod js_runtime;
-use js_runtime::JsRuntime;
+
+use app_paths::AppPaths;
+use js_runtime::{JsRuntime, ScriptRuntimeConfig};
 
 const VERSION: &str = "0.1.0-alpha";
-
-/// Get the Staminal config directory
-/// Linux: $XDG_CONFIG_HOME/staminal or $HOME/.config/staminal
-/// Windows: %APPDATA%/staminal
-/// macOS: $HOME/Library/Application Support/staminal
-/// If custom_home is provided, uses that directory directly
-fn get_staminal_config_dir(custom_home: Option<&str>) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let config_dir = if let Some(home) = custom_home {
-        PathBuf::from(home)
-    } else {
-        dirs::config_dir()
-            .ok_or("Could not determine config directory")?
-            .join("staminal")
-    };
-
-    if !config_dir.exists() {
-        fs::create_dir_all(&config_dir)?;
-        debug!("Created Staminal config directory: {}", config_dir.display());
-    }
-
-    Ok(config_dir)
-}
-
-/// Get the Staminal data directory
-/// Linux: $XDG_DATA_HOME/staminal or $HOME/.local/share/staminal
-/// Windows: %APPDATA%/staminal (same as config on Windows)
-/// macOS: $HOME/Library/Application Support/staminal
-/// If custom_home is provided, uses that directory directly
-fn get_staminal_data_dir(custom_home: Option<&str>) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let data_dir = if let Some(home) = custom_home {
-        PathBuf::from(home)
-    } else {
-        dirs::data_dir()
-            .ok_or("Could not determine data directory")?
-            .join("staminal")
-    };
-
-    if !data_dir.exists() {
-        fs::create_dir_all(&data_dir)?;
-        debug!("Created Staminal data directory: {}", data_dir.display());
-    }
-
-    Ok(data_dir)
-}
-
-/// Get the game-specific data directory
-/// Linux: $XDG_DATA_HOME/staminal/<game_id> or $HOME/.local/share/staminal/<game_id>
-/// Windows: %APPDATA%/staminal/<game_id>
-/// This directory contains mods and save files for the game
-fn get_game_root(game_id: &str, custom_home: Option<&str>) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let data_dir = get_staminal_data_dir(custom_home)?;
-    let game_root = data_dir.join(game_id);
-
-    // Create directory if it doesn't exist
-    let game_root_created = !game_root.exists();
-    if game_root_created {
-        fs::create_dir_all(&game_root)?;
-        debug!("Created game root directory: {}", game_root.display());
-    }
-
-    // Create mods directory for this game
-    let mods_dir = game_root.join("mods");
-    let mods_dir_created = !mods_dir.exists();
-    if mods_dir_created {
-        fs::create_dir_all(&mods_dir)?;
-        debug!("Created mods directory: {}", mods_dir.display());
-    }
-
-    Ok(game_root)
-}
 
 /// Compute SHA-512 hash of a string and return as hex string
 fn sha512_hash(input: &str) -> String {
@@ -212,10 +146,10 @@ where
 }
 
 /// Connect to game server and maintain connection
-async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_id: &str, locale: &LocaleManager, custom_home: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_id: &str, locale: &LocaleManager, app_paths: &AppPaths) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize game-specific directory
     info!("Initializing directories for game '{}'...", game_id);
-    let game_root = get_game_root(game_id, custom_home)?;
+    let game_root = app_paths.game_root(game_id)?;
     let mods_dir = game_root.join("mods");
 
     info!("Game directories:");
@@ -386,7 +320,10 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
             // Initialize JavaScript runtime and load bootstrap mods
             if !bootstrap_mods.is_empty() {
                 info!("Initializing JavaScript runtime...");
-                let mut js_runtime = JsRuntime::new()?;
+
+                // Create runtime configuration with game-specific paths
+                let runtime_config = ScriptRuntimeConfig::new(app_paths.clone(), &game_id)?;
+                let mut js_runtime = JsRuntime::new(runtime_config)?;
 
                 info!("Loading bootstrap mods...");
                 for mod_info in &bootstrap_mods {
@@ -404,11 +341,19 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                     js_runtime.load_module(&entry_point_path, &mod_info.mod_id)?;
                 }
 
-                // Call onAttach lifecycle hook for all mods
+                // Call onAttach lifecycle hook for each mod
                 info!("Attaching bootstrap mods...");
-                js_runtime.call_function("onAttach")?;
+                for mod_info in &bootstrap_mods {
+                    js_runtime.call_function_for_mod("onAttach", &mod_info.mod_id)?;
+                }
 
-                info!("Bootstrap mods attached successfully");
+                // Call onBootstrap lifecycle hook for each mod
+                info!("Bootstrapping mods...");
+                for mod_info in &bootstrap_mods {
+                    js_runtime.call_function_for_mod("onBootstrap", &mod_info.mod_id)?;
+                }
+
+                info!("Bootstrap mods initialized successfully");
             }
 
             // TODO: Validate and download remaining (non-bootstrap) mods
@@ -534,19 +479,11 @@ async fn main() {
         info!("Using custom home directory: {}", home);
     }
 
-    // Initialize Staminal directories
-    let _config_dir = match get_staminal_config_dir(custom_home) {
-        Ok(dir) => dir,
+    // Initialize application paths (once at startup)
+    let app_paths = match AppPaths::new(custom_home) {
+        Ok(paths) => paths,
         Err(e) => {
-            error!("Failed to initialize config directory: {}", e);
-            return;
-        }
-    };
-
-    let _data_dir = match get_staminal_data_dir(custom_home) {
-        Ok(dir) => dir,
-        Err(e) => {
-            error!("Failed to initialize data directory: {}", e);
+            error!("Failed to initialize application paths: {}", e);
             return;
         }
     };
@@ -703,7 +640,7 @@ async fn main() {
             info!("Attempting to connect to game server: {} (game_id: {}, uri: {})", first_server.name, first_server.game_id, first_server.uri);
 
             // Parse game server URI and connect
-            if let Err(e) = connect_to_game_server(&first_server.uri, &username, &password, &first_server.game_id, &locale, custom_home).await {
+            if let Err(e) = connect_to_game_server(&first_server.uri, &username, &password, &first_server.game_id, &locale, &app_paths).await {
                 error!("{}: {}", locale.get("connection-failed"), e);
             }
         }

@@ -3,17 +3,21 @@ use std::path::Path;
 use std::fs;
 use tracing::{info, error, debug, warn};
 
-use super::console_api;
+use super::{console_api, process_api, ScriptRuntimeConfig};
 
 /// JavaScript runtime manager for mod execution using QuickJS
 pub struct JsRuntime {
     runtime: Runtime,
     context: Context,
+    config: ScriptRuntimeConfig,
 }
 
 impl JsRuntime {
     /// Create a new JavaScript runtime instance with QuickJS
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    ///
+    /// # Arguments
+    /// * `config` - Runtime configuration containing app paths and game ID
+    pub fn new(config: ScriptRuntimeConfig) -> Result<Self, Box<dyn std::error::Error>> {
         debug!("Initializing QuickJS runtime for mods");
 
         let runtime = Runtime::new()?;
@@ -22,6 +26,7 @@ impl JsRuntime {
         let mut js_runtime = Self {
             runtime,
             context,
+            config,
         };
 
         // Setup global APIs
@@ -33,9 +38,15 @@ impl JsRuntime {
 
     /// Setup all global APIs available to mods
     fn setup_global_apis(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let game_data_dir = self.config.game_data_dir().clone();
+        let game_config_dir = self.config.game_config_dir().clone();
+
         self.context.with(|ctx| {
             // Register console API
             console_api::setup_console_api(ctx.clone())?;
+
+            // Register process API with game-specific directories
+            process_api::setup_process_api(ctx.clone(), game_data_dir, game_config_dir)?;
 
             // Future APIs will be registered here:
             // client_api::setup_client_api(ctx.clone())?;
@@ -114,6 +125,53 @@ impl JsRuntime {
                 }
                 None => {
                     warn!("Function '{}' not found in JavaScript context", function_name);
+                    // Not an error - function might be optional
+                    Ok(())
+                }
+            }
+        })
+    }
+
+    /// Call a JavaScript function for a specific mod
+    ///
+    /// This sets __MOD_ID__ before calling the function, ensuring proper logging context
+    ///
+    /// # Arguments
+    /// * `function_name` - Name of the global function to call
+    /// * `mod_id` - ID of the mod (used for logging and __MOD_ID__ context)
+    pub fn call_function_for_mod(
+        &mut self,
+        function_name: &str,
+        mod_id: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        debug!("Calling JavaScript function '{}' for mod '{}'", function_name, mod_id);
+
+        // Set __MOD_ID__ for this mod
+        self.context.with(|ctx| {
+            ctx.globals().set("__MOD_ID__", mod_id)?;
+            Ok::<(), rquickjs::Error>(())
+        })?;
+
+        // Call the function
+        self.context.with(|ctx| {
+            let globals = ctx.globals();
+            let func: Option<rquickjs::Function> = globals.get(function_name).ok();
+
+            match func {
+                Some(func) => {
+                    match func.call::<(), ()>(()) {
+                        Ok(_) => {
+                            debug!("Function '{}' executed successfully for mod '{}'", function_name, mod_id);
+                            Ok(())
+                        }
+                        Err(e) => {
+                            error!("Error calling function '{}' for mod '{}': {}", function_name, mod_id, e);
+                            Err(format!("JavaScript error in '{}' for mod '{}': {}", function_name, mod_id, e).into())
+                        }
+                    }
+                }
+                None => {
+                    debug!("Function '{}' not found for mod '{}' (optional)", function_name, mod_id);
                     // Not an error - function might be optional
                     Ok(())
                 }

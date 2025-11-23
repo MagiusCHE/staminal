@@ -5,5 +5,7 @@ function onAttach() {
 
 // Called when client has loaded all bootstppinng mods and before activate or check other mods.
 function onBootstrap() {
-    console.log("Boostrap...");    
+    console.log("Boostrap...");  
+    console.log("Data path:", process.app.data_path);
+    console.log("Config path:", process.app.config_path);
 }
