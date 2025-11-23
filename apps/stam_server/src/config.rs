@@ -7,15 +7,20 @@ use stam_schema::Validatable;
 #[schemars(title = "Staminal Server Configuration")]
 #[schemars(description = "Configuration for Staminal Core Server")]
 pub struct Config {
-    /// Host address to bind the server
-    #[serde(default = "default_host")]
-    #[schemars(description = "IP address to bind the server (e.g., '0.0.0.0' for all interfaces)")]
-    pub host: String,
+    /// Server name
+    #[serde(default = "default_name")]
+    #[schemars(description = "Human-readable server name displayed to clients")]
+    pub name: String,
 
-    /// UDP port number
-    #[serde(default = "default_port")]
-    #[schemars(description = "UDP port number for the game server", range(min = 1024, max = 65535))]
-    pub port: u16,
+    /// Local IP address to bind the server
+    #[serde(default = "default_local_ip")]
+    #[schemars(description = "IP address to bind the server (e.g., '0.0.0.0' for all interfaces)")]
+    pub local_ip: String,
+
+    /// Local port number
+    #[serde(default = "default_local_port")]
+    #[schemars(description = "Port number for the game server", range(min = 1024, max = 65535))]
+    pub local_port: u16,
 
     /// Logging level
     #[serde(default = "default_log_level")]
@@ -32,13 +37,22 @@ pub struct Config {
     #[serde(default = "default_tick_rate")]
     #[schemars(description = "Server update frequency in ticks per second", range(min = 1, max = 1000))]
     pub tick_rate: u64,
+
+    /// Public URI for server list (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Public URI advertised in server list (e.g., 'stam://game.example.com:9999')")]
+    pub public_uri: Option<String>,
 }
 
-fn default_host() -> String {
+fn default_name() -> String {
+    "Staminal Server".to_string()
+}
+
+fn default_local_ip() -> String {
     "0.0.0.0".to_string()
 }
 
-fn default_port() -> u16 {
+fn default_local_port() -> u16 {
     7777
 }
 
@@ -57,11 +71,13 @@ fn default_tick_rate() -> u64 {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            host: default_host(),
-            port: default_port(),
+            name: default_name(),
+            local_ip: default_local_ip(),
+            local_port: default_local_port(),
             log_level: default_log_level(),
             mods_path: default_mods_path(),
             tick_rate: default_tick_rate(),
+            public_uri: None,
         }
     }
 }
@@ -76,32 +92,32 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.host, "0.0.0.0");
-        assert_eq!(config.port, 7777);
+        assert_eq!(config.local_ip, "0.0.0.0");
+        assert_eq!(config.local_port, 7777);
         assert_eq!(config.log_level, "info");
     }
 
     #[test]
     fn test_valid_json() {
         let json = r#"{
-            "host": "127.0.0.1",
-            "port": 8080,
+            "local_ip": "127.0.0.1",
+            "local_port": 8080,
             "log_level": "debug",
             "mods_path": "./mods",
             "tick_rate": 30
         }"#;
 
         let config = Config::from_json_str(json).unwrap();
-        assert_eq!(config.host, "127.0.0.1");
-        assert_eq!(config.port, 8080);
+        assert_eq!(config.local_ip, "127.0.0.1");
+        assert_eq!(config.local_port, 8080);
         assert_eq!(config.log_level, "debug");
     }
 
     #[test]
     fn test_invalid_log_level() {
         let json = r#"{
-            "host": "127.0.0.1",
-            "port": 8080,
+            "local_ip": "127.0.0.1",
+            "local_port": 8080,
             "log_level": "invalid",
             "mods_path": "./mods",
             "tick_rate": 30
@@ -114,8 +130,8 @@ mod tests {
     #[test]
     fn test_invalid_port() {
         let json = r#"{
-            "host": "127.0.0.1",
-            "port": 99999,
+            "local_ip": "127.0.0.1",
+            "local_port": 99999,
             "log_level": "info",
             "mods_path": "./mods",
             "tick_rate": 30

@@ -12,3 +12,6 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 schemars = { version = "0.8", features = ["preserve_order"] }
 stam_schema = { path = "../shared/stam_schema" }
+stam_protocol = { path = "../shared/stam_protocol" }
+tokio = { version = "1.0", features = ["rt-multi-thread", "signal", "time", "sync", "macros", "net", "io-util"] }
+atty = "0.2"

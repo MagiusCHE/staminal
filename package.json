@@ -25,6 +25,7 @@
     "doc": "docs"
   },
   "scripts": {
-    "server:debug": "cd apps/stam_server && cargo run --bin stam_server -- --config workspace_data/configs/develop.json"
+    "server:debug": "cd apps/stam_server && cargo run --bin stam_server -- --config workspace_data/configs/develop.json",
+    "client:debug": "cd apps/stam_client && STAM_HOST=localhost:9999 cargo run --bin stam_client"
   }
 }

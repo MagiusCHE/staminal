@@ -1,7 +1,9 @@
 {
-    "host": "127.0.0.1",
-    "port": 9999,
+    "name": "Development Server",
+    "local_ip": "127.0.0.1",
+    "local_port": 9999,
+    "public_uri": "stam://127.0.0.1:9999",
     "log_level": "debug",
-    "mods_path": "./workspace_data/mods",
+    "mods_path": "../mods",
     "tick_rate": 30
 }

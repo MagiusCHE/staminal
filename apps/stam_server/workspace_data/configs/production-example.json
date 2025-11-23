@@ -1,7 +1,9 @@
 {
-    "host": "0.0.0.0",
-    "port": 7777,
+    "name": "Production Server",
+    "local_ip": "0.0.0.0",
+    "local_port": 7777,
+    "public_uri": "stam://127.0.0.1:7777",
     "log_level": "info",
-    "mods_path": "./workspace_data/mods",
+    "mods_path": "../mods",
     "tick_rate": 64
 }

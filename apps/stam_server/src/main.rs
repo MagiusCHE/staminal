@@ -1,17 +1,28 @@
-use std::thread;
-use std::time::Duration;
 use std::env;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
-use tracing::{Level, info, debug};
+use tracing::{Level, info, debug, warn, error};
 use tracing_subscriber::FmtSubscriber;
 use tracing_subscriber::fmt::time::OffsetTime;
 use time::macros::format_description;
+use tokio::time::{Duration, interval};
+use tokio::signal;
+use tokio::net::TcpListener;
 
 use stam_schema::Validatable;
 
 mod config;
 use config::Config;
+
+mod primal_client;
+use primal_client::PrimalClient;
+
+mod game_client;
+
+mod client_manager;
+use client_manager::ClientManager;
 
 const VERSION: &str = "0.1.0-alpha";
 
@@ -40,7 +51,8 @@ struct Args {
     config: String,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args = Args::parse();
 
     // Load and validate configuration
@@ -76,6 +88,8 @@ fn main() {
         .with_max_level(log_level)
         .with_timer(timer)
         .with_thread_ids(true)
+        .with_target(true)
+        .with_ansi(atty::is(atty::Stream::Stdout))  // Auto-detect if stdout is a terminal
         .finish();
 
     tracing::subscriber::set_global_default(subscriber).expect("setting default subscriber failed");
@@ -87,8 +101,8 @@ fn main() {
     info!("Configuration: {}", args.config);
 
     debug!("Settings:");
-    debug!("  Host: {}", config.host);
-    debug!("  Port: {}", config.port);
+    debug!("  Local IP: {}", config.local_ip);
+    debug!("  Local Port: {}", config.local_port);
     debug!("  Mods Path: {}", config.mods_path);
     debug!("  Tick Rate: {} Hz", config.tick_rate);
     debug!("  Log Level: {}", config.log_level);
@@ -99,24 +113,108 @@ fn main() {
     // TODO: Implementare scansione directory mods_path
     info!("[CORE] Found {} potential differentiations.", mods_found);
 
-    // 2. Avvio Networking (Placeholder TCP/UDP)
-    let bind_addr = format!("{}:{}", config.host, config.port);
-    info!("[NET] Binding UDP on {}...", bind_addr);
-    // let server = Server::bind(&bind_addr).unwrap();
+    // 2. Avvio TCP Listener for Primal Clients
+    let bind_addr = format!("{}:{}", config.local_ip, config.local_port);
+    info!("[NET] Binding TCP on {}...", bind_addr);
 
-    info!("[CORE] Entering Main Loop. Waiting for intents...");
+    let listener = match TcpListener::bind(&bind_addr).await {
+        Ok(listener) => {
+            info!("[NET] TCP listener started successfully");
+            listener
+        }
+        Err(e) => {
+            error!("[NET] Failed to bind TCP listener on {}: {}", bind_addr, e);
+            error!("[CORE] Cannot start server without network listener");
+            return;
+        }
+    };
 
-    // 3. Main Loop (Game Loop)
-    let tick_duration = Duration::from_millis(1000 / config.tick_rate);
-    loop {
-        // In un vero engine, qui calcoleremmo il "Delta Time"
+    info!("[CORE] Entering Main Loop. Waiting for intents...(Use Ctrl+C to save & shutdown)");
 
-        // Simula lavoro del server
-        // server.process_packets();
+    // Create client manager for tracking active connections
+    let client_manager = ClientManager::new();
 
-        // Mantieni il tick rate stabile
-        thread::sleep(tick_duration);
-        break; // Rimuovere questo break in un vero server
+    // Setup shutdown flag
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = shutdown.clone();
+
+    // Spawn signal handler task
+    tokio::spawn(async move {
+        match signal::ctrl_c().await {
+            Ok(()) => {
+                info!("[CORE] Received shutdown signal (Ctrl+C)");
+                shutdown_clone.store(true, Ordering::Relaxed);
+            }
+            Err(err) => {
+                warn!("[CORE] Error listening for shutdown signal: {}", err);
+            }
+        }
+    });
+
+    // Setup SIGTERM handler (Linux/Unix only)
+    #[cfg(unix)]
+    {
+        let shutdown_clone = shutdown.clone();
+        tokio::spawn(async move {
+            match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+                Ok(mut stream) => {
+                    stream.recv().await;
+                    info!("[CORE] Received SIGTERM signal");
+                    shutdown_clone.store(true, Ordering::Relaxed);
+                }
+                Err(err) => {
+                    warn!("[CORE] Error setting up SIGTERM handler: {}", err);
+                }
+            }
+        });
     }
-    info!("[CORE] Shutting down server.");
+
+    // 3. Main Loop (Game Loop + TCP Accept)
+    let tick_duration = Duration::from_millis(1000 / config.tick_rate);
+    let mut tick_interval = interval(tick_duration);
+
+    loop {
+        tokio::select! {
+            // Handle tick for game loop
+            _ = tick_interval.tick() => {
+                // Check shutdown
+                if shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+
+                // In un vero engine, qui calcoleremmo il "Delta Time"
+                // Simula lavoro del server
+                // server.process_packets();
+            }
+
+            // Handle incoming TCP connections
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, addr)) => {
+                        info!("[NET] Accepted connection from {}", addr);
+
+                        // Clone config and client_manager for the spawned task
+                        let config_clone = config.clone();
+                        let client_manager_clone = client_manager.clone();
+
+                        // Spawn a task to handle this client
+                        tokio::spawn(async move {
+                            let client = PrimalClient::new(stream, addr, config_clone, client_manager_clone);
+                            client.handle().await;
+                        });
+                    }
+                    Err(e) => {
+                        error!("[NET] Error accepting connection: {}", e);
+                    }
+                }
+            }
+        }
+    }
+
+    info!("[CORE] Shutting down server gracefully...");
+
+    // Disconnect all active clients
+    client_manager.disconnect_all("Server is shutting down").await;
+    // TODO: Cleanup resources, save state, etc.
+    info!("[CORE] Shutdown complete.");
 }
