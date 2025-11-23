@@ -79,8 +79,13 @@ where
             }
         }
 
-        // Write target (dimmed)
-        write!(writer, "{}{}{}: ", dim_start, metadata.target(), dim_end)?;
+        // Remove "stam_server::" prefix from target, keep the rest (e.g., "config")
+        // Also hide "stam_server" when it appears alone
+        let target = metadata.target();
+        let display_target = target.strip_prefix("stam_server::").unwrap_or(target);
+        if !display_target.is_empty() && display_target != "stam_server" {
+            write!(writer, "{}{}{}: ", dim_start, display_target, dim_end)?;
+        }
 
         // Write fields
         ctx.field_format().format_fields(writer.by_ref(), event)?;

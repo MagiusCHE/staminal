@@ -18,6 +18,9 @@ pub struct ModVersionRange {
 pub struct ModConfig {
     /// Whether this mod is enabled
     pub enabled: bool,
+    /// Mod type (e.g., "bootstrap", "game")
+    #[serde(rename = "type")]
+    pub mod_type: String,
     /// URI for client to download this mod
     pub client_download: String,
     /// Version range for this mod
@@ -135,6 +138,14 @@ impl Config {
                     continue; // Skip disabled mods
                 }
 
+                // Validate mod_type is not empty
+                if mod_config.mod_type.is_empty() {
+                    return Err(format!(
+                        "Game '{}': Mod '{}' has empty 'type' field",
+                        game_id, mod_id
+                    ));
+                }
+
                 // Validate client_download is not empty
                 if mod_config.client_download.is_empty() {
                     return Err(format!(
@@ -167,6 +178,7 @@ impl Config {
                 .map(|(mod_id, mod_config)| {
                     ModInfo {
                         mod_id: mod_id.clone(),
+                        mod_type: mod_config.mod_type.clone(),
                         min_version: mod_config.versions.min.clone(),
                         max_version: mod_config.versions.max.clone(),
                         download_url: mod_config.client_download.clone(),

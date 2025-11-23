@@ -7,8 +7,12 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::registry::LookupSpan;
 use time::macros::format_description;
 use std::fmt as std_fmt;
+use std::path::PathBuf;
+use std::fs;
 use tokio::net::TcpStream;
 use sha2::{Sha512, Digest};
+use semver::Version;
+use serde::Deserialize;
 
 use stam_protocol::{PrimalMessage, PrimalStream, IntentType, GameMessage, GameStream};
 
@@ -18,12 +22,133 @@ use locale::LocaleManager;
 
 const VERSION: &str = "0.1.0-alpha";
 
+/// Get the Staminal config directory
+/// Linux: $XDG_CONFIG_HOME/staminal or $HOME/.config/staminal
+/// Windows: %APPDATA%/staminal
+/// macOS: $HOME/Library/Application Support/staminal
+/// If custom_home is provided, uses that directory directly
+fn get_staminal_config_dir(custom_home: Option<&str>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let config_dir = if let Some(home) = custom_home {
+        PathBuf::from(home)
+    } else {
+        dirs::config_dir()
+            .ok_or("Could not determine config directory")?
+            .join("staminal")
+    };
+
+    if !config_dir.exists() {
+        fs::create_dir_all(&config_dir)?;
+        debug!("Created Staminal config directory: {}", config_dir.display());
+    }
+
+    Ok(config_dir)
+}
+
+/// Get the Staminal data directory
+/// Linux: $XDG_DATA_HOME/staminal or $HOME/.local/share/staminal
+/// Windows: %APPDATA%/staminal (same as config on Windows)
+/// macOS: $HOME/Library/Application Support/staminal
+/// If custom_home is provided, uses that directory directly
+fn get_staminal_data_dir(custom_home: Option<&str>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let data_dir = if let Some(home) = custom_home {
+        PathBuf::from(home)
+    } else {
+        dirs::data_dir()
+            .ok_or("Could not determine data directory")?
+            .join("staminal")
+    };
+
+    if !data_dir.exists() {
+        fs::create_dir_all(&data_dir)?;
+        debug!("Created Staminal data directory: {}", data_dir.display());
+    }
+
+    Ok(data_dir)
+}
+
+/// Get the game-specific data directory
+/// Linux: $XDG_DATA_HOME/staminal/<game_id> or $HOME/.local/share/staminal/<game_id>
+/// Windows: %APPDATA%/staminal/<game_id>
+/// This directory contains mods and save files for the game
+fn get_game_root(game_id: &str, custom_home: Option<&str>) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let data_dir = get_staminal_data_dir(custom_home)?;
+    let game_root = data_dir.join(game_id);
+
+    // Create directory if it doesn't exist
+    let game_root_created = !game_root.exists();
+    if game_root_created {
+        fs::create_dir_all(&game_root)?;
+        debug!("Created game root directory: {}", game_root.display());
+    }
+
+    // Create mods directory for this game
+    let mods_dir = game_root.join("mods");
+    let mods_dir_created = !mods_dir.exists();
+    if mods_dir_created {
+        fs::create_dir_all(&mods_dir)?;
+        debug!("Created mods directory: {}", mods_dir.display());
+    }
+
+    Ok(game_root)
+}
+
 /// Compute SHA-512 hash of a string and return as hex string
 fn sha512_hash(input: &str) -> String {
     let mut hasher = Sha512::new();
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
     format!("{:x}", result)
+}
+
+/// Mod manifest structure
+#[derive(Debug, Deserialize)]
+struct ModManifest {
+    name: String,
+    version: String,
+    #[allow(dead_code)]
+    description: String,
+    #[allow(dead_code)]
+    entry_point: String,
+    #[allow(dead_code)]
+    priority: i32,
+}
+
+/// Validate if a version is within the specified range
+/// min_version and max_version should be in format "major.minor.patch"
+/// Returns Ok(()) if version is in range, Err with message otherwise
+fn validate_version_range(
+    mod_id: &str,
+    installed_version: &str,
+    min_version: &str,
+    max_version: &str,
+) -> Result<(), String> {
+    // Parse installed version
+    let installed = Version::parse(installed_version)
+        .map_err(|e| format!("Invalid installed version '{}' for mod '{}': {}", installed_version, mod_id, e))?;
+
+    // Parse min and max versions
+    let min = Version::parse(min_version)
+        .map_err(|e| format!("Invalid min_version '{}' for mod '{}': {}", min_version, mod_id, e))?;
+
+    let max = Version::parse(max_version)
+        .map_err(|e| format!("Invalid max_version '{}' for mod '{}': {}", max_version, mod_id, e))?;
+
+    // Check if installed version is within range (inclusive on both ends)
+    if installed < min {
+        return Err(format!(
+            "Mod '{}' version {} is below minimum required version {}",
+            mod_id, installed_version, min_version
+        ));
+    }
+
+    if installed > max {
+        return Err(format!(
+            "Mod '{}' version {} is above maximum supported version {}",
+            mod_id, installed_version, max_version
+        ));
+    }
+
+    Ok(())
 }
 
 /// Custom event formatter that displays thread IDs as #N instead of ThreadId(N)
@@ -69,7 +194,13 @@ where
             }
         }
 
-        write!(writer, "{}{}{}: ", dim_start, metadata.target(), dim_end)?;
+        // Remove "stam_client::" prefix from target, keep the rest (e.g., "locale")
+        // Also hide "stam_client" when it appears alone
+        let target = metadata.target();
+        let display_target = target.strip_prefix("stam_client::").unwrap_or(target);
+        if !display_target.is_empty() && display_target != "stam_client" {
+            write!(writer, "{}{}{}: ", dim_start, display_target, dim_end)?;
+        }
 
         ctx.field_format().format_fields(writer.by_ref(), event)?;
 
@@ -78,7 +209,16 @@ where
 }
 
 /// Connect to game server and maintain connection
-async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_id: &str, locale: &LocaleManager) -> Result<(), Box<dyn std::error::Error>> {
+async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_id: &str, locale: &LocaleManager, custom_home: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize game-specific directory
+    info!("Initializing directories for game '{}'...", game_id);
+    let game_root = get_game_root(game_id, custom_home)?;
+    let mods_dir = game_root.join("mods");
+
+    info!("Game directories:");
+    info!("  Root: {}", game_root.display());
+    info!("  Mods: {}", mods_dir.display());
+
     // Parse game server URI (stam://host:port)
     if !uri.starts_with("stam://") {
         return Err(locale.get_with_args("error-invalid-uri", Some(&fluent_args!{
@@ -157,8 +297,9 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
             if !mods.is_empty() {
                 info!("Received {} required mod(s):", mods.len());
                 for mod_info in &mods {
-                    info!("  - {} (v{} - v{}): {}",
+                    info!("  - {} [{}] (v{} - v{}): {}",
                         mod_info.mod_id,
+                        mod_info.mod_type,
                         mod_info.min_version,
                         mod_info.max_version,
                         mod_info.download_url
@@ -168,7 +309,78 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                 info!("No mods required for this game");
             }
 
-            // TODO: Validate and download required mods
+            // Validate bootstrap mods are present before continuing
+            info!("Validating bootstrap mods...");
+            let bootstrap_mods: Vec<_> = mods.iter()
+                .filter(|m| m.mod_type == "bootstrap")
+                .collect();
+
+            if !bootstrap_mods.is_empty() {
+                info!("Found {} bootstrap mod(s) to validate", bootstrap_mods.len());
+
+                for mod_info in &bootstrap_mods {
+                    let mod_dir = mods_dir.join(&mod_info.mod_id);
+
+                    // Check if mod directory exists
+                    if !mod_dir.exists() {
+                        error!("Bootstrap mod '{}' not found in {}",
+                            mod_info.mod_id,
+                            mod_dir.display()
+                        );
+                        error!("Required bootstrap mods must be present before the client can start");
+                        error!("TODO: Automatic download will be implemented in the future");
+                        return Err(format!(
+                            "Missing required bootstrap mod: {} (expected at {})",
+                            mod_info.mod_id,
+                            mod_dir.display()
+                        ).into());
+                    }
+
+                    info!("  ✓ {} found", mod_info.mod_id);
+
+                    // Read and validate mod version
+                    let manifest_path = mod_dir.join("manifest.json");
+                    if !manifest_path.exists() {
+                        error!("Bootstrap mod '{}' missing manifest.json", mod_info.mod_id);
+                        return Err(format!(
+                            "Bootstrap mod '{}' is missing manifest.json file",
+                            mod_info.mod_id
+                        ).into());
+                    }
+
+                    let manifest_content = fs::read_to_string(&manifest_path)
+                        .map_err(|e| format!("Failed to read manifest for mod '{}': {}", mod_info.mod_id, e))?;
+
+                    let manifest: ModManifest = serde_json::from_str(&manifest_content)
+                        .map_err(|e| format!("Failed to parse manifest for mod '{}': {}", mod_info.mod_id, e))?;
+
+                    // Validate version is within required range
+                    if let Err(e) = validate_version_range(
+                        &mod_info.mod_id,
+                        &manifest.version,
+                        &mod_info.min_version,
+                        &mod_info.max_version,
+                    ) {
+                        error!("{}", e);
+                        error!("Bootstrap mod version mismatch");
+                        error!("TODO: Automatic download/update will be implemented in the future");
+                        return Err(e.into());
+                    }
+
+                    info!("  ✓ {} version {} OK (required: {} - {})",
+                        mod_info.mod_id,
+                        manifest.version,
+                        mod_info.min_version,
+                        mod_info.max_version
+                    );
+                }
+
+                info!("All bootstrap mods validated successfully");
+            } else {
+                info!("No bootstrap mods required");
+            }
+
+            // TODO: Validate and download remaining (non-bootstrap) mods
         }
         Ok(GameMessage::Error { message }) => {
             // Message from server could be a locale ID
@@ -252,6 +464,11 @@ struct Args {
     /// Language/Locale to use (e.g., en-US, it-IT) - overrides system locale
     #[arg(short, long, env = "STAM_LANG")]
     lang: Option<String>,
+
+    /// Custom home directory for Staminal data and config (overrides system directories)
+    /// Useful for development and testing
+    #[arg(long, env = "STAM_HOME")]
+    home: Option<String>,
 }
 
 #[tokio::main]
@@ -279,6 +496,29 @@ async fn main() {
     info!("========================================");
     info!("   STAMINAL CLIENT v{}", VERSION);
     info!("========================================");
+
+    // Check if custom home is specified
+    let custom_home = args.home.as_deref();
+    if let Some(home) = custom_home {
+        info!("Using custom home directory: {}", home);
+    }
+
+    // Initialize Staminal directories
+    let _config_dir = match get_staminal_config_dir(custom_home) {
+        Ok(dir) => dir,
+        Err(e) => {
+            error!("Failed to initialize config directory: {}", e);
+            return;
+        }
+    };
+
+    let _data_dir = match get_staminal_data_dir(custom_home) {
+        Ok(dir) => dir,
+        Err(e) => {
+            error!("Failed to initialize data directory: {}", e);
+            return;
+        }
+    };
 
     // Initialize locale manager
     let locale = match LocaleManager::new(&args.assets, args.lang.as_deref()) {
@@ -432,7 +672,7 @@ async fn main() {
             info!("Attempting to connect to game server: {} (game_id: {}, uri: {})", first_server.name, first_server.game_id, first_server.uri);
 
             // Parse game server URI and connect
-            if let Err(e) = connect_to_game_server(&first_server.uri, &username, &password, &first_server.game_id, &locale).await {
+            if let Err(e) = connect_to_game_server(&first_server.uri, &username, &password, &first_server.game_id, &locale, custom_home).await {
                 error!("{}: {}", locale.get("connection-failed"), e);
             }
         }
