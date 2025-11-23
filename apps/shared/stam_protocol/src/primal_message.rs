@@ -56,6 +56,8 @@ pub enum PrimalMessage {
     Intent {
         /// Type of connection intent
         intent_type: IntentType,
+        /// Client version for compatibility check
+        client_version: String,
         /// Username
         username: String,
         /// SHA-512 hash of the password (not plaintext)

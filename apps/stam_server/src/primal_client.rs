@@ -60,8 +60,21 @@ impl PrimalClient {
 
         // Wait for Intent message
         match self.stream.read_primal_message().await {
-            Ok(PrimalMessage::Intent { intent_type, username, password_hash }) => {
-                debug!("Received Intent from {}: {:?}, user={}", addr, intent_type, username);
+            Ok(PrimalMessage::Intent { intent_type, client_version, username, password_hash }) => {
+                debug!("Received Intent from {}: {:?}, user={}, client_version={}", addr, intent_type, username, client_version);
+
+                // Validate client version (major.minor must match server)
+                if !self.is_version_compatible(&client_version) {
+                    error!("Version mismatch from {}: client={}, server={}", addr, client_version, VERSION);
+                    let _ = self.stream.write_primal_message(&PrimalMessage::Error {
+                        message: format!("Version incompatible. Server requires {}.x", self.get_major_minor(VERSION)),
+                    }).await;
+                    client_manager.unregister_client(&addr).await;
+                    info!("Client {} disconnected (version mismatch)", addr);
+                    return;
+                }
+
+                debug!("Client version {} compatible with server {}", client_version, VERSION);
 
                 match intent_type {
                     IntentType::PrimalLogin => {
@@ -186,6 +199,25 @@ impl PrimalClient {
         } else {
             // No public_uri configured, return empty list
             Vec::new()
+        }
+    }
+
+    /// Check if client version is compatible with server version
+    /// Returns true if major.minor versions match
+    fn is_version_compatible(&self, client_version: &str) -> bool {
+        let server_major_minor = self.get_major_minor(VERSION);
+        let client_major_minor = self.get_major_minor(client_version);
+
+        server_major_minor == client_major_minor
+    }
+
+    /// Extract major.minor from a version string (e.g., "0.1.0-alpha" -> "0.1")
+    fn get_major_minor(&self, version: &str) -> String {
+        let parts: Vec<&str> = version.split('.').collect();
+        if parts.len() >= 2 {
+            format!("{}.{}", parts[0], parts[1])
+        } else {
+            version.to_string()
         }
     }
 }
