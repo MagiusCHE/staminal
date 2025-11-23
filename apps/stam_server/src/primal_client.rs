@@ -61,8 +61,8 @@ impl PrimalClient {
 
         // Wait for Intent message
         match self.stream.read_primal_message().await {
-            Ok(PrimalMessage::Intent { intent_type, client_version, username, password_hash }) => {
-                debug!("Received Intent from {}: {:?}, user={}, client_version={}", addr, intent_type, username, client_version);
+            Ok(PrimalMessage::Intent { intent_type, client_version, username, password_hash, game_id }) => {
+                debug!("Received Intent from {}: {:?}, user={}, client_version={}, game_id={:?}", addr, intent_type, username, client_version, game_id);
 
                 // Validate client version (major.minor must match server)
                 if !self.is_version_compatible(&client_version) {
@@ -85,9 +85,30 @@ impl PrimalClient {
                         info!("Client {} disconnected", addr);
                     }
                     IntentType::GameLogin => {
+                        // Validate game_id is provided and exists
+                        if let Some(ref gid) = game_id {
+                            if !self.config.games.contains_key(gid) {
+                                error!("Invalid game_id '{}' from {}", gid, addr);
+                                let _ = self.stream.write_primal_message(&PrimalMessage::Error {
+                                    message: format!("Invalid game_id: {}", gid),
+                                }).await;
+                                client_manager.unregister_client(&addr).await;
+                                info!("Client {} disconnected (invalid game_id)", addr);
+                                return;
+                            }
+                        } else {
+                            error!("Missing game_id for GameLogin from {}", addr);
+                            let _ = self.stream.write_primal_message(&PrimalMessage::Error {
+                                message: "game_id required for GameLogin".to_string(),
+                            }).await;
+                            client_manager.unregister_client(&addr).await;
+                            info!("Client {} disconnected (missing game_id)", addr);
+                            return;
+                        }
+
                         // Unregister as Primal before transitioning to Game
                         client_manager.unregister_client(&addr).await;
-                        self.handle_game_login(username, password_hash).await;
+                        self.handle_game_login(username, password_hash, game_id.unwrap()).await;
                         info!("Client {} disconnected", addr);
                     }
                     IntentType::ServerLogin => {
@@ -156,8 +177,8 @@ impl PrimalClient {
     }
 
     /// Handle GameLogin intent - authenticate and transition to GameClient
-    async fn handle_game_login(mut self, username: String, password_hash: String) {
-        debug!("Processing GameLogin for user '{}'", username);
+    async fn handle_game_login(mut self, username: String, password_hash: String, game_id: String) {
+        debug!("Processing GameLogin for user '{}' on game '{}'", username, game_id);
 
         // Authenticate with provided credentials
         let authenticated = self.authenticate(&username, &password_hash, IntentType::GameLogin).await;
@@ -170,10 +191,10 @@ impl PrimalClient {
             return;
         }
 
-        info!("Game user '{}' authenticated, transitioning to GameClient", username);
+        info!("Game user '{}' authenticated for game '{}', transitioning to GameClient", username, game_id);
 
         // Create GameClient and hand off the connection
-        let game_client = GameClient::new(self.stream, self.addr, username, self.client_manager);
+        let game_client = GameClient::new(self.stream, self.addr, username, game_id, self.client_manager);
         game_client.handle().await;
     }
 
@@ -190,13 +211,18 @@ impl PrimalClient {
     }
 
     /// Get list of available game servers from configuration
-    /// Returns empty list if public_uri is not configured
+    /// Returns one ServerInfo for each game in the configuration
+    /// Returns empty list if public_uri is not configured or no games available
     fn get_server_list(&self) -> Vec<ServerInfo> {
         if let Some(uri) = &self.config.public_uri {
-            vec![ServerInfo {
-                name: self.config.name.clone(),
-                uri: uri.clone(),
-            }]
+            // Create a ServerInfo for each configured game
+            self.config.games.iter().map(|(game_id, game_config)| {
+                ServerInfo {
+                    game_id: game_id.clone(),
+                    name: game_config.name.clone(),
+                    uri: uri.clone(),
+                }
+            }).collect()
         } else {
             // No public_uri configured, return empty list
             Vec::new()

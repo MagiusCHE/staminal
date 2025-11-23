@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 /// Server information for server list
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServerInfo {
-    /// Server name (human-readable)
+    /// Game ID (unique identifier for the game)
+    pub game_id: String,
+    /// Game name (human-readable)
     pub name: String,
     /// Server URI (e.g., "stam://game.example.com:9999")
     pub uri: String,
@@ -62,6 +64,8 @@ pub enum PrimalMessage {
         username: String,
         /// SHA-512 hash of the password (not plaintext)
         password_hash: String,
+        /// Game ID (required for GameLogin, optional for PrimalLogin)
+        game_id: Option<String>,
     },
 }
 

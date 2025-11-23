@@ -78,7 +78,7 @@ where
 }
 
 /// Connect to game server and maintain connection
-async fn connect_to_game_server(uri: &str, username: &str, password: &str, locale: &LocaleManager) -> Result<(), Box<dyn std::error::Error>> {
+async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_id: &str, locale: &LocaleManager) -> Result<(), Box<dyn std::error::Error>> {
     // Parse game server URI (stam://host:port)
     if !uri.starts_with("stam://") {
         return Err(locale.get_with_args("error-invalid-uri", Some(&fluent_args!{
@@ -143,6 +143,7 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, local
         client_version: VERSION.to_string(),
         username: username.to_string(),
         password_hash,
+        game_id: Some(game_id.to_string()),
     };
 
     stream.write_primal_message(&intent).await?;
@@ -385,6 +386,7 @@ async fn main() {
         client_version: VERSION.to_string(),
         username: username.clone(),
         password_hash,
+        game_id: None,  // Not needed for PrimalLogin
     };
 
     if let Err(e) = stream.write_primal_message(&intent).await {
@@ -405,15 +407,15 @@ async fn main() {
             }
 
             for (i, server) in servers.iter().enumerate() {
-                info!("  [{}] {} - {}", i + 1, server.name, server.uri);
+                info!("  [{}] {} (game_id: {}) - {}", i + 1, server.name, server.game_id, server.uri);
             }
 
             // Connect to first server in list
             let first_server = &servers[0];
-            info!("Attempting to connect to game server: {} ({})", first_server.name, first_server.uri);
+            info!("Attempting to connect to game server: {} (game_id: {}, uri: {})", first_server.name, first_server.game_id, first_server.uri);
 
             // Parse game server URI and connect
-            if let Err(e) = connect_to_game_server(&first_server.uri, &username, &password, &locale).await {
+            if let Err(e) = connect_to_game_server(&first_server.uri, &username, &password, &first_server.game_id, &locale).await {
                 error!("{}: {}", locale.get("connection-failed"), e);
             }
         }

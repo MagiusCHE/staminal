@@ -1,6 +1,29 @@
 use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
 use stam_schema::Validatable;
+use std::collections::HashMap;
+
+/// Mod configuration for a game
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct ModConfig {
+    /// Whether this mod is enabled
+    pub enabled: bool,
+    /// URI for client to download this mod (optional)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_download: Option<String>,
+}
+
+/// Game configuration
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+pub struct GameConfig {
+    /// Game name (human-readable)
+    pub name: String,
+    /// Game version
+    pub version: String,
+    /// Mods configuration for this game
+    #[serde(default)]
+    pub mods: HashMap<String, ModConfig>,
+}
 
 /// Server configuration
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -42,6 +65,11 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schemars(description = "Public URI advertised in server list (e.g., 'stam://game.example.com:9999')")]
     pub public_uri: Option<String>,
+
+    /// Games configuration
+    #[serde(default)]
+    #[schemars(description = "Available games on this server")]
+    pub games: HashMap<String, GameConfig>,
 }
 
 fn default_name() -> String {
@@ -78,6 +106,7 @@ impl Default for Config {
             mods_path: default_mods_path(),
             tick_rate: default_tick_rate(),
             public_uri: None,
+            games: HashMap::new(),
         }
     }
 }

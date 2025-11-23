@@ -15,15 +15,17 @@ pub struct GameClient {
     addr: SocketAddr,
     /// Username after authentication
     username: String,
+    /// Game ID the client is connected to
+    game_id: String,
     /// Client manager for tracking connections
     client_manager: ClientManager,
 }
 
 impl GameClient {
     /// Create a new GameClient from an authenticated connection
-    pub fn new(stream: TcpStream, addr: SocketAddr, username: String, client_manager: ClientManager) -> Self {
-        info!("Game client created for user '{}' from {}", username, addr);
-        Self { stream, addr, username, client_manager }
+    pub fn new(stream: TcpStream, addr: SocketAddr, username: String, game_id: String, client_manager: ClientManager) -> Self {
+        info!("Game client created for user '{}' on game '{}' from {}", username, game_id, addr);
+        Self { stream, addr, username, game_id, client_manager }
     }
 
     /// Get the client's remote address
@@ -34,6 +36,11 @@ impl GameClient {
     /// Get the client's username
     pub fn username(&self) -> &str {
         &self.username
+    }
+
+    /// Get the game ID
+    pub fn game_id(&self) -> &str {
+        &self.game_id
     }
 
     /// Handle the game client connection
