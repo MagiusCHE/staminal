@@ -646,11 +646,11 @@ dependencies = [
  "dirs",
  "fluent",
  "fluent-bundle",
- "rquickjs",
  "semver",
  "serde",
  "serde_json",
  "sha2",
+ "stam_mod_runtimes",
  "stam_protocol",
  "sys-locale",
  "time",
@@ -658,6 +658,14 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "unic-langid",
+]
+
+[[package]]
+name = "stam_mod_runtimes"
+version = "0.1.0"
+dependencies = [
+ "rquickjs",
+ "tracing",
 ]
 
 [[package]]

@@ -21,13 +21,11 @@ mod locale;
 use locale::LocaleManager;
 
 mod app_paths;
-mod runtime_api;
-mod js_runtime;
 mod mod_runtime;
 
 use app_paths::AppPaths;
-use js_runtime::{JsRuntime, ScriptRuntimeConfig};
-use mod_runtime::ModRuntimeManager;
+use mod_runtime::{ModRuntimeManager, JsRuntimeAdapter, JsRuntimeConfig};
+use mod_runtime::js_adapter::create_js_runtime_config;
 
 const VERSION: &str = "0.1.0-alpha";
 
@@ -328,9 +326,9 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
 
                 // Initialize JavaScript runtime (one shared runtime for all JS mods)
                 info!("Initializing JavaScript runtime...");
-                let runtime_config = ScriptRuntimeConfig::new(app_paths.clone(), &game_id)?;
-                let js_runtime = JsRuntime::new(runtime_config)?;
-                runtime_manager.register_js_runtime(mod_runtime::js_adapter::JsRuntimeAdapter::new(js_runtime));
+                let runtime_config = create_js_runtime_config(&app_paths, &game_id)?;
+                let js_adapter = JsRuntimeAdapter::new(runtime_config)?;
+                runtime_manager.register_adapter(stam_mod_runtimes::RuntimeType::JavaScript, Box::new(js_adapter));
 
                 // Load bootstrap mods (automatically uses the correct runtime based on file extension)
                 info!("Loading bootstrap mods...");

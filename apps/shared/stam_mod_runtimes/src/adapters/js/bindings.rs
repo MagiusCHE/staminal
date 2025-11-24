@@ -1,13 +1,15 @@
+//! JavaScript bindings for runtime APIs
+//!
+//! This module provides the bridge between Rust APIs and JavaScript contexts.
+
 use rquickjs::{Ctx, Function, Object};
 use rquickjs::function::Rest;
-use crate::runtime_api::ConsoleApi;
+use crate::api::{ConsoleApi, AppApi};
 
 /// Setup console API in the JavaScript context
 ///
 /// Provides console.log, console.error, console.warn, console.info, console.debug
 /// All functions accept variadic arguments and read the global __MOD_ID__ variable to prefix log messages
-///
-/// This is a JavaScript binding for the runtime-agnostic ConsoleApi
 pub fn setup_console_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
     let globals = ctx.globals();
 
@@ -56,6 +58,37 @@ pub fn setup_console_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
 
     // Register console object globally
     globals.set("console", console)?;
+
+    Ok(())
+}
+
+/// Setup process API in the JavaScript context
+///
+/// Provides process.app.data_path and process.app.config_path
+pub fn setup_process_api(ctx: Ctx, app_api: AppApi) -> Result<(), rquickjs::Error> {
+    let globals = ctx.globals();
+
+    // Create process object
+    let process = Object::new(ctx.clone())?;
+
+    // Create process.app object
+    let app = Object::new(ctx.clone())?;
+
+    // Get paths from AppApi
+    let data_path = app_api.data_path();
+    let config_path = app_api.config_path();
+
+    // Set process.app.data_path
+    app.set("data_path", data_path)?;
+
+    // Set process.app.config_path
+    app.set("config_path", config_path)?;
+
+    // Register app object in process
+    process.set("app", app)?;
+
+    // Register process object globally
+    globals.set("process", process)?;
 
     Ok(())
 }

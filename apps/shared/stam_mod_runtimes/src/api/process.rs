@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use std::fs;
 
 /// Process API implementation
+#[derive(Clone)]
 pub struct ProcessApi {
     data_dir: PathBuf,
     config_dir: PathBuf,
@@ -80,6 +81,7 @@ impl ProcessApi {
 }
 
 /// Application-specific API (part of process.app)
+#[derive(Clone)]
 pub struct AppApi {
     process_api: ProcessApi,
 }
