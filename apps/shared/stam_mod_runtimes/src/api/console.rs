@@ -16,28 +16,28 @@ impl ConsoleApi {
     }
 
     /// Log an info message
-    pub fn log(mod_id: &str, message: &str) {
-        info!("\"{}\" {}", mod_id, message);
+    pub fn log(runtime_type: &str, mod_id: &str, message: &str) {
+        info!(runtime_type = runtime_type, mod_id = mod_id, "{}", message);
     }
 
     /// Log an error message
-    pub fn error(mod_id: &str, message: &str) {
-        error!("\"{}\" {}", mod_id, message);
+    pub fn error(runtime_type: &str, mod_id: &str, message: &str) {
+        error!(runtime_type = runtime_type, mod_id = mod_id, "{}", message);
     }
 
     /// Log a warning message
-    pub fn warn(mod_id: &str, message: &str) {
-        warn!("\"{}\" {}", mod_id, message);
+    pub fn warn(runtime_type: &str, mod_id: &str, message: &str) {
+        warn!(runtime_type = runtime_type, mod_id = mod_id, "{}", message);
     }
 
     /// Log an info message (alias for log)
-    pub fn info(mod_id: &str, message: &str) {
-        info!("\"{}\" {}", mod_id, message);
+    pub fn info(runtime_type: &str, mod_id: &str, message: &str) {
+        info!(runtime_type = runtime_type, mod_id = mod_id, "{}", message);
     }
 
     /// Log a debug message
-    pub fn debug(mod_id: &str, message: &str) {
-        debug!("\"{}\" {}", mod_id, message);
+    pub fn debug(runtime_type: &str, mod_id: &str, message: &str) {
+        debug!(runtime_type = runtime_type, mod_id = mod_id, "{}", message);
     }
 }
 

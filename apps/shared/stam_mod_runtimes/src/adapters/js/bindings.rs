@@ -20,7 +20,7 @@ pub fn setup_console_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
     let log_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
         let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
         let message = args.0.join(" ");
-        ConsoleApi::log(&mod_id, &message);
+        ConsoleApi::log("js", &mod_id, &message);
     })?;
     console.set("log", log_fn)?;
 
@@ -28,7 +28,7 @@ pub fn setup_console_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
     let error_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
         let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
         let message = args.0.join(" ");
-        ConsoleApi::error(&mod_id, &message);
+        ConsoleApi::error("js", &mod_id, &message);
     })?;
     console.set("error", error_fn)?;
 
@@ -36,7 +36,7 @@ pub fn setup_console_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
     let warn_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
         let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
         let message = args.0.join(" ");
-        ConsoleApi::warn(&mod_id, &message);
+        ConsoleApi::warn("js", &mod_id, &message);
     })?;
     console.set("warn", warn_fn)?;
 
@@ -44,7 +44,7 @@ pub fn setup_console_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
     let info_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
         let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
         let message = args.0.join(" ");
-        ConsoleApi::info(&mod_id, &message);
+        ConsoleApi::info("js", &mod_id, &message);
     })?;
     console.set("info", info_fn)?;
 
@@ -52,7 +52,7 @@ pub fn setup_console_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
     let debug_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
         let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
         let message = args.0.join(" ");
-        ConsoleApi::debug(&mod_id, &message);
+        ConsoleApi::debug("js", &mod_id, &message);
     })?;
     console.set("debug", debug_fn)?;
 

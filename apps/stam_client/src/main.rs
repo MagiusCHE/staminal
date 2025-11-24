@@ -5,6 +5,8 @@ use tracing_subscriber::fmt::{self, format::Writer, FmtContext, FormatEvent, For
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::field::Visit;
+use tracing::field::Field;
 use time::macros::format_description;
 use std::fmt as std_fmt;
 use std::path::PathBuf;
@@ -88,6 +90,34 @@ fn validate_version_range(
     Ok(())
 }
 
+/// Visitor to extract runtime_type and mod_id fields
+#[derive(Default)]
+struct FieldExtractor {
+    runtime_type: Option<String>,
+    mod_id: Option<String>,
+    message: Option<String>,
+}
+
+impl Visit for FieldExtractor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        match field.name() {
+            "runtime_type" => self.runtime_type = Some(value.to_string()),
+            "mod_id" => self.mod_id = Some(value.to_string()),
+            "message" => self.message = Some(value.to_string()),
+            _ => {}
+        }
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std_fmt::Debug) {
+        match field.name() {
+            "runtime_type" => self.runtime_type = Some(format!("{:?}", value).trim_matches('"').to_string()),
+            "mod_id" => self.mod_id = Some(format!("{:?}", value).trim_matches('"').to_string()),
+            "message" => self.message = Some(format!("{:?}", value).trim_matches('"').to_string()),
+            _ => {}
+        }
+    }
+}
+
 /// Custom event formatter that displays thread IDs as #N instead of ThreadId(N)
 struct CustomFormatter<T> {
     timer: T,
@@ -131,15 +161,27 @@ where
             }
         }
 
-        // Remove "stam_client::" prefix from target, keep the rest (e.g., "locale")
-        // Also hide "stam_client" when it appears alone
-        let target = metadata.target();
-        let display_target = target.strip_prefix("stam_client::").unwrap_or(target);
-        if !display_target.is_empty() && display_target != "stam_client" {
-            write!(writer, "{}{}{}: ", dim_start, display_target, dim_end)?;
-        }
+        // Extract runtime_type and mod_id fields if present
+        let mut extractor = FieldExtractor::default();
+        event.record(&mut extractor);
 
-        ctx.field_format().format_fields(writer.by_ref(), event)?;
+        // If both runtime_type and mod_id are present, format as "runtime_type::mod_id:"
+        if let (Some(rt), Some(mid)) = (&extractor.runtime_type, &extractor.mod_id) {
+            write!(writer, "{}{}::{}{}: ", dim_start, rt, mid, dim_end)?;
+            // Print the message if present
+            if let Some(msg) = &extractor.message {
+                write!(writer, "{}", msg)?;
+            }
+        } else {
+            // Otherwise use the default target formatting
+            let target = metadata.target();
+            let display_target = target.strip_prefix("stam_client::").unwrap_or(target);
+            if !display_target.is_empty() && display_target != "stam_client" {
+                write!(writer, "{}{}{}: ", dim_start, display_target, dim_end)?;
+            }
+            // Use default field formatting
+            ctx.field_format().format_fields(writer.by_ref(), event)?;
+        }
 
         writeln!(writer)
     }
