@@ -1,10 +1,11 @@
-use rquickjs::{Ctx, Object};
+use rquickjs::{Ctx, Function, Object};
 use std::path::PathBuf;
 use crate::runtime_api::AppApi;
 
 /// Setup process API in the JavaScript context
 ///
-/// Provides process.app.data_path and process.app.config_path as string properties
+/// Provides process.app.data_path, process.app.config_path as string properties
+/// and process.exit(code) as a function
 ///
 /// This is a JavaScript binding for the runtime-agnostic ProcessApi/AppApi
 pub fn setup_process_api(ctx: Ctx, data_dir: PathBuf, config_dir: PathBuf) -> Result<(), rquickjs::Error> {
@@ -27,6 +28,13 @@ pub fn setup_process_api(ctx: Ctx, data_dir: PathBuf, config_dir: PathBuf) -> Re
 
     // Register app object to process
     process.set("app", app)?;
+
+    // Create process.exit() function
+    // Note: exit never returns, but we need to satisfy the type checker
+    let exit_fn = Function::new(ctx.clone(), |code: i32| -> () {
+        std::process::exit(code)
+    })?;
+    process.set("exit", exit_fn)?;
 
     // Register process object globally
     globals.set("process", process)?;

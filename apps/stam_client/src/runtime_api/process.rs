@@ -28,6 +28,11 @@ impl ProcessApi {
         Self::to_absolute_path(&self.config_dir)
     }
 
+    /// Exit the process with the specified exit code
+    pub fn exit(&self, code: i32) -> ! {
+        std::process::exit(code)
+    }
+
     /// Convert a path to absolute and normalized form
     fn to_absolute_path(path: &PathBuf) -> String {
         // Convert to absolute path using canonicalize if path exists
