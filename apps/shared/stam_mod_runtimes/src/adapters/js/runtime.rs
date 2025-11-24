@@ -1,8 +1,9 @@
-use rquickjs::{Context, Runtime, Module, Object};
+use rquickjs::{AsyncContext, AsyncRuntime, Module, Object};
 use rquickjs::loader::{ModuleLoader, FileResolver, Loader};
 use std::path::{Path, PathBuf};
 use std::fs;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tracing::{info, error, debug};
 
 use crate::{RuntimeAdapter, ModReturnValue};
@@ -36,18 +37,18 @@ impl Loader for FilesystemLoader {
 
 /// Represents a loaded mod with its own isolated context
 struct LoadedMod {
-    context: Context,
+    context: AsyncContext,
     module_path: String,
     #[allow(dead_code)]
-    mod_dir: PathBuf,  // Directory containing the mod (for resolving relative imports)
+    mod_dir: PathBuf,
 }
 
-/// JavaScript runtime adapter for QuickJS
+/// JavaScript runtime adapter for QuickJS with async support
 ///
 /// Each mod gets its own isolated Context to prevent interference between mods.
 /// All contexts share the same Runtime with a shared module loader.
 pub struct JsRuntimeAdapter {
-    runtime: Runtime,
+    runtime: Arc<AsyncRuntime>,
     config: JsRuntimeConfig,
     /// Map of mod_id to loaded mod instance
     loaded_mods: HashMap<String, LoadedMod>,
@@ -56,35 +57,33 @@ pub struct JsRuntimeAdapter {
 }
 
 impl JsRuntimeAdapter {
-    /// Create a new JavaScript runtime adapter with QuickJS
+    /// Create a new JavaScript runtime adapter with QuickJS async support
     ///
     /// # Arguments
     /// * `config` - Runtime configuration containing game directories
     pub fn new(config: JsRuntimeConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        debug!("Initializing QuickJS runtime for mods");
+        debug!("Initializing QuickJS async runtime for mods");
 
-        let runtime = Runtime::new()?;
-
-        // Configure custom filesystem loader with resolver
-        // The resolver handles path resolution, the loader reads files from disk
-        let resolver = FileResolver::default()
-            .with_pattern("**/*.js");  // Match .js files
-        let loader = (FilesystemLoader, ModuleLoader::default());
-        runtime.set_loader(resolver, loader);
+        let runtime = AsyncRuntime::new()?;
 
         let js_runtime = Self {
-            runtime,
+            runtime: Arc::new(runtime),
             config,
             loaded_mods: HashMap::new(),
             mod_dirs: Vec::new(),
         };
 
-        info!("JavaScript runtime initialized successfully");
+        info!("JavaScript async runtime initialized successfully");
         Ok(js_runtime)
     }
 
+    /// Get a clone of the async runtime for the event loop
+    pub fn get_runtime(&self) -> Arc<AsyncRuntime> {
+        Arc::clone(&self.runtime)
+    }
+
     /// Setup all global APIs in a context
-    fn setup_global_apis(&self, context: &Context) -> Result<(), Box<dyn std::error::Error>> {
+    async fn setup_global_apis(&self, context: &AsyncContext) -> Result<(), Box<dyn std::error::Error>> {
         let game_data_dir = self.config.game_data_dir().clone();
         let game_config_dir = self.config.game_config_dir().clone();
 
@@ -96,11 +95,11 @@ impl JsRuntimeAdapter {
             let app_api = AppApi::new(game_data_dir, game_config_dir);
             bindings::setup_process_api(ctx.clone(), app_api)?;
 
-            // Future: Allow dynamic API registration via ApiRegistry
-            // This would enable client/server to register different APIs
+            // Register timer API (setTimeout, setInterval, etc.)
+            bindings::setup_timer_api(ctx.clone())?;
 
             Ok::<(), rquickjs::Error>(())
-        })?;
+        }).await?;
 
         Ok(())
     }
@@ -156,13 +155,10 @@ impl JsRuntimeAdapter {
 
             // Add stack trace if available
             if !stack_trace.is_empty() {
-                // Check if stack already contains the error message
-                // QuickJS sometimes includes it, sometimes doesn't
                 if !stack_trace.starts_with(&error_name) {
                     output.push('\n');
                     output.push_str(&stack_trace);
                 } else {
-                    // Stack already has the error message, just use it
                     output = stack_trace;
                 }
             }
@@ -181,10 +177,9 @@ impl JsRuntimeAdapter {
         output.push_str("Error: Unknown JavaScript error");
         output
     }
-}
 
-impl RuntimeAdapter for JsRuntimeAdapter {
-    fn load_mod(&mut self, mod_path: &Path, mod_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// Load a mod asynchronously
+    pub async fn load_mod_async(&mut self, mod_path: &Path, mod_id: &str) -> Result<(), Box<dyn std::error::Error>> {
         debug!("Loading JavaScript module: {} from {}", mod_id, mod_path.display());
 
         // Get the mod directory (parent of the entry point file)
@@ -194,12 +189,10 @@ impl RuntimeAdapter for JsRuntimeAdapter {
 
         // Add mod directory to the list of search paths and update loader
         if !self.mod_dirs.contains(&mod_dir) {
-            // Add to the list first
             self.mod_dirs.push(mod_dir.clone());
 
-            // Update the loader with all mod directories
             let mut resolver = FileResolver::default()
-                .with_pattern("**/*.js");  // Match .js files
+                .with_pattern("**/*.js");
 
             for dir in &self.mod_dirs {
                 let dir_str = dir.to_str()
@@ -208,102 +201,102 @@ impl RuntimeAdapter for JsRuntimeAdapter {
             }
 
             let loader = (FilesystemLoader, ModuleLoader::default());
-            self.runtime.set_loader(resolver, loader);
+            self.runtime.set_loader(resolver, loader).await;
         }
 
-        // Create a new isolated Context for this mod
-        let context = Context::full(&self.runtime)?;
+        // Create a new isolated AsyncContext for this mod
+        let context = AsyncContext::full(&self.runtime).await?;
 
         // Setup global APIs for this mod's context
-        self.setup_global_apis(&context)?;
+        self.setup_global_apis(&context).await?;
 
         // Set global __MOD_ID__ variable for console logging
         context.with(|ctx| {
             ctx.globals().set("__MOD_ID__", mod_id)?;
             Ok::<(), rquickjs::Error>(())
-        })?;
+        }).await?;
 
         // Get the filename relative to mod directory for import
         let filename = mod_path.file_name()
             .ok_or_else(|| format!("Cannot determine filename for '{}'", mod_path.display()))?
             .to_str()
-            .ok_or_else(|| format!("Filename contains invalid UTF-8: {}", mod_path.display()))?;
+            .ok_or_else(|| format!("Filename contains invalid UTF-8: {}", mod_path.display()))?
+            .to_string();
 
-        // Load the module from the filesystem using import()
-        // Use filename relative to mod directory (which is in the resolver path)
-        context.with(|ctx| {
-            debug!("Importing module '{}' for mod '{}'", filename, mod_id);
+        let mod_id_owned = mod_id.to_string();
 
-            match Module::import(&ctx, filename) {
+        // Load the module from the filesystem
+        // Use Result<String, String> for ParallelSend compatibility
+        let result: Result<String, String> = context.with(|ctx| {
+            debug!("Importing module '{}' for mod '{}'", filename, mod_id_owned);
+
+            match Module::import(&ctx, filename.clone()) {
                 Ok(promise) => {
-                    // Wait for the module to finish loading
                     match promise.finish::<()>() {
                         Ok(_) => {
-                            info!("Mod '{}' loaded successfully", mod_id);
-                            Ok::<(), Box<dyn std::error::Error>>(())
+                            info!("Mod '{}' loaded successfully", mod_id_owned);
+                            Ok(filename.clone())
                         }
                         Err(e) => {
                             let error_msg = Self::format_js_error(&ctx, &e);
                             error!("\n{}", error_msg);
-                            Err(format!("JavaScript error in mod '{}'", mod_id).into())
+                            Err(format!("JavaScript error in mod '{}'", mod_id_owned))
                         }
                     }
                 }
                 Err(e) => {
                     let error_msg = Self::format_js_error(&ctx, &e);
                     error!("\n{}", error_msg);
-                    Err(format!("JavaScript error in mod '{}'", mod_id).into())
+                    Err(format!("JavaScript error in mod '{}'", mod_id_owned))
                 }
             }
-        })?;
+        }).await;
 
-        // Store the loaded mod with the relative filename (not absolute path)
-        // This is important because we need to use the same import path that the resolver understands
+        result.map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+
+        // Store the loaded mod
         self.loaded_mods.insert(mod_id.to_string(), LoadedMod {
             context,
-            module_path: filename.to_string(),  // Use relative filename, not absolute path
+            module_path: filename.to_string(),
             mod_dir,
         });
 
         Ok(())
     }
 
-    fn call_mod_function(&mut self, mod_id: &str, function_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// Call a mod function asynchronously
+    pub async fn call_mod_function_async(&mut self, mod_id: &str, function_name: &str) -> Result<(), Box<dyn std::error::Error>> {
         debug!("Calling JavaScript function '{}' for mod '{}'", function_name, mod_id);
 
-        // Get the loaded mod
         let loaded_mod = self.loaded_mods.get(mod_id)
             .ok_or_else(|| format!("Mod '{}' not loaded", mod_id))?;
 
-        // Access the module namespace and call the exported function
-        loaded_mod.context.with(|ctx| {
-            let module_path = &loaded_mod.module_path;
+        let module_path = loaded_mod.module_path.clone();
+        let mod_id_owned = mod_id.to_string();
+        let function_name_owned = function_name.to_string();
 
-            // Import the module (uses cached version if already loaded)
+        // Use Result<(), String> for ParallelSend compatibility
+        let result: Result<(), String> = loaded_mod.context.with(|ctx| {
             match Module::import(&ctx, module_path.clone()) {
                 Ok(promise) => {
-                    // Wait for import to complete and get the module namespace
                     match promise.finish::<Object>() {
                         Ok(module_namespace) => {
-                            // Try to get the exported function from the namespace
-                            match module_namespace.get::<_, rquickjs::Function>(function_name) {
+                            match module_namespace.get::<_, rquickjs::Function>(&function_name_owned) {
                                 Ok(func) => {
-                                    // Call the function
                                     match func.call::<(), ()>(()) {
                                         Ok(_) => {
-                                            debug!("Function '{}' executed successfully for mod '{}'", function_name, mod_id);
+                                            debug!("Function '{}' executed successfully for mod '{}'", function_name_owned, mod_id_owned);
                                             Ok(())
                                         }
                                         Err(e) => {
                                             let error_msg = Self::format_js_error(&ctx, &e);
                                             error!("\n{}", error_msg);
-                                            Err(format!("JavaScript error in '{}' for mod '{}'", function_name, mod_id).into())
+                                            Err(format!("JavaScript error in '{}' for mod '{}'", function_name_owned, mod_id_owned))
                                         }
                                     }
                                 }
                                 Err(_) => {
-                                    // Function might not exist (optional)
-                                    debug!("Function '{}' not found or not exported for mod '{}'", function_name, mod_id);
+                                    debug!("Function '{}' not found or not exported for mod '{}'", function_name_owned, mod_id_owned);
                                     Ok(())
                                 }
                             }
@@ -311,16 +304,92 @@ impl RuntimeAdapter for JsRuntimeAdapter {
                         Err(e) => {
                             let error_msg = Self::format_js_error(&ctx, &e);
                             error!("\n{}", error_msg);
-                            Err(format!("Failed to get module namespace for mod '{}'", mod_id).into())
+                            Err(format!("Failed to get module namespace for mod '{}'", mod_id_owned))
                         }
                     }
                 }
                 Err(e) => {
                     let error_msg = Self::format_js_error(&ctx, &e);
                     error!("\n{}", error_msg);
-                    Err(format!("Failed to import module for mod '{}'", mod_id).into())
+                    Err(format!("Failed to import module for mod '{}'", mod_id_owned))
                 }
             }
+        }).await;
+
+        result.map_err(|e| -> Box<dyn std::error::Error> { e.into() })
+    }
+
+    /// Call a mod function asynchronously with return value
+    pub async fn call_mod_function_with_return_async(
+        &mut self,
+        mod_id: &str,
+        function_name: &str,
+    ) -> Result<ModReturnValue, Box<dyn std::error::Error>> {
+        debug!("Calling JavaScript function '{}' for mod '{}' with return", function_name, mod_id);
+
+        let loaded_mod = self.loaded_mods.get(mod_id)
+            .ok_or_else(|| format!("Mod '{}' not loaded", mod_id))?;
+
+        let module_path = loaded_mod.module_path.clone();
+        let mod_id_owned = mod_id.to_string();
+        let function_name_owned = function_name.to_string();
+
+        // Use Result<ModReturnValue, String> for ParallelSend compatibility
+        let result: Result<ModReturnValue, String> = loaded_mod.context.with(|ctx| {
+            match Module::import(&ctx, module_path.clone()) {
+                Ok(promise) => {
+                    match promise.finish::<Object>() {
+                        Ok(module_namespace) => {
+                            match module_namespace.get::<_, rquickjs::Function>(&function_name_owned) {
+                                Ok(func) => {
+                                    match func.call::<(), String>(()) {
+                                        Ok(value) => {
+                                            debug!("Function '{}' returned string for mod '{}'", function_name_owned, mod_id_owned);
+                                            Ok(ModReturnValue::String(value))
+                                        }
+                                        Err(e) => {
+                                            let error_msg = Self::format_js_error(&ctx, &e);
+                                            error!("\n{}", error_msg);
+                                            Err(format!("JavaScript error in '{}' for mod '{}'", function_name_owned, mod_id_owned))
+                                        }
+                                    }
+                                }
+                                Err(_) => {
+                                    debug!("Function '{}' not found or not exported for mod '{}'", function_name_owned, mod_id_owned);
+                                    Ok(ModReturnValue::None)
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            let error_msg = Self::format_js_error(&ctx, &e);
+                            error!("\n{}", error_msg);
+                            Err(format!("Failed to get module namespace for mod '{}'", mod_id_owned))
+                        }
+                    }
+                }
+                Err(e) => {
+                    let error_msg = Self::format_js_error(&ctx, &e);
+                    error!("\n{}", error_msg);
+                    Err(format!("Failed to import module for mod '{}'", mod_id_owned))
+                }
+            }
+        }).await;
+
+        result.map_err(|e| -> Box<dyn std::error::Error> { e.into() })
+    }
+}
+
+// Synchronous trait implementation that wraps async calls
+impl RuntimeAdapter for JsRuntimeAdapter {
+    fn load_mod(&mut self, mod_path: &Path, mod_id: &str) -> Result<(), Box<dyn std::error::Error>> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.load_mod_async(mod_path, mod_id))
+        })
+    }
+
+    fn call_mod_function(&mut self, mod_id: &str, function_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.call_mod_function_async(mod_id, function_name))
         })
     }
 
@@ -329,59 +398,27 @@ impl RuntimeAdapter for JsRuntimeAdapter {
         mod_id: &str,
         function_name: &str,
     ) -> Result<ModReturnValue, Box<dyn std::error::Error>> {
-        debug!("Calling JavaScript function '{}' for mod '{}' with return", function_name, mod_id);
-
-        // Get the loaded mod
-        let loaded_mod = self.loaded_mods.get(mod_id)
-            .ok_or_else(|| format!("Mod '{}' not loaded", mod_id))?;
-
-        // Access the module namespace and call the exported function
-        loaded_mod.context.with(|ctx| {
-            let module_path = &loaded_mod.module_path;
-
-            // Import the module (uses cached version if already loaded)
-            match Module::import(&ctx, module_path.clone()) {
-                Ok(promise) => {
-                    // Wait for import to complete and get the module namespace
-                    match promise.finish::<Object>() {
-                        Ok(module_namespace) => {
-                            // Try to get the exported function from the namespace
-                            match module_namespace.get::<_, rquickjs::Function>(function_name) {
-                                Ok(func) => {
-                                    // Try to call and get return value as String first
-                                    // In the future, we could detect the return type dynamically
-                                    match func.call::<(), String>(()) {
-                                        Ok(value) => {
-                                            debug!("Function '{}' returned string for mod '{}'", function_name, mod_id);
-                                            Ok(ModReturnValue::String(value))
-                                        }
-                                        Err(e) => {
-                                            let error_msg = Self::format_js_error(&ctx, &e);
-                                            error!("\n{}", error_msg);
-                                            Err(format!("JavaScript error in '{}' for mod '{}'", function_name, mod_id).into())
-                                        }
-                                    }
-                                }
-                                Err(_) => {
-                                    // Function might not exist (optional)
-                                    debug!("Function '{}' not found or not exported for mod '{}'", function_name, mod_id);
-                                    Ok(ModReturnValue::None)
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            let error_msg = Self::format_js_error(&ctx, &e);
-                            error!("\n{}", error_msg);
-                            Err(format!("Failed to get module namespace for mod '{}'", mod_id).into())
-                        }
-                    }
-                }
-                Err(e) => {
-                    let error_msg = Self::format_js_error(&ctx, &e);
-                    error!("\n{}", error_msg);
-                    Err(format!("Failed to import module for mod '{}'", mod_id).into())
-                }
-            }
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(self.call_mod_function_with_return_async(mod_id, function_name))
         })
+    }
+}
+
+/// Run the JavaScript event loop
+///
+/// This function should be spawned as a task and run concurrently with other tasks.
+/// It processes pending JavaScript jobs (Promises, timers spawned via ctx.spawn(), etc.)
+///
+/// The event loop will run until cancelled (e.g., via tokio::select with ctrl+c).
+pub async fn run_js_event_loop(runtime: Arc<AsyncRuntime>) {
+    debug!("Starting JavaScript event loop");
+
+    // The idle() function processes pending JS jobs
+    // For ctx.spawn() based timers, this is essential to process the spawned tasks
+    loop {
+        runtime.idle().await;
+
+        // Yield periodically to ensure we can be interrupted by ctrl+c
+        tokio::task::yield_now().await;
     }
 }

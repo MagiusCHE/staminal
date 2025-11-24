@@ -4,7 +4,8 @@
 
 mod runtime;
 mod config;
-mod bindings;
+pub mod bindings;
 
 pub use runtime::JsRuntimeAdapter;
+pub use runtime::run_js_event_loop;
 pub use config::JsRuntimeConfig;

@@ -27,7 +27,7 @@ mod mod_runtime;
 
 use app_paths::AppPaths;
 use mod_runtime::{ModRuntimeManager, JsRuntimeAdapter, JsRuntimeConfig};
-use mod_runtime::js_adapter::create_js_runtime_config;
+use mod_runtime::js_adapter::{create_js_runtime_config, run_js_event_loop};
 
 const VERSION: &str = "0.1.0-alpha";
 
@@ -268,6 +268,9 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
     stream.write_primal_message(&intent).await?;
 
     // Wait for LoginSuccess
+    // JS runtime handle for event loop integration
+    let mut js_runtime_handle: Option<std::sync::Arc<stam_mod_runtimes::JsAsyncRuntime>> = None;
+
     match stream.read_game_message().await {
         Ok(GameMessage::LoginSuccess { mods }) => {
             info!("{}", locale.get("game-login-success"));
@@ -370,6 +373,10 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                 info!("Initializing JavaScript runtime...");
                 let runtime_config = create_js_runtime_config(&app_paths, &game_id)?;
                 let js_adapter = JsRuntimeAdapter::new(runtime_config)?;
+
+                // Get runtime handle BEFORE moving the adapter to the manager
+                let js_runtime = js_adapter.get_runtime();
+
                 runtime_manager.register_adapter(stam_mod_runtimes::RuntimeType::JavaScript, Box::new(js_adapter));
 
                 // Load bootstrap mods (automatically uses the correct runtime based on file extension)
@@ -402,6 +409,7 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                 }
 
                 info!("Bootstrap mods initialized successfully");
+                js_runtime_handle = Some(js_runtime);
             }
 
             // TODO: Validate and download remaining (non-bootstrap) mods
@@ -427,12 +435,38 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
     // Maintain connection - wait for messages or Ctrl+C
     info!("{}", locale.get("game-client-ready"));
 
-    tokio::select! {
-        _ = maintain_game_connection(&mut stream, locale) => {
-            info!("{}", locale.get("connection-closed"));
+    // Run the JS event loop if we have JS mods loaded
+    // This is necessary for setTimeout/setInterval to work properly
+    if let Some(js_runtime) = js_runtime_handle {
+        debug!("Starting JavaScript event loop for timer support");
+        tokio::select! {
+            biased;
+
+            // Handle Ctrl+C first
+            _ = tokio::signal::ctrl_c() => {
+                info!("{}", locale.get("ctrl-c-received"));
+            }
+
+            // Maintain game connection
+            _ = maintain_game_connection(&mut stream, locale) => {
+                info!("{}", locale.get("connection-closed"));
+            }
+
+            // Run JS event loop for timer callbacks
+            _ = run_js_event_loop(js_runtime) => {
+                // Event loop shouldn't exit normally
+                debug!("JavaScript event loop exited unexpectedly");
+            }
         }
-        _ = tokio::signal::ctrl_c() => {
-            info!("{}", locale.get("ctrl-c-received"));
+    } else {
+        // No JS runtime, just wait for connection or Ctrl+C
+        tokio::select! {
+            _ = maintain_game_connection(&mut stream, locale) => {
+                info!("{}", locale.get("connection-closed"));
+            }
+            _ = tokio::signal::ctrl_c() => {
+                info!("{}", locale.get("ctrl-c-received"));
+            }
         }
     }
 

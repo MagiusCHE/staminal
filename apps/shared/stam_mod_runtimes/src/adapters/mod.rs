@@ -7,4 +7,7 @@
 pub mod js;
 
 #[cfg(feature = "js")]
-pub use js::{JsRuntimeAdapter, JsRuntimeConfig};
+pub use js::{
+    JsRuntimeAdapter, JsRuntimeConfig,
+    run_js_event_loop,
+};

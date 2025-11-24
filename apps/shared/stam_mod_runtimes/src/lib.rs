@@ -22,6 +22,10 @@ pub mod adapters;
 
 pub use runtime_type::RuntimeType;
 
+// Re-export AsyncRuntime type for event loop integration
+#[cfg(feature = "js")]
+pub use rquickjs::AsyncRuntime as JsAsyncRuntime;
+
 /// Return value from a mod function call
 #[derive(Debug, Clone)]
 pub enum ModReturnValue {

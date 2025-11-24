@@ -5,7 +5,10 @@
 use crate::AppPaths;
 
 // Re-export from shared stam_mod_runtimes
-pub use stam_mod_runtimes::adapters::{JsRuntimeAdapter, JsRuntimeConfig};
+pub use stam_mod_runtimes::adapters::{
+    JsRuntimeAdapter, JsRuntimeConfig,
+    run_js_event_loop,
+};
 
 /// Helper function to create JsRuntimeConfig from AppPaths
 ///
