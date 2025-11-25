@@ -10,7 +10,7 @@ This document serves as a development session summary for the Staminal project (
 | **Goal**                  | Undifferentiated Game Engine Core     | The Engine only provides the platform (networking, VFS, security); game logic is provided by Mods.                                     |
 | **Core Language**         | Rust (Latest stable version)          | Chosen for performance and safety (memory management).                                                                                 |
 | **Operating System**      | Linux (Manjaro)                       | The primary target environment for development.                                                                                        |
-| **Module Prefix**         | `stam_`                               | All internal libraries (crates) use the `stam_` prefix (e.g., `stam_net`).                                                             |
+| **Module Prefix**         | `stam_`                               | All internal libraries (crates) use the `stam_` prefix (e.g., `stam_protocol`).                                                             |
 | **Key Principle**         | Intent-based Networking               | The client declares the intent (`INTENT: "main:login:survival"`), and the server "differentiates" accordingly, sending necessary Mods. |
 
 ## 2. Workspace Structure (Rust/Cargo)

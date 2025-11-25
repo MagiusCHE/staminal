@@ -117,6 +117,10 @@ struct Args {
     /// Path to configuration file (JSON)
     #[arg(short, long, default_value_t = default_config_path())]
     config: String,
+
+    /// Enable logging to file (stam_server.log in current directory)
+    #[arg(long, env = "STAM_LOG_FILE")]
+    log_file: bool,
 }
 
 #[tokio::main]
@@ -160,23 +164,41 @@ async fn main() {
     );
 
     // Auto-detect if stdout is a terminal for ANSI color support
-    let use_ansi = atty::is(atty::Stream::Stdout);
+    let use_ansi = atty::is(atty::Stream::Stdout)
+        && std::env::var("NO_COLOR").is_err()
+        && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
 
-    // Create custom formatter with #N thread IDs
-    let formatter = CustomFormatter {
-        timer,
-        ansi: use_ansi,
-    };
+    // Setup logging based on whether file logging is enabled
+    if args.log_file {
+        // File logging: no ANSI colors
+        let file_appender = tracing_appender::rolling::never(".", "stam_server.log");
+        let formatter_stdout = CustomFormatter { timer: timer.clone(), ansi: use_ansi };
+        let formatter_file = CustomFormatter { timer, ansi: false };
 
-    // Build subscriber with custom formatter
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .event_format(formatter)
-                .with_writer(std::io::stdout)
-        )
-        .with(tracing_subscriber::filter::LevelFilter::from_level(log_level))
-        .init();
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(formatter_stdout)
+                    .with_writer(std::io::stdout)
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(formatter_file)
+                    .with_writer(file_appender)
+            )
+            .with(tracing_subscriber::filter::LevelFilter::from_level(log_level))
+            .init();
+    } else {
+        let formatter = CustomFormatter { timer, ansi: use_ansi };
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(formatter)
+                    .with_writer(std::io::stdout)
+            )
+            .with(tracing_subscriber::filter::LevelFilter::from_level(log_level))
+            .init();
+    }
 
     info!("========================================");
     info!("   STAMINAL CORE SERVER v{}", VERSION);

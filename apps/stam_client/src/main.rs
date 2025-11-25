@@ -557,10 +557,17 @@ struct Args {
     /// Useful for development and testing
     #[arg(long, env = "STAM_HOME")]
     home: Option<String>,
+
+    /// Enable logging to file (stam_client.log in current directory)
+    #[arg(long, env = "STAM_LOG_FILE")]
+    log_file: bool,
 }
 
 #[tokio::main]
 async fn main() {
+    // Parse args first to check if log file is requested
+    let args = Args::parse();
+
     // Setup logging
     let timer = OffsetTime::new(
         time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC),
@@ -574,18 +581,38 @@ async fn main() {
     let use_ansi = atty::is(atty::Stream::Stdout)
         && std::env::var("NO_COLOR").is_err()
         && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
-    let formatter = CustomFormatter { timer, ansi: use_ansi };
 
-    tracing_subscriber::registry()
-        .with(
-            tracing_subscriber::fmt::layer()
-                .event_format(formatter)
-                .with_writer(std::io::stdout)
-        )
-        .with(tracing_subscriber::filter::LevelFilter::from_level(Level::DEBUG))
-        .init();
+    // Setup logging based on whether file logging is enabled
+    if args.log_file {
+        // File logging: no ANSI colors
+        let file_appender = tracing_appender::rolling::never(".", "stam_client.log");
+        let formatter_stdout = CustomFormatter { timer: timer.clone(), ansi: use_ansi };
+        let formatter_file = CustomFormatter { timer, ansi: false };
 
-    let args = Args::parse();
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(formatter_stdout)
+                    .with_writer(std::io::stdout)
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(formatter_file)
+                    .with_writer(file_appender)
+            )
+            .with(tracing_subscriber::filter::LevelFilter::from_level(Level::DEBUG))
+            .init();
+    } else {
+        let formatter = CustomFormatter { timer, ansi: use_ansi };
+        tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .event_format(formatter)
+                    .with_writer(std::io::stdout)
+            )
+            .with(tracing_subscriber::filter::LevelFilter::from_level(Level::DEBUG))
+            .init();
+    }
 
     info!("========================================");
     info!("   STAMINAL CLIENT v{}", VERSION);
