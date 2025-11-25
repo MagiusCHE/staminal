@@ -89,11 +89,13 @@ fn validate_mod_dependencies(
     manifest: &ModManifest,
     all_manifests: &HashMap<String, ModManifest>,
     client_version: &str,
+    game_version: &str,
+    server_version: &str,
 ) -> Result<(), String> {
     for (dep_id, version_req) in &manifest.requires {
         let (min_ver, max_ver) = parse_version_requirement(version_req);
 
-        if dep_id == "client" {
+        if dep_id == "@client" {
             // Validate against client version
             validate_version_range(
                 &format!("Mod '{}' requires client", mod_id),
@@ -101,9 +103,22 @@ fn validate_mod_dependencies(
                 &min_ver,
                 &max_ver,
             )?;
-        } else if dep_id == "server" {
-            // Server requirements are validated server-side, skip here
-            continue;
+        } else if dep_id == "@game" {
+            // Validate against active game version from server
+            validate_version_range(
+                &format!("Mod '{}' requires game", mod_id),
+                game_version,
+                &min_ver,
+                &max_ver,
+            )?;
+        } else if dep_id == "@server" {
+            // Validate against server version received during handshake
+            validate_version_range(
+                &format!("Mod '{}' requires server", mod_id),
+                server_version,
+                &min_ver,
+                &max_ver,
+            )?;
         } else {
             // Validate against another mod's version
             if let Some(dep_manifest) = all_manifests.get(dep_id) {
@@ -277,6 +292,8 @@ async fn connect_to_game_server(
     info!("{}", locale.get("game-connected"));
 
     // Read Welcome message
+    let mut server_version = String::new();
+
     match stream.read_primal_message().await {
         Ok(PrimalMessage::Welcome { version }) => {
             info!(
@@ -324,6 +341,8 @@ async fn connect_to_game_server(
                     )
                 );
             }
+
+            server_version = version;
         }
         Ok(msg) => {
             error!("{}: {:?}", locale.get("error-unexpected-message"), msg);
@@ -354,8 +373,9 @@ async fn connect_to_game_server(
     let mut js_runtime_handle: Option<std::sync::Arc<stam_mod_runtimes::JsAsyncRuntime>> = None;
 
     match stream.read_game_message().await {
-        Ok(GameMessage::LoginSuccess { mods }) => {
-            info!("{}", locale.get("game-login-success"));
+        Ok(GameMessage::LoginSuccess { game_name, game_version, mods }) => {
+            info!("{} {} [{}]", locale.get("game-login-success"), game_name, game_version);
+            let active_game_version = game_version.clone();
 
             // Log mod list received
             if !mods.is_empty() {
@@ -432,6 +452,8 @@ async fn connect_to_game_server(
                                 manifest,
                                 &all_manifests,
                                 VERSION,
+                                &active_game_version,
+                                &server_version,
                             ) {
                                 error!("{}", e);
                                 return Err(e.into());

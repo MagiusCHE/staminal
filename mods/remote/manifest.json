@@ -1,8 +1,11 @@
 {
     "name": "remote",
     "version": "1.0.0",
-    "description": "Allows server control via localhost socket or via internet.",
+    "description": "Allows server to be controlled via socket",
     "entry_point": "index.js",
     "type": "bootstrap",
-    "priority": 0
+    "priority": 0,
+    "requires": {
+        "@server": "0.1.0"
+    }
 }

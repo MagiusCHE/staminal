@@ -50,14 +50,23 @@ impl GameClient {
     /// Get pre-built mod list from configuration for this game
     fn get_mod_list(&self) -> &[ModInfo] {
         // Get the game configuration
-        if let Some(game_config) = self.config.games.get(&self.game_id) {
-            // Return reference to pre-built mod list
-            &game_config.mod_list
-        } else {
-            // Game not found in config (shouldn't happen since we validated earlier)
-            error!("Game '{}' not found in configuration", self.game_id);
-            &[]
-        }
+        self.config.games.get(&self.game_id)
+            .map(|game_config| game_config.mod_list.as_slice())
+            .unwrap_or_else(|| {
+                // Game not found in config (shouldn't happen since we validated earlier)
+                error!("Game '{}' not found in configuration", self.game_id);
+                &[]
+            })
+    }
+
+    /// Get game name and version from configuration
+    fn get_game_info(&self) -> (String, String) {
+        self.config.games.get(&self.game_id)
+            .map(|game_config| (game_config.name.clone(), game_config.version.clone()))
+            .unwrap_or_else(|| {
+                error!("Game '{}' not found in configuration", self.game_id);
+                (self.game_id.clone(), "unknown".to_string())
+            })
     }
 
     /// Handle the game client connection
@@ -73,9 +82,14 @@ impl GameClient {
 
         // Get pre-built mod list from config
         let mods = self.get_mod_list().to_vec();
+        let (game_name, game_version) = self.get_game_info();
 
         // Send LoginSuccess with mod list (already authenticated via Intent)
-        if let Err(e) = self.stream.write_game_message(&GameMessage::LoginSuccess { mods }).await {
+        if let Err(e) = self.stream.write_game_message(&GameMessage::LoginSuccess {
+            game_name,
+            game_version,
+            mods,
+        }).await {
             error!("Failed to send LoginSuccess to {}: {}", addr, e);
             self.client_manager.unregister_client(&addr).await;
             return;

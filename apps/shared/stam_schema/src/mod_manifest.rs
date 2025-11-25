@@ -35,8 +35,8 @@ pub struct ModManifest {
     #[serde(rename = "type", default)]
     pub mod_type: Option<String>,
 
-    /// Dependencies on other mods, client, or server
-    /// Key is mod-id (or "client"/"server" for engine version requirements)
+    /// Dependencies on other mods, client, server, or game
+    /// Key is mod-id (or "@client"/"@server"/"@game" for engine/game version requirements)
     /// Value is version constraint: "1.0.0" for exact, "1.0.0,2.0.0" for range (min,max)
     #[schemars(description = "Dependencies: mod-id -> version constraint. Use 'client' or 'server' for engine requirements.")]
     #[serde(default)]
@@ -99,16 +99,16 @@ mod tests {
             "entry_point": "index.js",
             "type": "bootstrap",
             "requires": {
-                "client": "1.0.0",
-                "server": "1.0.0,2.0.0",
+                "@client": "1.0.0",
+                "@server": "1.0.0,2.0.0",
                 "js-helper": "1.0.0"
             }
         }"#;
 
         let manifest = ModManifest::from_json_str(json).unwrap();
         assert_eq!(manifest.mod_type, Some("bootstrap".to_string()));
-        assert_eq!(manifest.requires.get("client"), Some(&"1.0.0".to_string()));
-        assert_eq!(manifest.requires.get("server"), Some(&"1.0.0,2.0.0".to_string()));
+        assert_eq!(manifest.requires.get("@client"), Some(&"1.0.0".to_string()));
+        assert_eq!(manifest.requires.get("@server"), Some(&"1.0.0,2.0.0".to_string()));
         assert_eq!(manifest.requires.get("js-helper"), Some(&"1.0.0".to_string()));
     }
 

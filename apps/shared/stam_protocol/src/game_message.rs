@@ -17,6 +17,10 @@ pub enum GameMessage {
     // Server -> Client messages
     /// Authentication successful (sent immediately after GameLogin Intent)
     LoginSuccess {
+        /// Human-readable game name
+        game_name: String,
+        /// Game version from server configuration
+        game_version: String,
         /// List of required mods for this game
         mods: Vec<ModInfo>,
     },
