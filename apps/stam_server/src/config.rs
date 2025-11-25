@@ -13,7 +13,11 @@ pub struct ModConfig {
     #[serde(rename = "type")]
     pub mod_type: String,
     /// URI for client to download this mod
+    #[serde(default)]
     pub client_download: String,
+    /// Which side(s) this mod applies to ("client", "server")
+    #[serde(default)]
+    pub side: Vec<String>,
 }
 
 /// Game configuration
@@ -127,6 +131,16 @@ impl Config {
                     continue; // Skip disabled mods
                 }
 
+                let is_client_mod = mod_config.side.iter().any(|s| s == "client");
+                let is_server_mod = mod_config.side.iter().any(|s| s == "server");
+
+                if !is_client_mod && !is_server_mod {
+                    return Err(format!(
+                        "Game '{}': Mod '{}' must declare at least one side ('client' or 'server')",
+                        game_id, mod_id
+                    ));
+                }
+
                 // Validate mod_type is not empty
                 if mod_config.mod_type.is_empty() {
                     return Err(format!(
@@ -135,8 +149,8 @@ impl Config {
                     ));
                 }
 
-                // Validate client_download is not empty
-                if mod_config.client_download.is_empty() {
+                // Validate client_download is not empty for client mods
+                if is_client_mod && mod_config.client_download.is_empty() {
                     return Err(format!(
                         "Game '{}': Mod '{}' has empty 'client_download' field",
                         game_id, mod_id
@@ -147,6 +161,7 @@ impl Config {
             // Build mod list for this game (done once at boot)
             game_config.mod_list = game_config.mods.iter()
                 .filter(|(_, mod_config)| mod_config.enabled)
+                .filter(|(_, mod_config)| mod_config.side.iter().any(|s| s == "client"))
                 .map(|(mod_id, mod_config)| {
                     ModInfo {
                         mod_id: mod_id.clone(),

@@ -1,25 +1,14 @@
 use clap::Parser;
-use stam_schema::{
-    ModManifest,
-    Validatable,
-    validate_mod_dependencies,
-    validate_version_range,
-};
 use sha2::{Digest, Sha512};
-use std::fmt as std_fmt;
-use time::macros::format_description;
+use std::collections::HashMap;
 use tokio::net::TcpStream;
-use tracing::field::Field;
 use tracing::{Level, debug, error, info, warn};
-use tracing_subscriber::field::Visit;
-use tracing_subscriber::fmt::time::OffsetTime;
-use tracing_subscriber::fmt::{self, FmtContext, FormatEvent, FormatFields, format::Writer};
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 
+use stam_mod_runtimes::logging::{create_custom_timer, CustomFormatter};
 use stam_protocol::{GameMessage, GameStream, IntentType, PrimalMessage, PrimalStream};
-use std::collections::HashMap;
+use stam_schema::{ModManifest, Validatable, validate_mod_dependencies, validate_version_range};
 
 #[macro_use]
 mod locale;
@@ -40,112 +29,6 @@ fn sha512_hash(input: &str) -> String {
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
     format!("{:x}", result)
-}
-
-/// Visitor to extract runtime_type and mod_id fields
-#[derive(Default)]
-struct FieldExtractor {
-    runtime_type: Option<String>,
-    mod_id: Option<String>,
-    message: Option<String>,
-}
-
-impl Visit for FieldExtractor {
-    fn record_str(&mut self, field: &Field, value: &str) {
-        match field.name() {
-            "runtime_type" => self.runtime_type = Some(value.to_string()),
-            "mod_id" => self.mod_id = Some(value.to_string()),
-            "message" => self.message = Some(value.to_string()),
-            _ => {}
-        }
-    }
-
-    fn record_debug(&mut self, field: &Field, value: &dyn std_fmt::Debug) {
-        match field.name() {
-            "runtime_type" => {
-                self.runtime_type = Some(format!("{:?}", value).trim_matches('"').to_string())
-            }
-            "mod_id" => self.mod_id = Some(format!("{:?}", value).trim_matches('"').to_string()),
-            "message" => self.message = Some(format!("{:?}", value).trim_matches('"').to_string()),
-            _ => {}
-        }
-    }
-}
-
-/// Custom event formatter that displays thread IDs as #N instead of ThreadId(N)
-struct CustomFormatter<T> {
-    timer: T,
-    ansi: bool,
-}
-
-impl<S, N, T> FormatEvent<S, N> for CustomFormatter<T>
-where
-    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
-    N: for<'a> FormatFields<'a> + 'static,
-    T: fmt::time::FormatTime,
-{
-    fn format_event(
-        &self,
-        ctx: &FmtContext<'_, S, N>,
-        mut writer: Writer<'_>,
-        event: &tracing::Event<'_>,
-    ) -> std_fmt::Result {
-        let metadata = event.metadata();
-
-        let (dim_start, dim_end) = if self.ansi {
-            ("\x1b[2m", "\x1b[0m")
-        } else {
-            ("", "")
-        };
-        let (level_color, level_str) = match *metadata.level() {
-            Level::ERROR => (if self.ansi { "\x1b[31m" } else { "" }, "ERROR"),
-            Level::WARN => (if self.ansi { "\x1b[33m" } else { "" }, " WARN"),
-            Level::INFO => (if self.ansi { "\x1b[32m" } else { "" }, " INFO"),
-            Level::DEBUG => (if self.ansi { "\x1b[34m" } else { "" }, "DEBUG"),
-            Level::TRACE => (if self.ansi { "\x1b[35m" } else { "" }, "TRACE"),
-        };
-        let color_end = if self.ansi { "\x1b[0m" } else { "" };
-
-        write!(writer, "{}", dim_start)?;
-        self.timer.format_time(&mut writer)?;
-        write!(writer, "{} ", dim_end)?;
-
-        write!(writer, "{}{}{} ", level_color, level_str, color_end)?;
-
-        let thread_id = format!("{:?}", std::thread::current().id());
-        if let Some(num_str) = thread_id
-            .strip_prefix("ThreadId(")
-            .and_then(|s| s.strip_suffix(")"))
-        {
-            if let Ok(num) = num_str.parse::<u64>() {
-                write!(writer, "#{:03} ", num)?;
-            }
-        }
-
-        // Extract runtime_type and mod_id fields if present
-        let mut extractor = FieldExtractor::default();
-        event.record(&mut extractor);
-
-        // If both runtime_type and mod_id are present, format as "runtime_type::mod_id:"
-        if let (Some(rt), Some(mid)) = (&extractor.runtime_type, &extractor.mod_id) {
-            write!(writer, "{}{}::{}{}: ", dim_start, rt, mid, dim_end)?;
-            // Print the message if present
-            if let Some(msg) = &extractor.message {
-                write!(writer, "{}", msg)?;
-            }
-        } else {
-            // Otherwise use the default target formatting
-            let target = metadata.target();
-            let display_target = target.strip_prefix("stam_client::").unwrap_or(target);
-            if !display_target.is_empty() && display_target != "stam_client" {
-                write!(writer, "{}{}{}: ", dim_start, display_target, dim_end)?;
-            }
-            // Use default field formatting
-            ctx.field_format().format_fields(writer.by_ref(), event)?;
-        }
-
-        writeln!(writer)
-    }
 }
 
 /// Connect to game server and maintain connection
@@ -356,6 +239,7 @@ async fn connect_to_game_server(
                                 VERSION,
                                 &active_game_version,
                                 &server_version,
+                                false,
                             ) {
                                 error!("{}", e);
                                 return Err(e.into());
@@ -596,10 +480,7 @@ async fn main() {
     let args = Args::parse();
 
     // Setup logging
-    let timer = OffsetTime::new(
-        time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC),
-        format_description!("[year]/[month]/[day] [hour]:[minute]:[second].[subsecond digits:4]"),
-    );
+    let timer = create_custom_timer();
 
     // Disable ANSI colors if:
     // - stdout is not a TTY (piped/redirected)
@@ -612,12 +493,12 @@ async fn main() {
     // Setup logging based on whether file logging is enabled
     if args.log_file {
         // File logging: no ANSI colors
-        let file_appender = tracing_appender::rolling::never(".", "stam_client.log");
-        let formatter_stdout = CustomFormatter {
-            timer: timer.clone(),
-            ansi: use_ansi,
-        };
-        let formatter_file = CustomFormatter { timer, ansi: false };
+        let file_appender = std::fs::File::create("stam_client.log")
+            .expect("Unable to create stam_client.log");
+        let formatter_stdout = CustomFormatter::new(timer.clone(), use_ansi)
+            .with_strip_prefix("stam_client::");
+        let formatter_file = CustomFormatter::new(timer, false)
+            .with_strip_prefix("stam_client::");
 
         tracing_subscriber::registry()
             .with(
@@ -635,10 +516,8 @@ async fn main() {
             ))
             .init();
     } else {
-        let formatter = CustomFormatter {
-            timer,
-            ansi: use_ansi,
-        };
+        let formatter = CustomFormatter::new(timer, use_ansi)
+            .with_strip_prefix("stam_client::");
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()

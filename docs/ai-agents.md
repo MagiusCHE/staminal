@@ -130,3 +130,6 @@ When developing features for the mod system (`stam_mod_runtimes`):
 4. **Avoid JS-specific assumptions**: Don't hardcode JavaScript-specific behaviors in the core mod loading logic
 5. **Lifecycle hooks**: `onAttach()` and `onBootstrap()` must be implementable in any language
 6. **Cross-mod communication**: Design inter-mod APIs that can work across different language runtimes
+
+### Logging Hygiene
+- Ensure ANSI color codes are disabled when logs are redirected to files or piped (respect TTY detection and `NO_COLOR`), so log files stay plain and readable with correct mod identifiers.

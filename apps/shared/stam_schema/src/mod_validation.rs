@@ -59,11 +59,15 @@ pub fn validate_mod_dependencies(
     client_version: &str,
     game_version: &str,
     server_version: &str,
+    skip_client_requirement: bool,
 ) -> Result<(), String> {
     for (dep_id, version_req) in &manifest.requires {
         let (min_ver, max_ver) = parse_version_requirement(version_req);
 
         if dep_id == "@client" {
+            if skip_client_requirement {
+                continue;
+            }
             // Validate against client version
             validate_version_range(
                 &format!("Mod '{}' requires client", mod_id),

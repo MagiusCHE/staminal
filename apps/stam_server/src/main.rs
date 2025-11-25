@@ -3,19 +3,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use clap::Parser;
-use tracing::{Level, info, debug, warn, error};
-use tracing_subscriber::fmt::time::OffsetTime;
-use tracing_subscriber::fmt::{self, format::Writer, FmtContext, FormatEvent, FormatFields};
+use tokio::net::TcpListener;
+use tokio::signal;
+use tokio::time::{Duration, interval};
+use tracing::{Level, debug, error, info, warn};
+
+use stam_mod_runtimes::adapters::js::run_js_event_loop;
+use stam_mod_runtimes::logging::{create_custom_timer, CustomFormatter};
+use stam_schema::Validatable;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::registry::LookupSpan;
-use time::macros::format_description;
-use std::fmt as std_fmt;
-use tokio::time::{Duration, interval};
-use tokio::signal;
-use tokio::net::TcpListener;
-
-use stam_schema::Validatable;
 
 mod config;
 use config::Config;
@@ -28,69 +25,13 @@ mod game_client;
 mod client_manager;
 use client_manager::ClientManager;
 
+mod mod_loader;
+
 const VERSION: &str = "0.1.0";
 
-/// Custom event formatter that displays thread IDs as #N instead of ThreadId(N)
-/// Replicates the default tracing formatter behavior with ANSI color support
-struct CustomFormatter<T> {
-    timer: T,
-    ansi: bool,
-}
-
-impl<S, N, T> FormatEvent<S, N> for CustomFormatter<T>
-where
-    S: tracing::Subscriber + for<'a> LookupSpan<'a>,
-    N: for<'a> FormatFields<'a> + 'static,
-    T: fmt::time::FormatTime,
-{
-    fn format_event(
-        &self,
-        ctx: &FmtContext<'_, S, N>,
-        mut writer: Writer<'_>,
-        event: &tracing::Event<'_>,
-    ) -> std_fmt::Result {
-        let metadata = event.metadata();
-
-        // Color codes (matching tracing's default colors)
-        let (dim_start, dim_end) = if self.ansi { ("\x1b[2m", "\x1b[0m") } else { ("", "") };
-        let (level_color, level_str) = match *metadata.level() {
-            Level::ERROR => (if self.ansi { "\x1b[31m" } else { "" }, "ERROR"),
-            Level::WARN  => (if self.ansi { "\x1b[33m" } else { "" }, " WARN"),
-            Level::INFO  => (if self.ansi { "\x1b[32m" } else { "" }, " INFO"),
-            Level::DEBUG => (if self.ansi { "\x1b[34m" } else { "" }, "DEBUG"),
-            Level::TRACE => (if self.ansi { "\x1b[35m" } else { "" }, "TRACE"),
-        };
-        let color_end = if self.ansi { "\x1b[0m" } else { "" };
-
-        // Write timestamp (dimmed)
-        write!(writer, "{}", dim_start)?;
-        self.timer.format_time(&mut writer)?;
-        write!(writer, "{} ", dim_end)?;
-
-        // Write level (colored)
-        write!(writer, "{}{}{} ", level_color, level_str, color_end)?;
-
-        // Write thread ID as #N instead of ThreadId(N)
-        let thread_id = format!("{:?}", std::thread::current().id());
-        if let Some(num_str) = thread_id.strip_prefix("ThreadId(").and_then(|s| s.strip_suffix(")")) {
-            // Parse to number for proper padding
-            if let Ok(num) = num_str.parse::<u64>() {
-                write!(writer, "#{:03} ", num)?;
-            }
-        }
-
-        // Remove "stam_server::" prefix from target, keep the rest (e.g., "config")
-        // Also hide "stam_server" when it appears alone
-        let target = metadata.target();
-        let display_target = target.strip_prefix("stam_server::").unwrap_or(target);
-        if !display_target.is_empty() && display_target != "stam_server" {
-            write!(writer, "{}{}{}: ", dim_start, display_target, dim_end)?;
-        }
-
-        // Write fields
-        ctx.field_format().format_fields(writer.by_ref(), event)?;
-
-        writeln!(writer)
+async fn wait_for_shutdown(flag: Arc<AtomicBool>) {
+    while !flag.load(Ordering::Relaxed) {
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
@@ -117,6 +58,10 @@ struct Args {
     /// Path to configuration file (JSON)
     #[arg(short, long, default_value_t = default_config_path())]
     config: String,
+
+    /// Custom home directory for Staminal data and mods (overrides defaults)
+    #[arg(long, env = "STAM_HOME")]
+    home: Option<String>,
 
     /// Enable logging to file (stam_server.log in current directory)
     #[arg(long, env = "STAM_LOG_FILE")]
@@ -158,10 +103,7 @@ async fn main() {
     };
 
     // Custom time format: YYYY/MM/DD hh:mm:ss.xxxx
-    let timer = OffsetTime::new(
-        time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC),
-        format_description!("[year]/[month]/[day] [hour]:[minute]:[second].[subsecond digits:4]"),
-    );
+    let timer = create_custom_timer();
 
     // Auto-detect if stdout is a terminal for ANSI color support
     let use_ansi = atty::is(atty::Stream::Stdout)
@@ -170,31 +112,38 @@ async fn main() {
 
     // Setup logging based on whether file logging is enabled
     if args.log_file {
-        // File logging: no ANSI colors
-        let file_appender = tracing_appender::rolling::never(".", "stam_server.log");
-        let formatter_stdout = CustomFormatter { timer: timer.clone(), ansi: use_ansi };
-        let formatter_file = CustomFormatter { timer, ansi: false };
+        // File logging: no ANSI colors, truncate previous run
+        let file = std::fs::File::create("stam_server.log")
+            .expect("Unable to create stam_server.log");
+        let formatter_stdout = CustomFormatter::new(timer.clone(), use_ansi)
+            .with_strip_prefix("stam_server::");
+        let formatter_file = CustomFormatter::new(timer, false)
+            .with_strip_prefix("stam_server::");
 
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter_stdout)
-                    .with_writer(std::io::stdout)
+                    .with_ansi(use_ansi)
+                    .with_writer(std::io::stdout),
             )
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter_file)
-                    .with_writer(file_appender)
+                    .with_ansi(false)
+                    .with_writer(file),
             )
             .with(tracing_subscriber::filter::LevelFilter::from_level(log_level))
             .init();
     } else {
-        let formatter = CustomFormatter { timer, ansi: use_ansi };
+        let formatter = CustomFormatter::new(timer, use_ansi)
+            .with_strip_prefix("stam_server::");
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter)
-                    .with_writer(std::io::stdout)
+                    .with_ansi(use_ansi)
+                    .with_writer(std::io::stdout),
             )
             .with(tracing_subscriber::filter::LevelFilter::from_level(log_level))
             .init();
@@ -213,11 +162,37 @@ async fn main() {
     debug!("  Tick Rate: {} Hz", config.tick_rate);
     debug!("  Log Level: {}", config.log_level);
 
-    // 1. Inizializzazione Mod Loader (Placeholder)
-    info!("[CORE] Scanning '{}' for DNA...", config.mods_path);
-    let mods_found = 0;
-    // TODO: Implementare scansione directory mods_path
-    info!("[CORE] Found {} potential differentiations.", mods_found);
+    // Setup shutdown flag early (used by JS runtimes and signal handlers)
+    let shutdown = Arc::new(AtomicBool::new(false));
+
+    // 1. Initialize mod system (validate + load server-side mods)
+    let mod_runtimes = match mod_loader::initialize_all_games(&config, VERSION, args.home.as_deref()) {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            error!("[MOD] Failed to initialize mods: {}", e);
+            return;
+        }
+    };
+
+    let total_server_mods: usize = mod_runtimes.values().map(|r| r.server_mods.len()).sum();
+    let total_client_mods: usize = mod_runtimes.values().map(|r| r.client_mods.len()).sum();
+    info!("[MOD] Validated client mods: {}, loaded server mods: {}", total_client_mods, total_server_mods);
+
+    // Spawn JS event loops for any game that has server-side JS mods
+    for (game_id, runtime) in &mod_runtimes {
+        if let Some(js_runtime) = runtime.js_runtime.clone() {
+            let gid = game_id.clone();
+            let shutdown_token = shutdown.clone();
+            tokio::spawn(async move {
+                info!("[MOD] Running JS event loop for game '{}'", gid);
+                let mut js_loop = std::pin::pin!(run_js_event_loop(js_runtime));
+                tokio::select! {
+                    _ = &mut js_loop => {},
+                    _ = wait_for_shutdown(shutdown_token) => {},
+                }
+            });
+        }
+    }
 
     // 2. Avvio TCP Listener for Primal Clients
     let bind_addr = format!("{}:{}", config.local_ip, config.local_port);
@@ -239,9 +214,6 @@ async fn main() {
 
     // Create client manager for tracking active connections
     let client_manager = ClientManager::new();
-
-    // Setup shutdown flag
-    let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = shutdown.clone();
 
     // Spawn signal handler task

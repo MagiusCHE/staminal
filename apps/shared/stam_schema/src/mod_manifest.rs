@@ -38,7 +38,7 @@ pub struct ModManifest {
     /// Dependencies on other mods, client, server, or game
     /// Key is mod-id (or "@client"/"@server"/"@game" for engine/game version requirements)
     /// Value is version constraint: "1.0.0" for exact, "1.0.0,2.0.0" for range (min,max)
-    #[schemars(description = "Dependencies: mod-id -> version constraint. Use 'client' or 'server' for engine requirements.")]
+    #[schemars(description = "Dependencies: mod-id -> version constraint. Use '@client', '@server' or '@game' for engine/game requirements.")]
     #[serde(default)]
     pub requires: HashMap<String, String>,
 }

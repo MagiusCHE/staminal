@@ -363,9 +363,13 @@ impl JsRuntimeAdapter {
         // Setup global APIs for this mod's context
         self.setup_global_apis(&context).await?;
 
-        // Set global __MOD_ID__ variable for console logging
+        // Set global __GAME_ID__ (optional) and __MOD_ID__ variables for console logging
+        let game_id = self.config.game_id().map(|s| s.to_string());
         context
             .with(|ctx| {
+                if let Some(gid) = game_id {
+                    ctx.globals().set("__GAME_ID__", gid)?;
+                }
                 ctx.globals().set("__MOD_ID__", mod_id)?;
                 Ok::<(), rquickjs::Error>(())
             })
@@ -625,15 +629,15 @@ impl RuntimeAdapter for JsRuntimeAdapter {
 /// It processes pending JavaScript jobs (Promises, timers spawned via ctx.spawn(), etc.)
 ///
 /// The event loop will run until cancelled (e.g., via tokio::select with ctrl+c).
+///
+/// Uses `runtime.drive()` which properly uses async Wakers to wait for new jobs
+/// without busy-spinning. The future completes when the runtime is dropped.
 pub async fn run_js_event_loop(runtime: Arc<AsyncRuntime>) {
     debug!("Starting JavaScript event loop");
 
-    // The idle() function processes pending JS jobs
-    // For ctx.spawn() based timers, this is essential to process the spawned tasks
-    loop {
-        runtime.idle().await;
-
-        // Yield periodically to ensure we can be interrupted by ctrl+c
-        tokio::task::yield_now().await;
-    }
+    // drive() returns a future that:
+    // - Continuously polls spawned futures in the background
+    // - Uses proper async/await semantics with Waker (no busy-spinning)
+    // - Completes when the runtime is dropped
+    runtime.drive().await;
 }

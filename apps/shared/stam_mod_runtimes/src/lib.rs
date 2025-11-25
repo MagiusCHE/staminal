@@ -10,11 +10,12 @@
 //! - **RuntimeManager**: Manages multiple runtimes and dispatches calls to the appropriate one
 //! - **ApiRegistry**: Registry for configuring which APIs are available to mods
 
-use std::path::Path;
 use std::collections::HashMap;
+use std::path::Path;
 
-pub mod runtime_type;
 pub mod api;
+pub mod logging;
+pub mod runtime_type;
 
 // Conditional module imports based on features
 #[cfg(feature = "js")]

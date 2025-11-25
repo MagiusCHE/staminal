@@ -56,7 +56,7 @@ static TIMER_ABORT_HANDLES: std::sync::LazyLock<std::sync::Mutex<HashMap<u32, Ar
 /// Setup console API in the JavaScript context
 ///
 /// Provides console.log, console.error, console.warn, console.info, console.debug
-/// All functions accept variadic arguments and read the global __MOD_ID__ variable to prefix log messages
+/// All functions accept variadic arguments and read the global __GAME_ID__ (optional) and __MOD_ID__ variables
 pub fn setup_console_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
     let globals = ctx.globals();
 
@@ -65,41 +65,46 @@ pub fn setup_console_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
 
     // console.log - maps to ConsoleApi::log
     let log_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
+        let game_id: Option<String> = ctx.globals().get("__GAME_ID__").ok();
         let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
         let message = args.0.join(" ");
-        ConsoleApi::log("js", &mod_id, &message);
+        ConsoleApi::log(game_id.as_deref(), "js", &mod_id, &message);
     })?;
     console.set("log", log_fn)?;
 
     // console.error - maps to ConsoleApi::error
     let error_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
+        let game_id: Option<String> = ctx.globals().get("__GAME_ID__").ok();
         let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
         let message = args.0.join(" ");
-        ConsoleApi::error("js", &mod_id, &message);
+        ConsoleApi::error(game_id.as_deref(), "js", &mod_id, &message);
     })?;
     console.set("error", error_fn)?;
 
     // console.warn - maps to ConsoleApi::warn
     let warn_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
+        let game_id: Option<String> = ctx.globals().get("__GAME_ID__").ok();
         let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
         let message = args.0.join(" ");
-        ConsoleApi::warn("js", &mod_id, &message);
+        ConsoleApi::warn(game_id.as_deref(), "js", &mod_id, &message);
     })?;
     console.set("warn", warn_fn)?;
 
     // console.info - maps to ConsoleApi::info
     let info_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
+        let game_id: Option<String> = ctx.globals().get("__GAME_ID__").ok();
         let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
         let message = args.0.join(" ");
-        ConsoleApi::info("js", &mod_id, &message);
+        ConsoleApi::info(game_id.as_deref(), "js", &mod_id, &message);
     })?;
     console.set("info", info_fn)?;
 
     // console.debug - maps to ConsoleApi::debug
     let debug_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
+        let game_id: Option<String> = ctx.globals().get("__GAME_ID__").ok();
         let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
         let message = args.0.join(" ");
-        ConsoleApi::debug("js", &mod_id, &message);
+        ConsoleApi::debug(game_id.as_deref(), "js", &mod_id, &message);
     })?;
     console.set("debug", debug_fn)?;
 

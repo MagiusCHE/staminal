@@ -1,0 +1,14 @@
+# Rust build artifacts
+/target/
+**/*.rs.bk
+*.pdb
+
+# Cargo lock file (uncomment if this is a library)
+# Cargo.lock
+
+# Debug artifacts
+debug/
+target/
+
+# Remove Cargo.lock from gitignore if this is a binary crate
+# For binary crates, Cargo.lock should be committed

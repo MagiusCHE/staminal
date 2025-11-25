@@ -2,7 +2,9 @@
     "rust-analyzer.linkedProjects": [
         "apps/stam_server/Cargo.toml",
         "apps/stam_client/Cargo.toml",
-        "apps/shared/stam_mod_runtimes/Cargo.toml"
+        "apps/shared/stam_mod_runtimes/Cargo.toml",
+        "apps/shared/stam_protocol/Cargo.toml",
+        "apps/shared/stam_schema/Cargo.toml"
     ],
     "rust-analyzer.workspace.discoverConfig": null
 }
