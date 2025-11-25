@@ -4,9 +4,11 @@ use std::fs;
 
 pub mod error;
 pub mod mod_manifest;
+pub mod mod_validation;
 
 pub use error::{SchemaError, Result};
 pub use mod_manifest::{ModManifest, parse_version_requirement};
+pub use mod_validation::{validate_mod_dependencies, validate_version_range};
 
 /// Trait for types that can be validated against JSON Schema
 pub trait Validatable: JsonSchema + for<'de> Deserialize<'de> {

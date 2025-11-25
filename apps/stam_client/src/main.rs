@@ -1,5 +1,10 @@
 use clap::Parser;
-use semver::Version;
+use stam_schema::{
+    ModManifest,
+    Validatable,
+    validate_mod_dependencies,
+    validate_version_range,
+};
 use sha2::{Digest, Sha512};
 use std::fmt as std_fmt;
 use time::macros::format_description;
@@ -14,7 +19,6 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use stam_protocol::{GameMessage, GameStream, IntentType, PrimalMessage, PrimalStream};
-use stam_schema::{ModManifest, Validatable, parse_version_requirement};
 use std::collections::HashMap;
 
 #[macro_use]
@@ -36,108 +40,6 @@ fn sha512_hash(input: &str) -> String {
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
     format!("{:x}", result)
-}
-
-/// Validate if a version is within the specified range
-/// min_version and max_version should be in format "major.minor.patch"
-/// Returns Ok(()) if version is in range, Err with message otherwise
-fn validate_version_range(
-    context: &str,
-    installed_version: &str,
-    min_version: &str,
-    max_version: &str,
-) -> Result<(), String> {
-    // Parse installed version
-    let installed = Version::parse(installed_version).map_err(|e| {
-        format!(
-            "{}: Invalid installed version '{}': {}",
-            context, installed_version, e
-        )
-    })?;
-
-    // Parse min and max versions
-    let min = Version::parse(min_version)
-        .map_err(|e| format!("{}: Invalid min_version '{}': {}", context, min_version, e))?;
-
-    let max = Version::parse(max_version)
-        .map_err(|e| format!("{}: Invalid max_version '{}': {}", context, max_version, e))?;
-
-    // Check if installed version is within range (inclusive on both ends)
-    if installed < min {
-        return Err(format!(
-            "{}: version {} is below minimum required version {}",
-            context, installed_version, min_version
-        ));
-    }
-
-    if installed > max {
-        return Err(format!(
-            "{}: version {} is above maximum supported version {}",
-            context, installed_version, max_version
-        ));
-    }
-
-    Ok(())
-}
-
-/// Validate mod dependencies
-/// Checks:
-/// - "client" requirement against CLIENT_VERSION
-/// - Other mod requirements against loaded manifests
-fn validate_mod_dependencies(
-    mod_id: &str,
-    manifest: &ModManifest,
-    all_manifests: &HashMap<String, ModManifest>,
-    client_version: &str,
-    game_version: &str,
-    server_version: &str,
-) -> Result<(), String> {
-    for (dep_id, version_req) in &manifest.requires {
-        let (min_ver, max_ver) = parse_version_requirement(version_req);
-
-        if dep_id == "@client" {
-            // Validate against client version
-            validate_version_range(
-                &format!("Mod '{}' requires client", mod_id),
-                client_version,
-                &min_ver,
-                &max_ver,
-            )?;
-        } else if dep_id == "@game" {
-            // Validate against active game version from server
-            validate_version_range(
-                &format!("Mod '{}' requires game", mod_id),
-                game_version,
-                &min_ver,
-                &max_ver,
-            )?;
-        } else if dep_id == "@server" {
-            // Validate against server version received during handshake
-            validate_version_range(
-                &format!("Mod '{}' requires server", mod_id),
-                server_version,
-                &min_ver,
-                &max_ver,
-            )?;
-        } else {
-            // Validate against another mod's version
-            if let Some(dep_manifest) = all_manifests.get(dep_id) {
-                validate_version_range(
-                    &format!("Mod '{}' requires '{}'", mod_id, dep_id),
-                    &dep_manifest.version,
-                    &min_ver,
-                    &max_ver,
-                )?;
-            } else {
-                return Err(format!(
-                    "Mod '{}' requires mod '{}' which is not available",
-                    mod_id, dep_id
-                ));
-            }
-        }
-    }
-
-    Ok(())
 }
 
 /// Visitor to extract runtime_type and mod_id fields
@@ -380,12 +282,12 @@ async fn connect_to_game_server(
             // Log mod list received
             if !mods.is_empty() {
                 info!("Received {} required mod(s):", mods.len());
-                for mod_info in &mods {
-                    info!(
-                        "  - {} [{}]: {}",
-                        mod_info.mod_id, mod_info.mod_type, mod_info.download_url
-                    );
-                }
+                // for mod_info in &mods {
+                //     info!(
+                //         "  - {} [{}]: {}",
+                //         mod_info.mod_id, mod_info.mod_type, mod_info.download_url
+                //     );
+                // }
             } else {
                 info!("No mods required for this game");
             }
@@ -437,7 +339,7 @@ async fn connect_to_game_server(
                             )
                         })?;
 
-                    info!("  ✓ {} [{}:{}] found", mod_info.mod_id, mod_info.mod_type, manifest.version);
+                    info!(" ✓ {} [{}:{}] found", mod_info.mod_id, mod_info.mod_type, manifest.version);
                     all_manifests.insert(mod_info.mod_id.clone(), manifest);
                 }
 
