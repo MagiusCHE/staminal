@@ -9,14 +9,12 @@ use tracing_subscriber::field::Visit;
 use tracing::field::Field;
 use time::macros::format_description;
 use std::fmt as std_fmt;
-use std::path::PathBuf;
-use std::fs;
 use tokio::net::TcpStream;
 use sha2::{Sha512, Digest};
 use semver::Version;
-use serde::Deserialize;
 
 use stam_protocol::{PrimalMessage, PrimalStream, IntentType, GameMessage, GameStream};
+use stam_schema::{ModManifest, Validatable};
 
 #[macro_use]
 mod locale;
@@ -37,19 +35,6 @@ fn sha512_hash(input: &str) -> String {
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
     format!("{:x}", result)
-}
-
-/// Mod manifest structure
-#[derive(Debug, Deserialize)]
-struct ModManifest {
-    name: String,
-    version: String,
-    #[allow(dead_code)]
-    description: String,
-    #[allow(dead_code)]
-    entry_point: String,
-    #[allow(dead_code)]
-    priority: i32,
 }
 
 /// Validate if a version is within the specified range
@@ -327,11 +312,8 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                         ).into());
                     }
 
-                    let manifest_content = fs::read_to_string(&manifest_path)
-                        .map_err(|e| format!("Failed to read manifest for mod '{}': {}", mod_info.mod_id, e))?;
-
-                    let manifest: ModManifest = serde_json::from_str(&manifest_content)
-                        .map_err(|e| format!("Failed to parse manifest for mod '{}': {}", mod_info.mod_id, e))?;
+                    let manifest = ModManifest::from_json_file(manifest_path.to_str().unwrap())
+                        .map_err(|e| format!("Failed to load manifest for mod '{}': {}", mod_info.mod_id, e))?;
 
                     // Validate version is within required range
                     if let Err(e) = validate_version_range(
@@ -386,8 +368,7 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                     let manifest_path = mod_dir.join("manifest.json");
 
                     // Read manifest to get entry_point
-                    let manifest_content = fs::read_to_string(&manifest_path)?;
-                    let manifest: ModManifest = serde_json::from_str(&manifest_content)?;
+                    let manifest = ModManifest::from_json_file(manifest_path.to_str().unwrap())?;
 
                     let entry_point_path = mod_dir.join(&manifest.entry_point);
 
@@ -435,7 +416,7 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                 if !bootstrap_mods.is_empty() {
                     info!("Bootstrapping mods...");
                     for (mod_id, _, _, _) in &bootstrap_mods {
-                        info!("  Bootstrapping {}", mod_id);
+                        //info!("  Bootstrapping {}", mod_id);
                         runtime_manager.call_mod_function(mod_id, "onBootstrap")?;
                     }
                 }

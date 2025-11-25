@@ -26,6 +26,6 @@
   },
   "scripts": {
     "server:debug": "cd apps/stam_server && cargo run --bin stam_server -- --config workspace_data/configs/develop.json",
-    "client:debug": "cd apps/stam_client && STAM_URI=\"stam://magius:324fd324@localhost:9999\" STAM_LANG=\"it-IT\" STAM_HOME=\"./workspace_data\" cargo run --bin stam_client"
+    "client:debug": "cd apps/stam_client && STAM_URI=\"stam://magius:324fd324@localhost:9999\" STAM_LANG=\"it-IT\" STAM_HOME=\"./workspace_data\" cargo run --bin stam_client --"
   }
 }
