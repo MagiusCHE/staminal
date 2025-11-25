@@ -6,6 +6,15 @@ use std::path::Path;
 use unic_langid::LanguageIdentifier;
 use tracing::{info, warn, error};
 
+/// Strip Unicode bidirectional isolate characters from a string.
+/// Fluent inserts these (U+2068 FSI, U+2069 PDI, U+2066 LRI, U+2067 RLI) around placeholders
+/// for proper RTL/LTR text handling, but they can cause issues in logs and terminals.
+fn strip_bidi_chars(s: &str) -> String {
+    s.chars()
+        .filter(|c| !matches!(c, '\u{2066}' | '\u{2067}' | '\u{2068}' | '\u{2069}'))
+        .collect()
+}
+
 /// Locale manager for internationalization
 pub struct LocaleManager {
     bundles: HashMap<String, FluentBundle<FluentResource>>,
@@ -131,7 +140,7 @@ impl LocaleManager {
                         warn!("Fluent formatting errors for '{}': {:?}", id, errors);
                     }
 
-                    return value.to_string();
+                    return strip_bidi_chars(&value);
                 }
             }
         }
@@ -143,7 +152,7 @@ impl LocaleManager {
                     if let Some(pattern) = message.value() {
                         let mut errors = vec![];
                         let value = bundle.format_pattern(pattern, args, &mut errors);
-                        return value.to_string();
+                        return strip_bidi_chars(&value);
                     }
                 }
             }

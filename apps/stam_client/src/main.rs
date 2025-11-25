@@ -567,7 +567,13 @@ async fn main() {
         format_description!("[year]/[month]/[day] [hour]:[minute]:[second].[subsecond digits:4]"),
     );
 
-    let use_ansi = atty::is(atty::Stream::Stdout);
+    // Disable ANSI colors if:
+    // - stdout is not a TTY (piped/redirected)
+    // - NO_COLOR env var is set (https://no-color.org/)
+    // - TERM=dumb
+    let use_ansi = atty::is(atty::Stream::Stdout)
+        && std::env::var("NO_COLOR").is_err()
+        && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
     let formatter = CustomFormatter { timer, ansi: use_ansi };
 
     tracing_subscriber::registry()
