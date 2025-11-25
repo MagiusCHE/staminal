@@ -1,20 +1,21 @@
 use clap::Parser;
-use tracing::{Level, info, error, warn, debug};
-use tracing_subscriber::fmt::time::OffsetTime;
-use tracing_subscriber::fmt::{self, format::Writer, FmtContext, FormatEvent, FormatFields};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
-use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::field::Visit;
-use tracing::field::Field;
-use time::macros::format_description;
-use std::fmt as std_fmt;
-use tokio::net::TcpStream;
-use sha2::{Sha512, Digest};
 use semver::Version;
+use sha2::{Digest, Sha512};
+use std::fmt as std_fmt;
+use time::macros::format_description;
+use tokio::net::TcpStream;
+use tracing::field::Field;
+use tracing::{Level, debug, error, info, warn};
+use tracing_subscriber::field::Visit;
+use tracing_subscriber::fmt::time::OffsetTime;
+use tracing_subscriber::fmt::{self, FmtContext, FormatEvent, FormatFields, format::Writer};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::util::SubscriberInitExt;
 
-use stam_protocol::{PrimalMessage, PrimalStream, IntentType, GameMessage, GameStream};
-use stam_schema::{ModManifest, Validatable};
+use stam_protocol::{GameMessage, GameStream, IntentType, PrimalMessage, PrimalStream};
+use stam_schema::{ModManifest, Validatable, parse_version_requirement};
+use std::collections::HashMap;
 
 #[macro_use]
 mod locale;
@@ -24,10 +25,10 @@ mod app_paths;
 mod mod_runtime;
 
 use app_paths::AppPaths;
-use mod_runtime::{ModRuntimeManager, JsRuntimeAdapter, JsRuntimeConfig};
 use mod_runtime::js_adapter::{create_js_runtime_config, run_js_event_loop};
+use mod_runtime::{JsRuntimeAdapter, JsRuntimeConfig, ModRuntimeManager};
 
-const VERSION: &str = "0.1.0-alpha";
+const VERSION: &str = "0.1.0";
 
 /// Compute SHA-512 hash of a string and return as hex string
 fn sha512_hash(input: &str) -> String {
@@ -41,35 +42,84 @@ fn sha512_hash(input: &str) -> String {
 /// min_version and max_version should be in format "major.minor.patch"
 /// Returns Ok(()) if version is in range, Err with message otherwise
 fn validate_version_range(
-    mod_id: &str,
+    context: &str,
     installed_version: &str,
     min_version: &str,
     max_version: &str,
 ) -> Result<(), String> {
     // Parse installed version
-    let installed = Version::parse(installed_version)
-        .map_err(|e| format!("Invalid installed version '{}' for mod '{}': {}", installed_version, mod_id, e))?;
+    let installed = Version::parse(installed_version).map_err(|e| {
+        format!(
+            "{}: Invalid installed version '{}': {}",
+            context, installed_version, e
+        )
+    })?;
 
     // Parse min and max versions
     let min = Version::parse(min_version)
-        .map_err(|e| format!("Invalid min_version '{}' for mod '{}': {}", min_version, mod_id, e))?;
+        .map_err(|e| format!("{}: Invalid min_version '{}': {}", context, min_version, e))?;
 
     let max = Version::parse(max_version)
-        .map_err(|e| format!("Invalid max_version '{}' for mod '{}': {}", max_version, mod_id, e))?;
+        .map_err(|e| format!("{}: Invalid max_version '{}': {}", context, max_version, e))?;
 
     // Check if installed version is within range (inclusive on both ends)
     if installed < min {
         return Err(format!(
-            "Mod '{}' version {} is below minimum required version {}",
-            mod_id, installed_version, min_version
+            "{}: version {} is below minimum required version {}",
+            context, installed_version, min_version
         ));
     }
 
     if installed > max {
         return Err(format!(
-            "Mod '{}' version {} is above maximum supported version {}",
-            mod_id, installed_version, max_version
+            "{}: version {} is above maximum supported version {}",
+            context, installed_version, max_version
         ));
+    }
+
+    Ok(())
+}
+
+/// Validate mod dependencies
+/// Checks:
+/// - "client" requirement against CLIENT_VERSION
+/// - Other mod requirements against loaded manifests
+fn validate_mod_dependencies(
+    mod_id: &str,
+    manifest: &ModManifest,
+    all_manifests: &HashMap<String, ModManifest>,
+    client_version: &str,
+) -> Result<(), String> {
+    for (dep_id, version_req) in &manifest.requires {
+        let (min_ver, max_ver) = parse_version_requirement(version_req);
+
+        if dep_id == "client" {
+            // Validate against client version
+            validate_version_range(
+                &format!("Mod '{}' requires client", mod_id),
+                client_version,
+                &min_ver,
+                &max_ver,
+            )?;
+        } else if dep_id == "server" {
+            // Server requirements are validated server-side, skip here
+            continue;
+        } else {
+            // Validate against another mod's version
+            if let Some(dep_manifest) = all_manifests.get(dep_id) {
+                validate_version_range(
+                    &format!("Mod '{}' requires '{}'", mod_id, dep_id),
+                    &dep_manifest.version,
+                    &min_ver,
+                    &max_ver,
+                )?;
+            } else {
+                return Err(format!(
+                    "Mod '{}' requires mod '{}' which is not available",
+                    mod_id, dep_id
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -95,7 +145,9 @@ impl Visit for FieldExtractor {
 
     fn record_debug(&mut self, field: &Field, value: &dyn std_fmt::Debug) {
         match field.name() {
-            "runtime_type" => self.runtime_type = Some(format!("{:?}", value).trim_matches('"').to_string()),
+            "runtime_type" => {
+                self.runtime_type = Some(format!("{:?}", value).trim_matches('"').to_string())
+            }
             "mod_id" => self.mod_id = Some(format!("{:?}", value).trim_matches('"').to_string()),
             "message" => self.message = Some(format!("{:?}", value).trim_matches('"').to_string()),
             _ => {}
@@ -123,11 +175,15 @@ where
     ) -> std_fmt::Result {
         let metadata = event.metadata();
 
-        let (dim_start, dim_end) = if self.ansi { ("\x1b[2m", "\x1b[0m") } else { ("", "") };
+        let (dim_start, dim_end) = if self.ansi {
+            ("\x1b[2m", "\x1b[0m")
+        } else {
+            ("", "")
+        };
         let (level_color, level_str) = match *metadata.level() {
             Level::ERROR => (if self.ansi { "\x1b[31m" } else { "" }, "ERROR"),
-            Level::WARN  => (if self.ansi { "\x1b[33m" } else { "" }, " WARN"),
-            Level::INFO  => (if self.ansi { "\x1b[32m" } else { "" }, " INFO"),
+            Level::WARN => (if self.ansi { "\x1b[33m" } else { "" }, " WARN"),
+            Level::INFO => (if self.ansi { "\x1b[32m" } else { "" }, " INFO"),
             Level::DEBUG => (if self.ansi { "\x1b[34m" } else { "" }, "DEBUG"),
             Level::TRACE => (if self.ansi { "\x1b[35m" } else { "" }, "TRACE"),
         };
@@ -140,7 +196,10 @@ where
         write!(writer, "{}{}{} ", level_color, level_str, color_end)?;
 
         let thread_id = format!("{:?}", std::thread::current().id());
-        if let Some(num_str) = thread_id.strip_prefix("ThreadId(").and_then(|s| s.strip_suffix(")")) {
+        if let Some(num_str) = thread_id
+            .strip_prefix("ThreadId(")
+            .and_then(|s| s.strip_suffix(")"))
+        {
             if let Ok(num) = num_str.parse::<u64>() {
                 write!(writer, "#{:03} ", num)?;
             }
@@ -173,7 +232,14 @@ where
 }
 
 /// Connect to game server and maintain connection
-async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_id: &str, locale: &LocaleManager, app_paths: &AppPaths) -> Result<(), Box<dyn std::error::Error>> {
+async fn connect_to_game_server(
+    uri: &str,
+    username: &str,
+    password: &str,
+    game_id: &str,
+    locale: &LocaleManager,
+    app_paths: &AppPaths,
+) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize game-specific directory
     info!("Initializing directories for game '{}'...", game_id);
     let game_root = app_paths.game_root(game_id)?;
@@ -185,15 +251,26 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
 
     // Parse game server URI (stam://host:port)
     if !uri.starts_with("stam://") {
-        return Err(locale.get_with_args("error-invalid-uri", Some(&fluent_args!{
-            "uri" => uri
-        })).into());
+        return Err(locale
+            .get_with_args(
+                "error-invalid-uri",
+                Some(&fluent_args! {
+                    "uri" => uri
+                }),
+            )
+            .into());
     }
 
     let host_port = uri.strip_prefix("stam://").unwrap();
-    info!("{}", locale.get_with_args("game-connecting", Some(&fluent_args!{
-        "host" => host_port
-    })));
+    info!(
+        "{}",
+        locale.get_with_args(
+            "game-connecting",
+            Some(&fluent_args! {
+                "host" => host_port
+            })
+        )
+    );
 
     // Connect to game server
     let mut stream = TcpStream::connect(host_port).await?;
@@ -202,30 +279,50 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
     // Read Welcome message
     match stream.read_primal_message().await {
         Ok(PrimalMessage::Welcome { version }) => {
-            info!("{}", locale.get_with_args("server-welcome", Some(&fluent_args!{
-                "version" => version.as_str()
-            })));
+            info!(
+                "{}",
+                locale.get_with_args(
+                    "server-welcome",
+                    Some(&fluent_args! {
+                        "version" => version.as_str()
+                    })
+                )
+            );
 
             // Check version compatibility
             let client_version_parts: Vec<&str> = VERSION.split('.').collect();
             let server_version_parts: Vec<&str> = version.split('.').collect();
 
             if client_version_parts.len() >= 2 && server_version_parts.len() >= 2 {
-                let client_major_minor = format!("{}.{}", client_version_parts[0], client_version_parts[1]);
-                let server_major_minor = format!("{}.{}", server_version_parts[0], server_version_parts[1]);
+                let client_major_minor =
+                    format!("{}.{}", client_version_parts[0], client_version_parts[1]);
+                let server_major_minor =
+                    format!("{}.{}", server_version_parts[0], server_version_parts[1]);
 
                 if client_major_minor != server_major_minor {
-                    error!("{}", locale.get_with_args("version-mismatch", Some(&fluent_args!{
-                        "client" => VERSION,
-                        "server" => version.as_str()
-                    })));
+                    error!(
+                        "{}",
+                        locale.get_with_args(
+                            "version-mismatch",
+                            Some(&fluent_args! {
+                                "client" => VERSION,
+                                "server" => version.as_str()
+                            })
+                        )
+                    );
                     return Err(locale.get("disconnect-version-mismatch").into());
                 }
 
-                info!("{}", locale.get_with_args("version-compatible", Some(&fluent_args!{
-                    "client" => VERSION,
-                    "server" => version.as_str()
-                })));
+                info!(
+                    "{}",
+                    locale.get_with_args(
+                        "version-compatible",
+                        Some(&fluent_args! {
+                            "client" => VERSION,
+                            "server" => version.as_str()
+                        })
+                    )
+                );
             }
         }
         Ok(msg) => {
@@ -264,12 +361,9 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
             if !mods.is_empty() {
                 info!("Received {} required mod(s):", mods.len());
                 for mod_info in &mods {
-                    info!("  - {} [{}] (v{} - v{}): {}",
-                        mod_info.mod_id,
-                        mod_info.mod_type,
-                        mod_info.min_version,
-                        mod_info.max_version,
-                        mod_info.download_url
+                    info!(
+                        "  - {} [{}]: {}",
+                        mod_info.mod_id, mod_info.mod_type, mod_info.download_url
                     );
                 }
             } else {
@@ -277,17 +371,20 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
             }
 
             // Validate ALL mods are present before continuing
-            info!("Validating mods...");
+            // First pass: load all manifests
+            let mut all_manifests: HashMap<String, ModManifest> = HashMap::new();
 
             if !mods.is_empty() {
-                info!("Found {} mod(s) to validate", mods.len());
+                info!("Found {} mod(s) to load", mods.len());
 
+                // First pass: check presence and load manifests
                 for mod_info in &mods {
                     let mod_dir = mods_dir.join(&mod_info.mod_id);
 
                     // Check if mod directory exists
                     if !mod_dir.exists() {
-                        error!("Mod '{}' not found in {}",
+                        error!(
+                            "Mod '{}' not found in {}",
                             mod_info.mod_id,
                             mod_dir.display()
                         );
@@ -297,46 +394,54 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                             "Missing required mod: {} (expected at {})",
                             mod_info.mod_id,
                             mod_dir.display()
-                        ).into());
+                        )
+                        .into());
                     }
 
-                    info!("  ✓ {} [{}] found", mod_info.mod_id, mod_info.mod_type);
-
-                    // Read and validate mod version
+                    // Read manifest
                     let manifest_path = mod_dir.join("manifest.json");
                     if !manifest_path.exists() {
                         error!("Mod '{}' missing manifest.json", mod_info.mod_id);
                         return Err(format!(
                             "Mod '{}' is missing manifest.json file",
                             mod_info.mod_id
-                        ).into());
+                        )
+                        .into());
                     }
 
                     let manifest = ModManifest::from_json_file(manifest_path.to_str().unwrap())
-                        .map_err(|e| format!("Failed to load manifest for mod '{}': {}", mod_info.mod_id, e))?;
+                        .map_err(|e| {
+                            format!(
+                                "Failed to load manifest for mod '{}': {}",
+                                mod_info.mod_id, e
+                            )
+                        })?;
 
-                    // Validate version is within required range
-                    if let Err(e) = validate_version_range(
-                        &mod_info.mod_id,
-                        &manifest.version,
-                        &mod_info.min_version,
-                        &mod_info.max_version,
-                    ) {
-                        error!("{}", e);
-                        error!("Mod version mismatch");
-                        error!("TODO: Automatic download/update will be implemented in the future");
-                        return Err(e.into());
-                    }
-
-                    info!("  ✓ {} version {} OK (required: {} - {})",
-                        mod_info.mod_id,
-                        manifest.version,
-                        mod_info.min_version,
-                        mod_info.max_version
-                    );
+                    info!("  ✓ {} [{}:{}] found", mod_info.mod_id, mod_info.mod_type, manifest.version);
+                    all_manifests.insert(mod_info.mod_id.clone(), manifest);
                 }
 
-                info!("All mods validated successfully");
+                // Second pass: validate dependencies
+                info!("> Validating mod dependencies...");
+                for mod_info in &mods {
+                    if let Some(manifest) = all_manifests.get(&mod_info.mod_id) {
+                        if !manifest.requires.is_empty() {
+                            //info!("  Checking dependencies for '{}'...", mod_info.mod_id);
+                            if let Err(e) = validate_mod_dependencies(
+                                &mod_info.mod_id,
+                                manifest,
+                                &all_manifests,
+                                VERSION,
+                            ) {
+                                error!("{}", e);
+                                return Err(e.into());
+                            }
+                            //info!("  ✓ {} dependencies OK", mod_info.mod_id);
+                        }
+                    }
+                }
+
+                info!("< All mods validated successfully");
             } else {
                 info!("No mods required");
             }
@@ -349,19 +454,23 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                 let mut runtime_manager = ModRuntimeManager::new();
 
                 // Initialize JavaScript runtime (one shared runtime for all JS mods)
-                info!("Initializing JavaScript runtime...");
+                //info!("Initializing JavaScript runtime...");
                 let runtime_config = create_js_runtime_config(&app_paths, &game_id)?;
                 let js_adapter = JsRuntimeAdapter::new(runtime_config)?;
 
                 // Get runtime handle BEFORE moving the adapter to the manager
                 let js_runtime = js_adapter.get_runtime();
 
-                runtime_manager.register_adapter(stam_mod_runtimes::RuntimeType::JavaScript, Box::new(js_adapter));
+                runtime_manager.register_adapter(
+                    stam_mod_runtimes::RuntimeType::JavaScript,
+                    Box::new(js_adapter),
+                );
 
                 // First pass: Register all mod aliases for cross-mod imports
                 // This must happen BEFORE loading any mod, so that import "@mod-id" works
                 info!("Registering mod aliases...");
-                let mut mod_entry_points: Vec<(String, std::path::PathBuf, String, String)> = Vec::new();
+                let mut mod_entry_points: Vec<(String, std::path::PathBuf, String, String)> =
+                    Vec::new();
 
                 for mod_info in &mods {
                     let mod_dir = mods_dir.join(&mod_info.mod_id);
@@ -384,7 +493,7 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                         &mod_info.mod_id,
                         absolute_entry_point,
                     );
-                    info!("  Registered @{}", mod_info.mod_id);
+                    //info!("  Registered @{}", mod_info.mod_id);
 
                     mod_entry_points.push((
                         mod_info.mod_id.clone(),
@@ -395,21 +504,22 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                 }
 
                 // Second pass: Load all mods
-                info!("Loading mods...");
-                for (mod_id, entry_point_path, _entry_point_name, mod_type) in &mod_entry_points {
-                    info!("  Loading {} [{}]", mod_id, mod_type);
-                    runtime_manager.load_mod(mod_id, entry_point_path)?;
-                }
-
-                // Third pass: Call onAttach lifecycle hook for ALL mods
                 info!("Attaching mods...");
-                for (mod_id, _, _, mod_type) in &mod_entry_points {
-                    info!("  Attaching {} [{}]", mod_id, mod_type);
+                for (mod_id, entry_point_path, _entry_point_name, _mod_type) in &mod_entry_points {
+                    //info!("  Loading/Attach {} [{}]", mod_id, mod_type);
+                    runtime_manager.load_mod(mod_id, entry_point_path)?;
                     runtime_manager.call_mod_function(mod_id, "onAttach")?;
                 }
 
+                // Third pass: Call onAttach lifecycle hook for ALL mods
+                // info!("Attaching mods...");
+                // for (mod_id, _, _, _mod_type) in &mod_entry_points {
+                //     info!("  Attaching {}", mod_id);
+                // }
+
                 // Fourth pass: Call onBootstrap ONLY for bootstrap mods
-                let bootstrap_mods: Vec<_> = mod_entry_points.iter()
+                let bootstrap_mods: Vec<_> = mod_entry_points
+                    .iter()
                     .filter(|(_, _, _, mod_type)| mod_type == "bootstrap")
                     .collect();
 
@@ -428,9 +538,15 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
         Ok(GameMessage::Error { message }) => {
             // Message from server could be a locale ID
             let localized_msg = locale.get(&message);
-            error!("{}", locale.get_with_args("server-error", Some(&fluent_args!{
-                "message" => localized_msg.as_str()
-            })));
+            error!(
+                "{}",
+                locale.get_with_args(
+                    "server-error",
+                    Some(&fluent_args! {
+                        "message" => localized_msg.as_str()
+                    })
+                )
+            );
             return Err(localized_msg.into());
         }
         Ok(msg) => {
@@ -498,9 +614,15 @@ async fn maintain_game_connection(stream: &mut TcpStream, locale: &LocaleManager
             Ok(GameMessage::Error { message }) => {
                 // Message could be a locale ID
                 let localized_msg = locale.get(&message);
-                error!("{}", locale.get_with_args("server-error", Some(&fluent_args!{
-                    "message" => localized_msg.as_str()
-                })));
+                error!(
+                    "{}",
+                    locale.get_with_args(
+                        "server-error",
+                        Some(&fluent_args! {
+                            "message" => localized_msg.as_str()
+                        })
+                    )
+                );
                 break;
             }
             Ok(msg) => {
@@ -567,31 +689,41 @@ async fn main() {
     if args.log_file {
         // File logging: no ANSI colors
         let file_appender = tracing_appender::rolling::never(".", "stam_client.log");
-        let formatter_stdout = CustomFormatter { timer: timer.clone(), ansi: use_ansi };
+        let formatter_stdout = CustomFormatter {
+            timer: timer.clone(),
+            ansi: use_ansi,
+        };
         let formatter_file = CustomFormatter { timer, ansi: false };
 
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter_stdout)
-                    .with_writer(std::io::stdout)
+                    .with_writer(std::io::stdout),
             )
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter_file)
-                    .with_writer(file_appender)
+                    .with_writer(file_appender),
             )
-            .with(tracing_subscriber::filter::LevelFilter::from_level(Level::DEBUG))
+            .with(tracing_subscriber::filter::LevelFilter::from_level(
+                Level::DEBUG,
+            ))
             .init();
     } else {
-        let formatter = CustomFormatter { timer, ansi: use_ansi };
+        let formatter = CustomFormatter {
+            timer,
+            ansi: use_ansi,
+        };
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter)
-                    .with_writer(std::io::stdout)
+                    .with_writer(std::io::stdout),
             )
-            .with(tracing_subscriber::filter::LevelFilter::from_level(Level::DEBUG))
+            .with(tracing_subscriber::filter::LevelFilter::from_level(
+                Level::DEBUG,
+            ))
             .init();
     }
 
@@ -616,10 +748,7 @@ async fn main() {
 
     // Initialize locale manager
     let locale = match LocaleManager::new(&args.assets, args.lang.as_deref()) {
-        Ok(lm) => {
-            info!("Locale system initialized: {}", lm.current_locale());
-            lm
-        }
+        Ok(lm) => lm,
         Err(e) => {
             error!("Failed to initialize locale system: {}", e);
             error!("Continuing without localization support");
@@ -629,9 +758,15 @@ async fn main() {
 
     // Parse URI
     if !args.uri.starts_with("stam://") {
-        error!("{}", locale.get_with_args("error-invalid-uri", Some(&fluent_args!{
-            "uri" => args.uri.as_str()
-        })));
+        error!(
+            "{}",
+            locale.get_with_args(
+                "error-invalid-uri",
+                Some(&fluent_args! {
+                    "uri" => args.uri.as_str()
+                })
+            )
+        );
         return;
     }
 
@@ -643,9 +778,15 @@ async fn main() {
         let host = &uri_without_scheme[at_pos + 1..];
         (Some(creds), host)
     } else {
-        error!("{}", locale.get_with_args("error-invalid-uri", Some(&fluent_args!{
-            "uri" => args.uri.as_str()
-        })));
+        error!(
+            "{}",
+            locale.get_with_args(
+                "error-invalid-uri",
+                Some(&fluent_args! {
+                    "uri" => args.uri.as_str()
+                })
+            )
+        );
         return;
     };
 
@@ -655,34 +796,64 @@ async fn main() {
             let pass = &creds[colon_pos + 1..];
             (user.to_string(), pass.to_string())
         } else {
-            error!("{}", locale.get_with_args("error-invalid-uri", Some(&fluent_args!{
-                "uri" => args.uri.as_str()
-            })));
+            error!(
+                "{}",
+                locale.get_with_args(
+                    "error-invalid-uri",
+                    Some(&fluent_args! {
+                        "uri" => args.uri.as_str()
+                    })
+                )
+            );
             return;
         }
     } else {
-        error!("{}", locale.get_with_args("error-invalid-uri", Some(&fluent_args!{
-            "uri" => args.uri.as_str()
-        })));
+        error!(
+            "{}",
+            locale.get_with_args(
+                "error-invalid-uri",
+                Some(&fluent_args! {
+                    "uri" => args.uri.as_str()
+                })
+            )
+        );
         return;
     };
 
-    info!("{}", locale.get_with_args("connecting", Some(&fluent_args!{
-        "host" => host_port
-    })));
+    info!(
+        "{}",
+        locale.get_with_args(
+            "connecting",
+            Some(&fluent_args! {
+                "host" => host_port
+            })
+        )
+    );
 
     // Connect to server
     let mut stream = match TcpStream::connect(host_port).await {
         Ok(s) => {
-            info!("{}", locale.get_with_args("connected", Some(&fluent_args!{
-                "host" => host_port
-            })));
+            info!(
+                "{}",
+                locale.get_with_args(
+                    "connected",
+                    Some(&fluent_args! {
+                        "host" => host_port
+                    })
+                )
+            );
             s
         }
         Err(e) => {
-            error!("{}", locale.get_with_args("connection-failed", Some(&fluent_args!{
-                "error" => e.to_string().as_str()
-            })));
+            error!(
+                "{}",
+                locale.get_with_args(
+                    "connection-failed",
+                    Some(&fluent_args! {
+                        "error" => e.to_string().as_str()
+                    })
+                )
+            );
             return;
         }
     };
@@ -690,30 +861,50 @@ async fn main() {
     // Read Welcome message
     match stream.read_primal_message().await {
         Ok(PrimalMessage::Welcome { version }) => {
-            info!("{}", locale.get_with_args("server-welcome", Some(&fluent_args!{
-                "version" => version.as_str()
-            })));
+            info!(
+                "{}",
+                locale.get_with_args(
+                    "server-welcome",
+                    Some(&fluent_args! {
+                        "version" => version.as_str()
+                    })
+                )
+            );
 
             // Check version compatibility (major.minor must match)
             let client_version_parts: Vec<&str> = VERSION.split('.').collect();
             let server_version_parts: Vec<&str> = version.split('.').collect();
 
             if client_version_parts.len() >= 2 && server_version_parts.len() >= 2 {
-                let client_major_minor = format!("{}.{}", client_version_parts[0], client_version_parts[1]);
-                let server_major_minor = format!("{}.{}", server_version_parts[0], server_version_parts[1]);
+                let client_major_minor =
+                    format!("{}.{}", client_version_parts[0], client_version_parts[1]);
+                let server_major_minor =
+                    format!("{}.{}", server_version_parts[0], server_version_parts[1]);
 
                 if client_major_minor != server_major_minor {
-                    error!("{}", locale.get_with_args("version-mismatch", Some(&fluent_args!{
-                        "client" => VERSION,
-                        "server" => version.as_str()
-                    })));
+                    error!(
+                        "{}",
+                        locale.get_with_args(
+                            "version-mismatch",
+                            Some(&fluent_args! {
+                                "client" => VERSION,
+                                "server" => version.as_str()
+                            })
+                        )
+                    );
                     return;
                 }
 
-                info!("{}", locale.get_with_args("version-compatible", Some(&fluent_args!{
-                    "client" => VERSION,
-                    "server" => version.as_str()
-                })));
+                info!(
+                    "{}",
+                    locale.get_with_args(
+                        "version-compatible",
+                        Some(&fluent_args! {
+                            "client" => VERSION,
+                            "server" => version.as_str()
+                        })
+                    )
+                );
             }
         }
         Ok(msg) => {
@@ -737,7 +928,7 @@ async fn main() {
         client_version: VERSION.to_string(),
         username: username.clone(),
         password_hash,
-        game_id: None,  // Not needed for PrimalLogin
+        game_id: None, // Not needed for PrimalLogin
     };
 
     if let Err(e) = stream.write_primal_message(&intent).await {
@@ -748,9 +939,15 @@ async fn main() {
     // Wait for ServerList or Error
     match stream.read_primal_message().await {
         Ok(PrimalMessage::ServerList { servers }) => {
-            info!("{}", locale.get_with_args("server-list-received", Some(&fluent_args!{
-                "count" => servers.len()
-            })));
+            info!(
+                "{}",
+                locale.get_with_args(
+                    "server-list-received",
+                    Some(&fluent_args! {
+                        "count" => servers.len()
+                    })
+                )
+            );
 
             if servers.is_empty() {
                 warn!("{}", locale.get("server-list-empty"));
@@ -758,24 +955,56 @@ async fn main() {
             }
 
             for (i, server) in servers.iter().enumerate() {
-                info!("  [{}] {} (game_id: {}) - {}", i + 1, server.name, server.game_id, server.uri);
+                info!(
+                    "  [{}] {} (game_id: {}) - {}",
+                    i + 1,
+                    server.name,
+                    server.game_id,
+                    server.uri
+                );
             }
 
             // Connect to first server in list
             let first_server = &servers[0];
-            info!("Attempting to connect to game server: {} (game_id: {}, uri: {})", first_server.name, first_server.game_id, first_server.uri);
+            info!(
+                "Attempting to connect to game server: {} (game_id: {}, uri: {})",
+                first_server.name, first_server.game_id, first_server.uri
+            );
 
             // Parse game server URI and connect
-            if let Err(e) = connect_to_game_server(&first_server.uri, &username, &password, &first_server.game_id, &locale, &app_paths).await {
-                error!("{}: {}", locale.get("connection-failed"), e);
+            if let Err(e) = connect_to_game_server(
+                &first_server.uri,
+                &username,
+                &password,
+                &first_server.game_id,
+                &locale,
+                &app_paths,
+            )
+            .await
+            {
+                error!(
+                    "{}",
+                    locale.get_with_args(
+                        "connection-failed",
+                        Some(&fluent_args! {
+                            "error" => e.to_string().as_str()
+                        })
+                    )
+                );
             }
         }
         Ok(PrimalMessage::Error { message }) => {
             // Message could be a locale ID
             let localized_msg = locale.get(&message);
-            error!("{}", locale.get_with_args("server-error", Some(&fluent_args!{
-                "message" => localized_msg.as_str()
-            })));
+            error!(
+                "{}",
+                locale.get_with_args(
+                    "server-error",
+                    Some(&fluent_args! {
+                        "message" => localized_msg.as_str()
+                    })
+                )
+            );
         }
         Ok(msg) => {
             error!("{}: {:?}", locale.get("error-unexpected-message"), msg);

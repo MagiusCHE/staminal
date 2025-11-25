@@ -47,7 +47,7 @@ impl Resolver for ModAliasResolver {
         base: &str,
         name: &str,
     ) -> rquickjs::Result<String> {
-        debug!("ModAliasResolver: resolve called with base='{}', name='{}'", base, name);
+        //debug!("ModAliasResolver: resolve called with base='{}', name='{}'", base, name);
 
         // Check if this is a mod alias import (@mod-id)
         if name.starts_with('@') {
@@ -74,8 +74,11 @@ impl Resolver for ModAliasResolver {
                 //debug!("ModAliasResolver: {} -> {}", name, resolved);
                 return Ok(resolved);
             } else {
-                error!("ModAliasResolver: Unknown mod alias '{}'. Available aliases: {:?}",
-                    alias, registry.keys().collect::<Vec<_>>());
+                error!(
+                    "ModAliasResolver: Unknown mod alias '{}'. Available aliases: {:?}",
+                    alias,
+                    registry.keys().collect::<Vec<_>>()
+                );
                 return Err(rquickjs::Error::new_resolving(base, name));
             }
         }
@@ -85,12 +88,12 @@ impl Resolver for ModAliasResolver {
             let base_dir = Path::new(base).parent().unwrap_or(Path::new("."));
             let resolved = base_dir.join(name);
             let resolved_str = resolved.to_string_lossy().to_string();
-            debug!("ModAliasResolver: relative '{}' (from '{}') -> '{}'", name, base, resolved_str);
+            //debug!("ModAliasResolver: relative '{}' (from '{}') -> '{}'", name, base, resolved_str);
             return Ok(resolved_str);
         }
 
         // For absolute or other imports, return as-is
-        debug!("ModAliasResolver: passthrough '{}'", name);
+        //debug!("ModAliasResolver: passthrough '{}'", name);
         Ok(name.to_string())
     }
 }
@@ -100,16 +103,16 @@ struct FilesystemLoader;
 
 impl Loader for FilesystemLoader {
     fn load<'js>(&mut self, ctx: &rquickjs::Ctx<'js>, path: &str) -> rquickjs::Result<Module<'js>> {
-        debug!("FilesystemLoader: Loading module from path: '{}'", path);
+        //debug!("FilesystemLoader: Loading module from path: '{}'", path);
 
         // Try to read the file, with automatic .js extension fallback
         let (actual_path, content) = Self::read_with_js_fallback(path)?;
 
-        debug!(
-            "FilesystemLoader: Successfully read {} bytes from '{}'",
-            content.len(),
-            actual_path
-        );
+        // debug!(
+        //     "FilesystemLoader: Successfully read {} bytes from '{}'",
+        //     content.len(),
+        //     actual_path
+        // );
 
         // Compile and return the module using the actual path found
         Module::declare(ctx.clone(), actual_path.clone(), content).map_err(|e| {
@@ -147,7 +150,10 @@ impl FilesystemLoader {
         }
 
         // Nothing worked, return error with original path
-        error!("FilesystemLoader: Failed to read file '{}' (also tried .js extension)", path);
+        error!(
+            "FilesystemLoader: Failed to read file '{}' (also tried .js extension)",
+            path
+        );
         Err(rquickjs::Error::new_loading(path))
     }
 }
@@ -207,27 +213,24 @@ impl JsRuntimeAdapter {
         let game_data_dir = self.config.game_data_dir().clone();
         let game_config_dir = self.config.game_config_dir().clone();
 
-        debug!("setup_global_apis: game_data_dir={:?}, game_config_dir={:?}",
-            game_data_dir, game_config_dir);
+        // debug!(
+        //     "setup_global_apis: game_data_dir={:?}, game_config_dir={:?}",
+        //     game_data_dir, game_config_dir
+        // );
 
         context
             .with(|ctx| {
                 // Register console API
-                debug!("Setting up console API...");
+                //debug!("Begin API registrations...");
                 bindings::setup_console_api(ctx.clone())?;
-                debug!("Console API setup complete");
 
                 // Register process API with game-specific directories
-                debug!("Setting up process API...");
                 let app_api = AppApi::new(game_data_dir, game_config_dir);
                 bindings::setup_process_api(ctx.clone(), app_api)?;
-                debug!("Process API setup complete");
 
                 // Register timer API (setTimeout, setInterval, etc.)
-                debug!("Setting up timer API...");
                 bindings::setup_timer_api(ctx.clone())?;
-                debug!("Timer API setup complete");
-
+                //debug!(" > API registrations completed successfully");
                 Ok::<(), rquickjs::Error>(())
             })
             .await?;
@@ -334,12 +337,16 @@ impl JsRuntimeAdapter {
 
         // Register mod alias for cross-mod imports (@mod-id syntax)
         // Use absolute path for reliable resolution - canonicalize to remove ./ and normalize
-        let absolute_entry_point = fs::canonicalize(mod_path)
-            .map_err(|e| format!("Failed to canonicalize path '{}': {}", mod_path.display(), e))?;
+        let absolute_entry_point = fs::canonicalize(mod_path).map_err(|e| {
+            format!(
+                "Failed to canonicalize path '{}': {}",
+                mod_path.display(),
+                e
+            )
+        })?;
         register_mod_alias(mod_id, absolute_entry_point.clone());
 
         // Add mod directory to the list of search paths and update loader
-        debug!("mod_dirs before: {:?}, checking if contains {:?}", self.mod_dirs, mod_dir);
         if !self.mod_dirs.contains(&mod_dir) {
             self.mod_dirs.push(mod_dir.clone());
 
@@ -347,9 +354,7 @@ impl JsRuntimeAdapter {
             let resolver = ModAliasResolver;
 
             let loader = (FilesystemLoader, ModuleLoader::default());
-            debug!("Setting loader for runtime...");
             self.runtime.set_loader(resolver, loader).await;
-            debug!("Loader set successfully");
         }
 
         // Create a new isolated AsyncContext for this mod
@@ -359,14 +364,12 @@ impl JsRuntimeAdapter {
         self.setup_global_apis(&context).await?;
 
         // Set global __MOD_ID__ variable for console logging
-        debug!("Setting __MOD_ID__ to '{}'", mod_id);
         context
             .with(|ctx| {
                 ctx.globals().set("__MOD_ID__", mod_id)?;
                 Ok::<(), rquickjs::Error>(())
             })
             .await?;
-        debug!("__MOD_ID__ set successfully");
 
         // Use absolute path for the initial module import
         // This ensures the loader can find the file regardless of working directory
@@ -374,34 +377,28 @@ impl JsRuntimeAdapter {
 
         let mod_id_owned = mod_id.to_string();
 
-        debug!("Importing module from path: '{}'", module_path_str);
-
         // Read the entry point file content
         let entry_content = fs::read_to_string(&absolute_entry_point)
             .map_err(|e| format!("Failed to read entry point '{}': {}", module_path_str, e))?;
-
-        debug!("Read {} bytes from entry point", entry_content.len());
 
         // Load the module from the filesystem
         // Use Result<String, String> for ParallelSend compatibility
         let result: Result<String, String> = context
             .with(|ctx| {
-                debug!("Inside context, declaring module for '{}'", mod_id_owned);
-
                 // Declare the module with the file content
                 match Module::declare(ctx.clone(), module_path_str.clone(), entry_content) {
                     Ok(module) => {
-                        debug!("Module declared, now evaluating...");
                         // Evaluate the module to execute it
                         match module.eval() {
                             Ok((evaluated_module, promise)) => match promise.finish::<()>() {
                                 Ok(_) => {
-                                    debug!("Module '{}' evaluated successfully", mod_id_owned);
                                     // Store the module namespace in a global variable for later access
                                     // This avoids re-importing the module
-                                    let namespace_key = format!("__MODULE_NS_{}__", mod_id_owned.replace("-", "_"));
+                                    let namespace_key =
+                                        format!("__MODULE_NS_{}__", mod_id_owned.replace("-", "_"));
                                     if let Ok(namespace) = evaluated_module.namespace() {
-                                        if let Err(e) = ctx.globals().set(&namespace_key, namespace) {
+                                        if let Err(e) = ctx.globals().set(&namespace_key, namespace)
+                                        {
                                             error!("Failed to store module namespace: {:?}", e);
                                         }
                                     }
@@ -416,7 +413,10 @@ impl JsRuntimeAdapter {
                             Err(e) => {
                                 let error_msg = Self::format_js_error(&ctx, &e);
                                 error!("\n{}", error_msg);
-                                Err(format!("JavaScript error evaluating mod '{}'", mod_id_owned))
+                                Err(format!(
+                                    "JavaScript error evaluating mod '{}'",
+                                    mod_id_owned
+                                ))
                             }
                         }
                     }
@@ -470,9 +470,7 @@ impl JsRuntimeAdapter {
                 // Get the stored module namespace from globals
                 match ctx.globals().get::<_, Object>(&namespace_key) {
                     Ok(module_namespace) => {
-                        match module_namespace
-                            .get::<_, rquickjs::Function>(&function_name_owned)
-                        {
+                        match module_namespace.get::<_, rquickjs::Function>(&function_name_owned) {
                             Ok(func) => {
                                 match func.call::<(), ()>(()) {
                                     Ok(_) => {
@@ -499,7 +497,10 @@ impl JsRuntimeAdapter {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to get module namespace '{}': {:?}", namespace_key, e);
+                        error!(
+                            "Failed to get module namespace '{}': {:?}",
+                            namespace_key, e
+                        );
                         Err(format!(
                             "Failed to get module namespace for mod '{}'",
                             mod_id_owned
@@ -566,7 +567,10 @@ impl JsRuntimeAdapter {
                         }
                     }
                     Err(e) => {
-                        error!("Failed to get module namespace '{}': {:?}", namespace_key, e);
+                        error!(
+                            "Failed to get module namespace '{}': {:?}",
+                            namespace_key, e
+                        );
                         Err(format!(
                             "Failed to get module namespace for mod '{}'",
                             mod_id_owned

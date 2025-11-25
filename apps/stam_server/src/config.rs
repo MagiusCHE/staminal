@@ -4,27 +4,16 @@ use stam_schema::Validatable;
 use stam_protocol::ModInfo;
 use std::collections::HashMap;
 
-/// Version range for a mod
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ModVersionRange {
-    /// Minimum required version (major.minor.patch)
-    pub min: String,
-    /// Maximum supported version (major.minor.patch)
-    pub max: String,
-}
-
 /// Mod configuration for a game
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ModConfig {
     /// Whether this mod is enabled
     pub enabled: bool,
-    /// Mod type (e.g., "bootstrap", "game")
+    /// Mod type (e.g., "bootstrap", "library")
     #[serde(rename = "type")]
     pub mod_type: String,
     /// URI for client to download this mod
     pub client_download: String,
-    /// Version range for this mod
-    pub versions: ModVersionRange,
 }
 
 /// Game configuration
@@ -153,23 +142,6 @@ impl Config {
                         game_id, mod_id
                     ));
                 }
-
-                // Validate version strings are not empty
-                if mod_config.versions.min.is_empty() {
-                    return Err(format!(
-                        "Game '{}': Mod '{}' has empty 'versions.min' field",
-                        game_id, mod_id
-                    ));
-                }
-
-                if mod_config.versions.max.is_empty() {
-                    return Err(format!(
-                        "Game '{}': Mod '{}' has empty 'versions.max' field",
-                        game_id, mod_id
-                    ));
-                }
-
-                // TODO: Add version string format validation (e.g., "1.0.0")
             }
 
             // Build mod list for this game (done once at boot)
@@ -179,8 +151,6 @@ impl Config {
                     ModInfo {
                         mod_id: mod_id.clone(),
                         mod_type: mod_config.mod_type.clone(),
-                        min_version: mod_config.versions.min.clone(),
-                        max_version: mod_config.versions.max.clone(),
                         download_url: mod_config.client_download.clone(),
                     }
                 })

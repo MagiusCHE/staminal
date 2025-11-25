@@ -1,7 +1,13 @@
 {
     "name": "mods-manager",
     "version": "1.0.0",
-    "description": "Initial Client interface used to inform user about Mods downloading progress",    
+    "description": "Initial Client interface used to inform user about Mods downloading progress",
     "entry_point": "index.js",
-    "priority": 0
+    "priority": 0,
+    "requires": {
+        "client": "0.1.0",
+        "server": "0.1.0",
+        "js-helper": "0.2.0"
+    },
+    "type": "bootstrap"
 }

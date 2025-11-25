@@ -6,7 +6,7 @@ pub mod error;
 pub mod mod_manifest;
 
 pub use error::{SchemaError, Result};
-pub use mod_manifest::ModManifest;
+pub use mod_manifest::{ModManifest, parse_version_requirement};
 
 /// Trait for types that can be validated against JSON Schema
 pub trait Validatable: JsonSchema + for<'de> Deserialize<'de> {

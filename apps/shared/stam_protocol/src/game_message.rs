@@ -5,12 +5,8 @@ use serde::{Deserialize, Serialize};
 pub struct ModInfo {
     /// Mod ID (unique identifier)
     pub mod_id: String,
-    /// Mod type (e.g., "bootstrap", "game", etc.)
+    /// Mod type (e.g., "bootstrap", "library", etc.)
     pub mod_type: String,
-    /// Minimum required version (major.minor.patch)
-    pub min_version: String,
-    /// Maximum supported version (major.minor.patch)
-    pub max_version: String,
     /// Download URL for this mod
     pub download_url: String,
 }

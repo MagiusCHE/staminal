@@ -3,8 +3,8 @@ use fluent_bundle::{FluentArgs, FluentValue};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
+use tracing::{error, info, warn};
 use unic_langid::LanguageIdentifier;
-use tracing::{info, warn, error};
 
 /// Strip Unicode bidirectional isolate characters from a string.
 /// Fluent inserts these (U+2068 FSI, U+2069 PDI, U+2066 LRI, U+2067 RLI) around placeholders
@@ -28,7 +28,10 @@ impl LocaleManager {
     /// # Arguments
     /// * `assets_path` - Path to assets directory containing locales
     /// * `preferred_locale` - Optional locale to use (overrides system locale)
-    pub fn new(assets_path: &str, preferred_locale: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(
+        assets_path: &str,
+        preferred_locale: Option<&str>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut manager = LocaleManager {
             bundles: HashMap::new(),
             current_locale: String::new(),
@@ -40,12 +43,12 @@ impl LocaleManager {
 
         // Determine which locale to use
         let target_locale = if let Some(locale) = preferred_locale {
-            info!("Using specified locale: {}", locale);
+            //info!("Using specified locale: {}", locale);
             locale.to_string()
         } else {
             // Detect system locale
             let system_locale = Self::detect_system_locale();
-            info!("Detected system locale: {}", system_locale);
+            //info!("Detected system locale: {}", system_locale);
             system_locale
         };
 
@@ -53,7 +56,10 @@ impl LocaleManager {
         if manager.bundles.contains_key(&target_locale) {
             manager.current_locale = target_locale;
         } else {
-            warn!("Locale {} not available, falling back to {}", target_locale, manager.fallback_locale);
+            warn!(
+                "Locale {} not available, falling back to {}",
+                target_locale, manager.fallback_locale
+            );
             manager.current_locale = manager.fallback_locale.clone();
         }
 
@@ -78,8 +84,8 @@ impl LocaleManager {
             if path.is_dir() {
                 if let Some(locale_name) = path.file_name().and_then(|n| n.to_str()) {
                     match self.load_locale(locale_name, &path) {
-                        Ok(_) => info!("Loaded locale: {}", locale_name),
                         Err(e) => warn!("Failed to load locale {}: {}", locale_name, e),
+                        Ok(_) => (),
                     }
                 }
             }
@@ -93,7 +99,11 @@ impl LocaleManager {
     }
 
     /// Load a single locale from its directory
-    fn load_locale(&mut self, locale_name: &str, locale_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn load_locale(
+        &mut self,
+        locale_name: &str,
+        locale_path: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         // Parse language identifier
         let langid: LanguageIdentifier = locale_name.parse()?;
 
@@ -106,7 +116,8 @@ impl LocaleManager {
             let ftl_string = fs::read_to_string(&main_file)?;
             let resource = FluentResource::try_new(ftl_string)
                 .map_err(|e| format!("Failed to parse FTL: {:?}", e))?;
-            bundle.add_resource(resource)
+            bundle
+                .add_resource(resource)
                 .map_err(|e| format!("Failed to add resource: {:?}", e))?;
         } else {
             return Err(format!("main.ftl not found in {:?}", locale_path).into());
@@ -118,8 +129,7 @@ impl LocaleManager {
 
     /// Detect system locale using sys-locale crate
     fn detect_system_locale() -> String {
-        sys_locale::get_locale()
-            .unwrap_or_else(|| "en-US".to_string())
+        sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string())
     }
 
     /// Get a localized message by ID

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use std::collections::HashMap;
 use crate::Validatable;
 
 /// Mod manifest structure (manifest.json)
@@ -28,9 +29,33 @@ pub struct ModManifest {
     #[schemars(description = "Loading priority - lower values load earlier")]
     #[serde(default)]
     pub priority: i32,
+
+    /// Mod type: "bootstrap" or "library"
+    #[schemars(description = "Mod type: 'bootstrap' (entry point) or 'library' (helper)")]
+    #[serde(rename = "type", default)]
+    pub mod_type: Option<String>,
+
+    /// Dependencies on other mods, client, or server
+    /// Key is mod-id (or "client"/"server" for engine version requirements)
+    /// Value is version constraint: "1.0.0" for exact, "1.0.0,2.0.0" for range (min,max)
+    #[schemars(description = "Dependencies: mod-id -> version constraint. Use 'client' or 'server' for engine requirements.")]
+    #[serde(default)]
+    pub requires: HashMap<String, String>,
 }
 
 impl Validatable for ModManifest {}
+
+/// Parse a version requirement string
+/// Returns (min_version, max_version) tuple
+/// If no comma, min == max (exact version)
+pub fn parse_version_requirement(requirement: &str) -> (String, String) {
+    if let Some((min, max)) = requirement.split_once(',') {
+        (min.trim().to_string(), max.trim().to_string())
+    } else {
+        let exact = requirement.trim().to_string();
+        (exact.clone(), exact)
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -63,6 +88,49 @@ mod tests {
 
         let manifest = ModManifest::from_json_str(json).unwrap();
         assert_eq!(manifest.priority, 0);
+    }
+
+    #[test]
+    fn test_manifest_with_requires() {
+        let json = r#"{
+            "name": "test-mod",
+            "version": "1.0.0",
+            "description": "A test mod",
+            "entry_point": "index.js",
+            "type": "bootstrap",
+            "requires": {
+                "client": "1.0.0",
+                "server": "1.0.0,2.0.0",
+                "js-helper": "1.0.0"
+            }
+        }"#;
+
+        let manifest = ModManifest::from_json_str(json).unwrap();
+        assert_eq!(manifest.mod_type, Some("bootstrap".to_string()));
+        assert_eq!(manifest.requires.get("client"), Some(&"1.0.0".to_string()));
+        assert_eq!(manifest.requires.get("server"), Some(&"1.0.0,2.0.0".to_string()));
+        assert_eq!(manifest.requires.get("js-helper"), Some(&"1.0.0".to_string()));
+    }
+
+    #[test]
+    fn test_parse_version_requirement_exact() {
+        let (min, max) = parse_version_requirement("1.0.0");
+        assert_eq!(min, "1.0.0");
+        assert_eq!(max, "1.0.0");
+    }
+
+    #[test]
+    fn test_parse_version_requirement_range() {
+        let (min, max) = parse_version_requirement("1.0.0,2.0.0");
+        assert_eq!(min, "1.0.0");
+        assert_eq!(max, "2.0.0");
+    }
+
+    #[test]
+    fn test_parse_version_requirement_range_with_spaces() {
+        let (min, max) = parse_version_requirement("1.0.0, 2.0.0");
+        assert_eq!(min, "1.0.0");
+        assert_eq!(max, "2.0.0");
     }
 
     #[test]

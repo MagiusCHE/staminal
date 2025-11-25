@@ -28,7 +28,7 @@ mod game_client;
 mod client_manager;
 use client_manager::ClientManager;
 
-const VERSION: &str = "0.1.0-alpha";
+const VERSION: &str = "0.1.0";
 
 /// Custom event formatter that displays thread IDs as #N instead of ThreadId(N)
 /// Replicates the default tracing formatter behavior with ANSI color support

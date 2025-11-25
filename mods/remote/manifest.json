@@ -1,0 +1,8 @@
+{
+    "name": "remote",
+    "version": "1.0.0",
+    "description": "Allows server control via localhost socket or via internet.",
+    "entry_point": "index.js",
+    "type": "bootstrap",
+    "priority": 0
+}
