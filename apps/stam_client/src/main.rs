@@ -291,41 +291,38 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                 info!("No mods required for this game");
             }
 
-            // Validate bootstrap mods are present before continuing
-            info!("Validating bootstrap mods...");
-            let bootstrap_mods: Vec<_> = mods.iter()
-                .filter(|m| m.mod_type == "bootstrap")
-                .collect();
+            // Validate ALL mods are present before continuing
+            info!("Validating mods...");
 
-            if !bootstrap_mods.is_empty() {
-                info!("Found {} bootstrap mod(s) to validate", bootstrap_mods.len());
+            if !mods.is_empty() {
+                info!("Found {} mod(s) to validate", mods.len());
 
-                for mod_info in &bootstrap_mods {
+                for mod_info in &mods {
                     let mod_dir = mods_dir.join(&mod_info.mod_id);
 
                     // Check if mod directory exists
                     if !mod_dir.exists() {
-                        error!("Bootstrap mod '{}' not found in {}",
+                        error!("Mod '{}' not found in {}",
                             mod_info.mod_id,
                             mod_dir.display()
                         );
-                        error!("Required bootstrap mods must be present before the client can start");
+                        error!("Required mods must be present before the client can start");
                         error!("TODO: Automatic download will be implemented in the future");
                         return Err(format!(
-                            "Missing required bootstrap mod: {} (expected at {})",
+                            "Missing required mod: {} (expected at {})",
                             mod_info.mod_id,
                             mod_dir.display()
                         ).into());
                     }
 
-                    info!("  ✓ {} found", mod_info.mod_id);
+                    info!("  ✓ {} [{}] found", mod_info.mod_id, mod_info.mod_type);
 
                     // Read and validate mod version
                     let manifest_path = mod_dir.join("manifest.json");
                     if !manifest_path.exists() {
-                        error!("Bootstrap mod '{}' missing manifest.json", mod_info.mod_id);
+                        error!("Mod '{}' missing manifest.json", mod_info.mod_id);
                         return Err(format!(
-                            "Bootstrap mod '{}' is missing manifest.json file",
+                            "Mod '{}' is missing manifest.json file",
                             mod_info.mod_id
                         ).into());
                     }
@@ -344,7 +341,7 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                         &mod_info.max_version,
                     ) {
                         error!("{}", e);
-                        error!("Bootstrap mod version mismatch");
+                        error!("Mod version mismatch");
                         error!("TODO: Automatic download/update will be implemented in the future");
                         return Err(e.into());
                     }
@@ -357,13 +354,13 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                     );
                 }
 
-                info!("All bootstrap mods validated successfully");
+                info!("All mods validated successfully");
             } else {
-                info!("No bootstrap mods required");
+                info!("No mods required");
             }
 
-            // Initialize mod runtime manager and load bootstrap mods
-            if !bootstrap_mods.is_empty() {
+            // Initialize mod runtime manager and load ALL mods
+            if !mods.is_empty() {
                 info!("Initializing mod runtime system...");
 
                 // Create mod runtime manager
@@ -379,9 +376,12 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
 
                 runtime_manager.register_adapter(stam_mod_runtimes::RuntimeType::JavaScript, Box::new(js_adapter));
 
-                // Load bootstrap mods (automatically uses the correct runtime based on file extension)
-                info!("Loading bootstrap mods...");
-                for mod_info in &bootstrap_mods {
+                // First pass: Register all mod aliases for cross-mod imports
+                // This must happen BEFORE loading any mod, so that import "@mod-id" works
+                info!("Registering mod aliases...");
+                let mut mod_entry_points: Vec<(String, std::path::PathBuf, String, String)> = Vec::new();
+
+                for mod_info in &mods {
                     let mod_dir = mods_dir.join(&mod_info.mod_id);
                     let manifest_path = mod_dir.join("manifest.json");
 
@@ -389,30 +389,60 @@ async fn connect_to_game_server(uri: &str, username: &str, password: &str, game_
                     let manifest_content = fs::read_to_string(&manifest_path)?;
                     let manifest: ModManifest = serde_json::from_str(&manifest_content)?;
 
-                    // Load mod (runtime type is determined from entry_point extension)
                     let entry_point_path = mod_dir.join(&manifest.entry_point);
-                    info!("  Loading {} ({})", mod_info.mod_id, manifest.entry_point);
 
-                    runtime_manager.load_mod(&mod_info.mod_id, &entry_point_path)?;
+                    // Convert to absolute path for reliable module resolution
+                    let absolute_entry_point = if entry_point_path.is_absolute() {
+                        entry_point_path.clone()
+                    } else {
+                        std::env::current_dir()?.join(&entry_point_path)
+                    };
+
+                    // Register alias before loading
+                    stam_mod_runtimes::adapters::js::register_mod_alias(
+                        &mod_info.mod_id,
+                        absolute_entry_point,
+                    );
+                    info!("  Registered @{}", mod_info.mod_id);
+
+                    mod_entry_points.push((
+                        mod_info.mod_id.clone(),
+                        entry_point_path,
+                        manifest.entry_point.clone(),
+                        mod_info.mod_type.clone(),
+                    ));
                 }
 
-                // Call onAttach lifecycle hook for each mod
-                info!("Attaching bootstrap mods...");
-                for mod_info in &bootstrap_mods {
-                    runtime_manager.call_mod_function(&mod_info.mod_id, "onAttach")?;
+                // Second pass: Load all mods
+                info!("Loading mods...");
+                for (mod_id, entry_point_path, _entry_point_name, mod_type) in &mod_entry_points {
+                    info!("  Loading {} [{}]", mod_id, mod_type);
+                    runtime_manager.load_mod(mod_id, entry_point_path)?;
                 }
 
-                // Call onBootstrap lifecycle hook for each mod
-                info!("Bootstrapping mods...");
-                for mod_info in &bootstrap_mods {
-                    runtime_manager.call_mod_function(&mod_info.mod_id, "onBootstrap")?;
+                // Third pass: Call onAttach lifecycle hook for ALL mods
+                info!("Attaching mods...");
+                for (mod_id, _, _, mod_type) in &mod_entry_points {
+                    info!("  Attaching {} [{}]", mod_id, mod_type);
+                    runtime_manager.call_mod_function(mod_id, "onAttach")?;
                 }
 
-                info!("Bootstrap mods initialized successfully");
+                // Fourth pass: Call onBootstrap ONLY for bootstrap mods
+                let bootstrap_mods: Vec<_> = mod_entry_points.iter()
+                    .filter(|(_, _, _, mod_type)| mod_type == "bootstrap")
+                    .collect();
+
+                if !bootstrap_mods.is_empty() {
+                    info!("Bootstrapping mods...");
+                    for (mod_id, _, _, _) in &bootstrap_mods {
+                        info!("  Bootstrapping {}", mod_id);
+                        runtime_manager.call_mod_function(mod_id, "onBootstrap")?;
+                    }
+                }
+
+                info!("Mod system initialized successfully");
                 js_runtime_handle = Some(js_runtime);
             }
-
-            // TODO: Validate and download remaining (non-bootstrap) mods
         }
         Ok(GameMessage::Error { message }) => {
             // Message from server could be a locale ID

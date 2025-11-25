@@ -1,0 +1,7 @@
+{
+    "name": "js-helper",
+    "version": "1.0.0",
+    "description": "Common helper for JS-based mods. This mod will not be loaded directly, you have to import in your script pointing \"@js-helper/index.js\".",    
+    "entry_point": "index.js",
+    "priority": 0
+}

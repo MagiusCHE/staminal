@@ -149,7 +149,7 @@ fn set_timeout_interval<'js>(
     is_interval: bool,
 ) -> rquickjs::Result<u32> {
     let id = next_timer_id();
-    let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
+    //let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
 
     // Enforce minimum 4ms delay as per HTML5 spec
     let delay = msec.unwrap_or(0).max(4);
@@ -163,8 +163,8 @@ fn set_timeout_interval<'js>(
         handles.insert(id, abort);
     }
 
-    let timer_type = if is_interval { "setInterval" } else { "setTimeout" };
-    tracing::debug!("{}: timer {} scheduled with {}ms delay for mod '{}'", timer_type, id, delay, mod_id);
+    //let timer_type = if is_interval { "setInterval" } else { "setTimeout" };
+    //tracing::debug!("{}: timer {} scheduled with {}ms delay for mod '{}'", timer_type, id, delay, mod_id);
 
     // Spawn async task in the JS context
     ctx.spawn(async move {
@@ -176,17 +176,17 @@ fn set_timeout_interval<'js>(
 
                 // Check for cancellation
                 _ = abort_ref.notified() => {
-                    tracing::debug!("Timer {} aborted", id);
+                    //tracing::debug!("Timer {} aborted", id);
                     break;
                 }
 
                 // Wait for timer
                 _ = tokio::time::sleep(duration) => {
-                    tracing::trace!("Timer {} fired after {}ms", id, delay);
+                    //tracing::trace!("Timer {} fired after {}ms", id, delay);
 
                     // Execute the callback
                     if let Err(err) = cb.call::<(), ()>(()) {
-                        tracing::error!("Timer {} callback error: {:?}", id, err);
+                        //tracing::error!("Timer {} callback error: {:?}", id, err);
                         break;
                     }
 
@@ -207,7 +207,7 @@ fn set_timeout_interval<'js>(
         // Cleanup
         drop(cb);
         drop(abort_ref);
-        tracing::trace!("Timer {} completed", id);
+        //tracing::trace!("Timer {} completed", id);
     });
 
     Ok(id)
@@ -264,14 +264,14 @@ pub fn setup_timer_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
 
     // clearTimeout(timerId) - cancels a pending timeout
     let clear_timeout_fn = Function::new(ctx.clone(), |_ctx: Ctx, timer_id: u32| {
-        tracing::debug!("clearTimeout: cancelling timer {}", timer_id);
+        //tracing::debug!("clearTimeout: cancelling timer {}", timer_id);
         clear_timer(timer_id);
     })?;
     globals.set("clearTimeout", clear_timeout_fn)?;
 
     // clearInterval(intervalId) - cancels a pending interval
     let clear_interval_fn = Function::new(ctx.clone(), |_ctx: Ctx, timer_id: u32| {
-        tracing::debug!("clearInterval: cancelling interval {}", timer_id);
+        //tracing::debug!("clearInterval: cancelling interval {}", timer_id);
         clear_timer(timer_id);
     })?;
     globals.set("clearInterval", clear_interval_fn)?;
