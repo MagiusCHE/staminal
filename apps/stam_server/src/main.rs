@@ -169,14 +169,14 @@ async fn main() {
     let mod_runtimes = match mod_loader::initialize_all_games(&config, VERSION, args.home.as_deref()) {
         Ok(runtime) => runtime,
         Err(e) => {
-            error!("[MOD] Failed to initialize mods: {}", e);
+            error!("Failed to initialize mods. {}", e);
             return;
         }
     };
 
     let total_server_mods: usize = mod_runtimes.values().map(|r| r.server_mods.len()).sum();
     let total_client_mods: usize = mod_runtimes.values().map(|r| r.client_mods.len()).sum();
-    info!("[MOD] Validated client mods: {}, loaded server mods: {}", total_client_mods, total_server_mods);
+    info!("Validated client mods: {}, loaded server mods: {}", total_client_mods, total_server_mods);
 
     // Spawn JS event loops for any game that has server-side JS mods
     for (game_id, runtime) in &mod_runtimes {
@@ -184,7 +184,7 @@ async fn main() {
             let gid = game_id.clone();
             let shutdown_token = shutdown.clone();
             tokio::spawn(async move {
-                info!("[MOD] Running JS event loop for game '{}'", gid);
+                info!("Running JS event loop for game '{}'", gid);
                 let mut js_loop = std::pin::pin!(run_js_event_loop(js_runtime));
                 tokio::select! {
                     _ = &mut js_loop => {},

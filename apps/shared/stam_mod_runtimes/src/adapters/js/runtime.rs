@@ -185,7 +185,7 @@ impl JsRuntimeAdapter {
     /// # Arguments
     /// * `config` - Runtime configuration containing game directories
     pub fn new(config: JsRuntimeConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        debug!("Initializing QuickJS async runtime for mods");
+        info!("> Initializing javascript async runtime \"QuickJS\" for mods");
 
         let runtime = AsyncRuntime::new()?;
 
@@ -196,7 +196,7 @@ impl JsRuntimeAdapter {
             mod_dirs: Vec::new(),
         };
 
-        info!("JavaScript async runtime initialized successfully");
+        info!("< JavaScript async runtime \"QuickJS\" initialized successfully");
         Ok(js_runtime)
     }
 
@@ -410,13 +410,13 @@ impl JsRuntimeAdapter {
                                 }
                                 Err(e) => {
                                     let error_msg = Self::format_js_error(&ctx, &e);
-                                    error!("\n{}", error_msg);
+                                    error!("{}", error_msg);
                                     Err(format!("JavaScript error in mod '{}'", mod_id_owned))
                                 }
                             },
                             Err(e) => {
                                 let error_msg = Self::format_js_error(&ctx, &e);
-                                error!("\n{}", error_msg);
+                                error!("{}", error_msg);
                                 Err(format!(
                                     "JavaScript error evaluating mod '{}'",
                                     mod_id_owned
@@ -426,7 +426,7 @@ impl JsRuntimeAdapter {
                     }
                     Err(e) => {
                         let error_msg = Self::format_js_error(&ctx, &e);
-                        error!("\n{}", error_msg);
+                        error!("{}", error_msg);
                         Err(format!("JavaScript error declaring mod '{}'", mod_id_owned))
                     }
                 }
@@ -483,7 +483,7 @@ impl JsRuntimeAdapter {
                                     }
                                     Err(e) => {
                                         let error_msg = Self::format_js_error(&ctx, &e);
-                                        error!("\n{}", error_msg);
+                                        error!("{}", error_msg);
                                         Err(format!(
                                             "JavaScript error in '{}' for mod '{}'",
                                             function_name_owned, mod_id_owned
@@ -554,7 +554,7 @@ impl JsRuntimeAdapter {
                                 }
                                 Err(e) => {
                                     let error_msg = Self::format_js_error(&ctx, &e);
-                                    error!("\n{}", error_msg);
+                                    error!("{}", error_msg);
                                     Err(format!(
                                         "JavaScript error in '{}' for mod '{}'",
                                         function_name_owned, mod_id_owned

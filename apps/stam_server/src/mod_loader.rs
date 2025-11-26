@@ -34,8 +34,7 @@ pub fn initialize_all_games(
     let mods_root = resolve_mods_root(&config.mods_path, custom_home)?;
     let mut runtimes: HashMap<String, GameModRuntime> = HashMap::new();
 
-    for (game_id, game_config) in &config.games {
-        info!("[MOD] Initializing mods for game '{}'", game_id);
+    for (game_id, game_config) in &config.games {        
         let game_runtime = initialize_game_mods(game_id, game_config, &mods_root, server_version)?;
         runtimes.insert(game_id.clone(), game_runtime);
     }
@@ -55,7 +54,7 @@ fn initialize_game_mods(
     let mut client_mods: Vec<String> = Vec::new();
     let mut server_mods: Vec<String> = Vec::new();
     let mut server_manifest_dirs: HashMap<String, PathBuf> = HashMap::new();
-
+    info!("> Initializing mods for game '{}'", game_id);
     for (mod_id, mod_cfg) in &game_config.mods {
         if !mod_cfg.enabled {
             continue;
@@ -148,15 +147,15 @@ fn initialize_game_mods(
         }
 
         // Second pass: load mods and call onAttach
-        info!("[MOD] Attaching server mods for game '{}'", game_id);
+        info!("  - Attaching server mods for game '{}'", game_id);
         for (mod_id, entry_point_path, _mod_type) in &mod_entries {
             runtime_manager
                 .load_mod(mod_id, entry_point_path)
-                .map_err(|e| format!("Game '{}': Failed to load mod '{}': {}", game_id, mod_id, e))?;
+                .map_err(|e| format!("{}::{} Failed to load mod: {}", game_id, mod_id, e))?;
             runtime_manager
                 .call_mod_function(mod_id, "onAttach")
-                .map_err(|e| format!("Game '{}': onAttach failed for mod '{}': {}", game_id, mod_id, e))?;
-            debug!("[MOD] Attached '{}'", mod_id);
+                .map_err(|e| format!("{}::{} Failed to call onAttach: {}", game_id, mod_id, e))?;
+            //debug!("Attached '{}'", mod_id);
         }
 
         // Third pass: call onBootstrap for bootstrap mods
@@ -166,18 +165,18 @@ fn initialize_game_mods(
             .collect();
 
         if !bootstrap_mods.is_empty() {
-            info!("[MOD] Bootstrapping server mods for game '{}'", game_id);
+            info!("  - Bootstrapping server mods for game '{}'", game_id);
             for (mod_id, _, _) in &bootstrap_mods {
                 runtime_manager
                     .call_mod_function(mod_id, "onBootstrap")
-                    .map_err(|e| format!("Game '{}': onBootstrap failed for mod '{}': {}", game_id, mod_id, e))?;
-                debug!("[MOD] Bootstrapped '{}'", mod_id);
+                    .map_err(|e| format!("{}::{} Failed to call onBootstrap: {}", game_id, mod_id, e))?;
+                //debug!("Bootstrapped '{}'", mod_id);
             }
         }
     }
 
     info!(
-        "[MOD] Initialization complete for game '{}' (server_mods={}, client_mods={})",
+        "< Initialization complete for game '{}' (server_mods={}, client_mods={})",
         game_id,
         server_mods.len(),
         client_mods.len(),

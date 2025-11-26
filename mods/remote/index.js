@@ -4,4 +4,5 @@ export function onAttach() {
 
 export function onBootstrap() {
     console.log("mod bootstrapped.");
+    throw new Error("Bootstrap error for testing purposes.");
 }
