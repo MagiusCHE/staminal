@@ -161,7 +161,6 @@ impl FilesystemLoader {
 /// Represents a loaded mod with its own isolated context
 struct LoadedMod {
     context: AsyncContext,
-    module_path: String,
     #[allow(dead_code)]
     mod_dir: PathBuf,
 }
@@ -436,11 +435,11 @@ impl JsRuntimeAdapter {
         let stored_module_path = result.map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
         // Store the loaded mod
+        let _ = stored_module_path; // Used for logging/debugging if needed
         self.loaded_mods.insert(
             mod_id.to_string(),
             LoadedMod {
                 context,
-                module_path: stored_module_path,
                 mod_dir,
             },
         );

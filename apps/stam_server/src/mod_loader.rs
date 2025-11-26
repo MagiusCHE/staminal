@@ -3,7 +3,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tracing::{debug, info};
+use tracing::info;
 
 use stam_mod_runtimes::{
     RuntimeManager,

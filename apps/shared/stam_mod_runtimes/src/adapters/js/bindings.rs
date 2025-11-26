@@ -190,8 +190,8 @@ fn set_timeout_interval<'js>(
                     //tracing::trace!("Timer {} fired after {}ms", id, delay);
 
                     // Execute the callback
-                    if let Err(err) = cb.call::<(), ()>(()) {
-                        //tracing::error!("Timer {} callback error: {:?}", id, err);
+                    if let Err(_err) = cb.call::<(), ()>(()) {
+                        //tracing::error!("Timer {} callback error: {:?}", id, _err);
                         break;
                     }
 
