@@ -6,9 +6,11 @@
 
 pub mod console;
 pub mod process;
+pub mod system;
 
 pub use console::ConsoleApi;
 pub use process::{ProcessApi, AppApi};
+pub use system::{SystemApi, ModInfo};
 
 use std::collections::HashMap;
 use std::any::Any;

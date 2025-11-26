@@ -19,7 +19,7 @@ mod mod_runtime;
 
 use app_paths::AppPaths;
 use mod_runtime::js_adapter::{create_js_runtime_config, run_js_event_loop};
-use mod_runtime::{JsRuntimeAdapter, JsRuntimeConfig, ModRuntimeManager};
+use mod_runtime::{JsRuntimeAdapter, JsRuntimeConfig, ModInfo, ModRuntimeManager};
 
 const VERSION: &str = "0.1.0";
 
@@ -175,118 +175,83 @@ async fn connect_to_game_server(
                 info!("No mods required for this game");
             }
 
-            // Validate ALL mods are present before continuing
-            // First pass: load all manifests
-            let mut all_manifests: HashMap<String, ModManifest> = HashMap::new();
+            // Load manifests only for mods that are present locally
+            // Missing mods are tracked separately - we only fail if a required mod is missing
+            let mut available_manifests: HashMap<String, ModManifest> = HashMap::new();
+            let mut missing_mods: Vec<String> = Vec::new();
 
             if !mods.is_empty() {
-                info!("Found {} mod(s) to load", mods.len());
+                info!("Server requires {} mod(s), checking local availability...", mods.len());
 
-                // First pass: check presence and load manifests
+                // First pass: load manifests for available mods, track missing ones
                 for mod_info in &mods {
                     let mod_dir = mods_dir.join(&mod_info.mod_id);
 
                     // Check if mod directory exists
                     if !mod_dir.exists() {
-                        error!(
-                            "Mod '{}' not found in {}",
-                            mod_info.mod_id,
-                            mod_dir.display()
-                        );
-                        error!("Required mods must be present before the client can start");
-                        error!("TODO: Automatic download will be implemented in the future");
-                        return Err(format!(
-                            "Missing required mod: {} (expected at {})",
-                            mod_info.mod_id,
-                            mod_dir.display()
-                        )
-                        .into());
+                        debug!("Mod '{}' not found locally", mod_info.mod_id);
+                        missing_mods.push(mod_info.mod_id.clone());
+                        continue;
                     }
 
                     // Read manifest
                     let manifest_path = mod_dir.join("manifest.json");
                     if !manifest_path.exists() {
-                        error!("Mod '{}' missing manifest.json", mod_info.mod_id);
-                        return Err(format!(
-                            "Mod '{}' is missing manifest.json file",
-                            mod_info.mod_id
-                        )
-                        .into());
+                        warn!("Mod '{}' directory exists but missing manifest.json", mod_info.mod_id);
+                        missing_mods.push(mod_info.mod_id.clone());
+                        continue;
                     }
 
-                    let manifest = ModManifest::from_json_file(manifest_path.to_str().unwrap())
-                        .map_err(|e| {
-                            format!(
-                                "Failed to load manifest for mod '{}': {}",
-                                mod_info.mod_id, e
-                            )
-                        })?;
+                    let manifest = match ModManifest::from_json_file(manifest_path.to_str().unwrap()) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            warn!("Failed to load manifest for mod '{}': {}", mod_info.mod_id, e);
+                            missing_mods.push(mod_info.mod_id.clone());
+                            continue;
+                        }
+                    };
 
                     info!(" ✓ {} [{}:{}] found", mod_info.mod_id, mod_info.mod_type, manifest.version);
-                    all_manifests.insert(mod_info.mod_id.clone(), manifest);
+                    available_manifests.insert(mod_info.mod_id.clone(), manifest);
                 }
 
-                // Second pass: validate dependencies
-                info!("> Validating mod dependencies...");
-                for mod_info in &mods {
-                    if let Some(manifest) = all_manifests.get(&mod_info.mod_id) {
-                        if !manifest.requires.is_empty() {
-                            //info!("  Checking dependencies for '{}'...", mod_info.mod_id);
-                            if let Err(e) = validate_mod_dependencies(
-                                &mod_info.mod_id,
-                                manifest,
-                                &all_manifests,
-                                VERSION,
-                                &active_game_version,
-                                &server_version,
-                                false,
-                            ) {
-                                error!("{}", e);
-                                return Err(e.into());
-                            }
-                            //info!("  ✓ {} dependencies OK", mod_info.mod_id);
-                        }
-                    }
+                if !missing_mods.is_empty() {
+                    info!(" ? {} mod(s) not available locally: {:?}", missing_mods.len(), missing_mods);
                 }
-
-                info!("< All mods validated successfully");
             } else {
                 info!("No mods required");
             }
 
-            // Initialize mod runtime manager and load ALL mods
-            if !mods.is_empty() {
+            // Initialize mod runtime manager and load ONLY bootstrap mods + their dependencies
+            if !available_manifests.is_empty() {
                 info!("Initializing mod runtime system...");
 
                 // Create mod runtime manager
                 let mut runtime_manager = ModRuntimeManager::new();
 
                 // Initialize JavaScript runtime (one shared runtime for all JS mods)
-                //info!("Initializing JavaScript runtime...");
                 let runtime_config = create_js_runtime_config(&app_paths, &game_id)?;
                 let js_adapter = JsRuntimeAdapter::new(runtime_config)?;
 
                 // Get runtime handle BEFORE moving the adapter to the manager
                 let js_runtime = js_adapter.get_runtime();
 
-                runtime_manager.register_adapter(
-                    stam_mod_runtimes::RuntimeType::JavaScript,
-                    Box::new(js_adapter),
-                );
+                // Build mod info map for easier lookup (only for available mods)
+                struct ModData {
+                    mod_id: String,
+                    manifest: ModManifest,
+                    entry_point_path: std::path::PathBuf,
+                    absolute_entry_point: std::path::PathBuf,
+                }
 
-                // First pass: Register all mod aliases for cross-mod imports
+                let mut mod_data_map: HashMap<String, ModData> = HashMap::new();
+
+                // First pass: Register mod aliases and collect mod data for AVAILABLE mods only
                 // This must happen BEFORE loading any mod, so that import "@mod-id" works
-                info!("Registering mod aliases...");
-                let mut mod_entry_points: Vec<(String, std::path::PathBuf, String, String)> =
-                    Vec::new();
+                info!("Registering mod aliases for available mods...");
 
-                for mod_info in &mods {
-                    let mod_dir = mods_dir.join(&mod_info.mod_id);
-                    let manifest_path = mod_dir.join("manifest.json");
-
-                    // Read manifest to get entry_point
-                    let manifest = ModManifest::from_json_file(manifest_path.to_str().unwrap())?;
-
+                for (mod_id, manifest) in &available_manifests {
+                    let mod_dir = mods_dir.join(mod_id);
                     let entry_point_path = mod_dir.join(&manifest.entry_point);
 
                     // Convert to absolute path for reliable module resolution
@@ -298,48 +263,169 @@ async fn connect_to_game_server(
 
                     // Register alias before loading
                     stam_mod_runtimes::adapters::js::register_mod_alias(
-                        &mod_info.mod_id,
-                        absolute_entry_point,
+                        mod_id,
+                        absolute_entry_point.clone(),
                     );
-                    //info!("  Registered @{}", mod_info.mod_id);
 
-                    mod_entry_points.push((
-                        mod_info.mod_id.clone(),
+                    mod_data_map.insert(mod_id.clone(), ModData {
+                        mod_id: mod_id.clone(),
+                        manifest: manifest.clone(),
                         entry_point_path,
-                        manifest.entry_point.clone(),
-                        mod_info.mod_type.clone(),
-                    ));
+                        absolute_entry_point,
+                    });
                 }
 
-                // Second pass: Load all mods
-                info!("Attaching mods...");
-                for (mod_id, entry_point_path, _entry_point_name, _mod_type) in &mod_entry_points {
-                    //info!("  Loading/Attach {} [{}]", mod_id, mod_type);
-                    runtime_manager.load_mod(mod_id, entry_point_path)?;
-                    runtime_manager.call_mod_function(mod_id, "onAttach")?;
-                }
-
-                // Third pass: Call onAttach lifecycle hook for ALL mods
-                // info!("Attaching mods...");
-                // for (mod_id, _, _, _mod_type) in &mod_entry_points {
-                //     info!("  Attaching {}", mod_id);
-                // }
-
-                // Fourth pass: Call onBootstrap ONLY for bootstrap mods
-                let bootstrap_mods: Vec<_> = mod_entry_points
-                    .iter()
-                    .filter(|(_, _, _, mod_type)| mod_type == "bootstrap")
-                    .collect();
-
-                if !bootstrap_mods.is_empty() {
-                    info!("Bootstrapping mods...");
-                    for (mod_id, _, _, _) in &bootstrap_mods {
-                        //info!("  Bootstrapping {}", mod_id);
-                        runtime_manager.call_mod_function(mod_id, "onBootstrap")?;
+                // Register ALL mods in SystemApi (including missing ones)
+                // Available mods get their info from manifest, missing ones get minimal info
+                for mod_info in &mods {
+                    if let Some(mod_data) = mod_data_map.get(&mod_info.mod_id) {
+                        // Available mod - use manifest info
+                        js_adapter.register_mod_info(ModInfo {
+                            id: mod_info.mod_id.clone(),
+                            version: mod_data.manifest.version.clone(),
+                            name: mod_data.manifest.name.clone(),
+                            description: mod_data.manifest.description.clone(),
+                            mod_type: mod_data.manifest.mod_type.clone(),
+                            priority: mod_data.manifest.priority,
+                            bootstrapped: false,
+                            loaded: false,  // Will be set to true when actually loaded
+                        });
+                    } else {
+                        // Missing mod - use info from server with placeholder values
+                        js_adapter.register_mod_info(ModInfo {
+                            id: mod_info.mod_id.clone(),
+                            version: "?".to_string(),
+                            name: mod_info.mod_id.clone(),
+                            description: "Not available locally".to_string(),
+                            mod_type: Some(mod_info.mod_type.clone()),
+                            priority: 999,  // Low priority for missing mods
+                            bootstrapped: false,
+                            loaded: false,  // Will remain false as it's missing
+                        });
                     }
                 }
 
-                info!("Mod system initialized successfully");
+                // Store reference to system API for setting bootstrapped/loaded state later
+                let system_api = js_adapter.system_api().clone();
+
+                // Now register the adapter with the runtime manager
+                runtime_manager.register_adapter(
+                    stam_mod_runtimes::RuntimeType::JavaScript,
+                    Box::new(js_adapter),
+                );
+
+                // Collect bootstrap mods (only from available mods)
+                let bootstrap_mod_ids: Vec<String> = mod_data_map
+                    .values()
+                    .filter(|md| md.manifest.mod_type.as_deref() == Some("bootstrap"))
+                    .map(|md| md.mod_id.clone())
+                    .collect();
+
+                // Recursive function to collect dependencies
+                fn collect_dependencies(
+                    mod_id: &str,
+                    mod_data_map: &HashMap<String, ModData>,
+                    to_load: &mut Vec<String>,
+                    loading_chain: &mut Vec<String>,
+                ) -> Result<(), String> {
+                    // Loop detection
+                    if loading_chain.contains(&mod_id.to_string()) {
+                        return Err(format!(
+                            "Circular dependency detected: {} -> {}",
+                            loading_chain.join(" -> "),
+                            mod_id
+                        ));
+                    }
+
+                    // Already scheduled to load
+                    if to_load.contains(&mod_id.to_string()) {
+                        return Ok(());
+                    }
+
+                    let mod_data = mod_data_map.get(mod_id).ok_or_else(|| {
+                        format!("Dependency '{}' not found in available mods", mod_id)
+                    })?;
+
+                    // Add to loading chain for loop detection
+                    loading_chain.push(mod_id.to_string());
+
+                    // First load all dependencies
+                    for (dep_id, _version_req) in &mod_data.manifest.requires {
+                        // Skip special requirements like @client, @server, @game
+                        if dep_id.starts_with('@') {
+                            continue;
+                        }
+                        // Recursively collect dependencies
+                        collect_dependencies(dep_id, mod_data_map, to_load, loading_chain)?;
+                    }
+
+                    // Remove from loading chain
+                    loading_chain.pop();
+
+                    // Add this mod to load list
+                    to_load.push(mod_id.to_string());
+
+                    Ok(())
+                }
+
+                // Collect all mods to load (bootstrap + their dependencies, sorted by dependency order)
+                let mut mods_to_load: Vec<String> = Vec::new();
+                let mut loading_chain: Vec<String> = Vec::new();
+
+                for bootstrap_mod_id in &bootstrap_mod_ids {
+                    collect_dependencies(
+                        bootstrap_mod_id,
+                        &mod_data_map,
+                        &mut mods_to_load,
+                        &mut loading_chain,
+                    )?;
+                }
+
+                // Sort mods_to_load by priority (lower priority loads first)
+                mods_to_load.sort_by_key(|mod_id| {
+                    mod_data_map.get(mod_id).map(|md| md.manifest.priority).unwrap_or(0)
+                });
+
+                // Determine which mods are NOT loaded (for mods_notyetloaded list)
+                // This includes both available mods not in the load list AND missing mods
+                let mut mods_not_loaded: Vec<String> = mod_data_map
+                    .keys()
+                    .filter(|mod_id| !mods_to_load.contains(mod_id))
+                    .cloned()
+                    .collect();
+                // Add missing mods to the not loaded list
+                mods_not_loaded.extend(missing_mods.clone());
+
+                info!("Mods to load (bootstrap + dependencies): {:?}", mods_to_load);
+                if !mods_not_loaded.is_empty() {
+                    info!("Mods deferred for later loading: {:?}", mods_not_loaded);
+                }
+                if !missing_mods.is_empty() {
+                    info!("  (including {} missing locally: {:?})", missing_mods.len(), missing_mods);
+                }
+
+                // Load only the selected mods (bootstrap + dependencies)
+                info!("Attaching {} mods...", mods_to_load.len());
+                for mod_id in &mods_to_load {
+                    let mod_data = mod_data_map.get(mod_id).unwrap();
+                    runtime_manager.load_mod(mod_id, &mod_data.entry_point_path)?;
+                    runtime_manager.call_mod_function(mod_id, "onAttach")?;
+                    // Mark mod as loaded in SystemApi
+                    system_api.set_loaded(mod_id, true);
+                }
+
+                // Call onBootstrap ONLY for bootstrap mods (not for dependencies)
+                if !bootstrap_mod_ids.is_empty() {
+                    info!("Bootstrapping {} mod(s)...", bootstrap_mod_ids.len());
+                    for mod_id in &bootstrap_mod_ids {
+                        runtime_manager.call_mod_function(mod_id, "onBootstrap")?;
+                        // Mark mod as bootstrapped
+                        system_api.set_bootstrapped(mod_id, true);
+                    }
+                }
+
+                info!("Mod system initialized successfully ({} loaded, {} deferred)",
+                    mods_to_load.len(), mods_not_loaded.len());
                 js_runtime_handle = Some(js_runtime);
             }
         }

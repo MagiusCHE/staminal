@@ -7,6 +7,7 @@ pub mod js_adapter;
 
 // Re-export from shared stam_mod_runtimes
 pub use stam_mod_runtimes::{RuntimeManager, RuntimeAdapter, RuntimeType, ModReturnValue};
+pub use stam_mod_runtimes::api::ModInfo;
 pub use js_adapter::{JsRuntimeAdapter, JsRuntimeConfig};
 
 // For backwards compatibility, keep ModRuntimeManager as an alias

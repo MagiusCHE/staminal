@@ -9,6 +9,7 @@ use stam_mod_runtimes::{
     RuntimeManager,
     RuntimeType,
     adapters::js::{JsRuntimeAdapter, JsRuntimeConfig, register_mod_alias},
+    api::ModInfo,
     JsAsyncRuntime,
 };
 use stam_schema::{ModManifest, validate_mod_dependencies, Validatable};
@@ -115,17 +116,17 @@ fn initialize_game_mods(
     // Prepare runtime manager and JS adapter (only if we have server mods)
     let mut runtime_manager = RuntimeManager::new();
     let mut js_runtime_handle: Option<Arc<JsAsyncRuntime>> = None;
+    let mut system_api_ref = None;
 
     if !server_mods.is_empty() {
         let (data_dir, config_dir) = server_runtime_paths(game_id)?;
         let js_config = JsRuntimeConfig::new(data_dir, config_dir)
             .with_game_id(game_id);
-        let js_adapter = JsRuntimeAdapter::new(js_config)
+        let mut js_adapter = JsRuntimeAdapter::new(js_config)
             .map_err(|e| format!("Game '{}': Failed to initialize JS runtime: {}", game_id, e))?;
         js_runtime_handle = Some(js_adapter.get_runtime());
-        runtime_manager.register_adapter(RuntimeType::JavaScript, Box::new(js_adapter));
 
-        // First pass: register aliases for all server mods
+        // First pass: register aliases and mod info for all server mods
         let mut mod_entries: Vec<(String, PathBuf, String)> = Vec::new();
         for mod_id in &server_mods {
             let manifest = server_manifests.get(mod_id).ok_or_else(|| {
@@ -143,8 +144,28 @@ fn initialize_game_mods(
             };
 
             register_mod_alias(mod_id, absolute_entry_point);
+
+            // Register mod info with the system API (before adapter is boxed)
+            // Server loads all mods immediately, so loaded: true
+            js_adapter.register_mod_info(ModInfo {
+                id: mod_id.clone(),
+                version: manifest.version.clone(),
+                name: manifest.name.clone(),
+                description: manifest.description.clone(),
+                mod_type: manifest.mod_type.clone(),
+                priority: manifest.priority,
+                bootstrapped: false,
+                loaded: true,
+            });
+
             mod_entries.push((mod_id.clone(), entry_point_path, manifest.mod_type.clone().unwrap_or_default()));
         }
+
+        // Store reference to system API for setting bootstrapped state later
+        system_api_ref = Some(js_adapter.system_api().clone());
+
+        // Now register the adapter with the runtime manager
+        runtime_manager.register_adapter(RuntimeType::JavaScript, Box::new(js_adapter));
 
         // Second pass: load mods and call onAttach
         info!("  - Attaching server mods for game '{}'", game_id);
@@ -170,6 +191,10 @@ fn initialize_game_mods(
                 runtime_manager
                     .call_mod_function(mod_id, "onBootstrap")
                     .map_err(|e| format!("{}::{} Failed to call onBootstrap: {}", game_id, mod_id, e))?;
+                // Mark mod as bootstrapped
+                if let Some(ref system_api) = system_api_ref {
+                    system_api.set_bootstrapped(mod_id, true);
+                }
                 //debug!("Bootstrapped '{}'", mod_id);
             }
         }

@@ -1,5 +1,5 @@
 use rquickjs::loader::{Loader, ModuleLoader, Resolver};
-use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Module, Object};
+use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Module, Object, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 use tracing::{debug, error, info};
 
 use super::{JsRuntimeConfig, bindings};
-use crate::api::AppApi;
+use crate::api::{AppApi, SystemApi, ModInfo};
 use crate::{ModReturnValue, RuntimeAdapter};
 
 /// Global registry mapping mod aliases (@mod-id) to their entry point paths
@@ -176,6 +176,8 @@ pub struct JsRuntimeAdapter {
     loaded_mods: HashMap<String, LoadedMod>,
     /// Collection of all mod directories for module resolution
     mod_dirs: Vec<PathBuf>,
+    /// System API shared across all mod contexts
+    system_api: SystemApi,
 }
 
 impl JsRuntimeAdapter {
@@ -193,6 +195,7 @@ impl JsRuntimeAdapter {
             config,
             loaded_mods: HashMap::new(),
             mod_dirs: Vec::new(),
+            system_api: SystemApi::new(),
         };
 
         info!("< JavaScript async runtime \"QuickJS\" initialized successfully");
@@ -204,6 +207,26 @@ impl JsRuntimeAdapter {
         Arc::clone(&self.runtime)
     }
 
+    /// Register a mod with the system API
+    ///
+    /// This makes the mod visible to `system.get_mods()` calls.
+    /// Should be called after loading the mod's manifest.
+    pub fn register_mod_info(&self, mod_info: ModInfo) {
+        self.system_api.register_mod(mod_info);
+    }
+
+    /// Mark a mod as bootstrapped
+    ///
+    /// Should be called after `onBootstrap` is invoked for a mod.
+    pub fn set_mod_bootstrapped(&self, mod_id: &str, bootstrapped: bool) {
+        self.system_api.set_bootstrapped(mod_id, bootstrapped);
+    }
+
+    /// Get a reference to the system API
+    pub fn system_api(&self) -> &SystemApi {
+        &self.system_api
+    }
+
     /// Setup all global APIs in a context
     async fn setup_global_apis(
         &self,
@@ -211,6 +234,7 @@ impl JsRuntimeAdapter {
     ) -> Result<(), Box<dyn std::error::Error>> {
         let game_data_dir = self.config.game_data_dir().clone();
         let game_config_dir = self.config.game_config_dir().clone();
+        let system_api = self.system_api.clone();
 
         // debug!(
         //     "setup_global_apis: game_data_dir={:?}, game_config_dir={:?}",
@@ -229,6 +253,10 @@ impl JsRuntimeAdapter {
 
                 // Register timer API (setTimeout, setInterval, etc.)
                 bindings::setup_timer_api(ctx.clone())?;
+
+                // Register system API (system.get_mods())
+                bindings::setup_system_api(ctx.clone(), system_api)?;
+
                 //debug!(" > API registrations completed successfully");
                 Ok::<(), rquickjs::Error>(())
             })
@@ -475,10 +503,31 @@ impl JsRuntimeAdapter {
                     Ok(module_namespace) => {
                         match module_namespace.get::<_, rquickjs::Function>(&function_name_owned) {
                             Ok(func) => {
-                                match func.call::<(), ()>(()) {
-                                    Ok(_) => {
-                                        //debug!("Function '{}' executed successfully for mod '{}'", function_name_owned, mod_id_owned);
-                                        Ok(())
+                                // Call function and get result as Value to check if it's a Promise
+                                match func.call::<(), Value>(()) {
+                                    Ok(result) => {
+                                        // Check if result is a Promise
+                                        if let Some(promise) = result.clone().into_promise() {
+                                            // It's a Promise - we need to resolve it
+                                            match promise.finish::<()>() {
+                                                Ok(_) => {
+                                                    //debug!("Async function '{}' resolved successfully for mod '{}'", function_name_owned, mod_id_owned);
+                                                    Ok(())
+                                                }
+                                                Err(e) => {
+                                                    let error_msg = Self::format_js_error(&ctx, &e);
+                                                    error!("{}", error_msg);
+                                                    Err(format!(
+                                                        "JavaScript error in async '{}' for mod '{}'",
+                                                        function_name_owned, mod_id_owned
+                                                    ))
+                                                }
+                                            }
+                                        } else {
+                                            // Not a Promise, just return success
+                                            //debug!("Function '{}' executed successfully for mod '{}'", function_name_owned, mod_id_owned);
+                                            Ok(())
+                                        }
                                     }
                                     Err(e) => {
                                         let error_msg = Self::format_js_error(&ctx, &e);

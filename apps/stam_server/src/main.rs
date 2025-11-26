@@ -9,7 +9,7 @@ use tokio::time::{Duration, interval};
 use tracing::{Level, debug, error, info, warn};
 
 use stam_mod_runtimes::adapters::js::run_js_event_loop;
-use stam_mod_runtimes::logging::{create_custom_timer, CustomFormatter};
+use stam_mod_runtimes::logging::{CustomFormatter, create_custom_timer};
 use stam_schema::Validatable;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -72,35 +72,9 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
-    // Load and validate configuration
-    let config = match Config::from_json_file(&args.config) {
-        Ok(mut cfg) => {
-            // Validate mod configuration and build mod lists
-            if let Err(e) = cfg.validate_mods() {
-                eprintln!("Configuration validation error: {}", e);
-                std::process::exit(1);
-            }
-            cfg
-        },
-        Err(e) => {
-            eprintln!("Failed to load config from '{}': {}", args.config, e);
-            eprintln!("Using default configuration");
-            Config::default()
-        }
-    };
-
-    // Parse log level from string
-    let log_level = match config.log_level.to_lowercase().as_str() {
-        "trace" => Level::TRACE,
-        "debug" => Level::DEBUG,
-        "info" => Level::INFO,
-        "warn" => Level::WARN,
-        "error" => Level::ERROR,
-        _ => {
-            eprintln!("Invalid log level '{}', using INFO", config.log_level);
-            Level::INFO
-        }
-    };
+    // Initialize logging early with default INFO level
+    // This allows us to use tracing macros for all error messages
+    let initial_log_level = Level::INFO;
 
     // Custom time format: YYYY/MM/DD hh:mm:ss.xxxx
     let timer = create_custom_timer();
@@ -110,15 +84,14 @@ async fn main() {
         && std::env::var("NO_COLOR").is_err()
         && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
 
-    // Setup logging based on whether file logging is enabled
+    // Setup initial logging (may be reconfigured after loading config)
     if args.log_file {
         // File logging: no ANSI colors, truncate previous run
-        let file = std::fs::File::create("stam_server.log")
-            .expect("Unable to create stam_server.log");
-        let formatter_stdout = CustomFormatter::new(timer.clone(), use_ansi)
-            .with_strip_prefix("stam_server::");
-        let formatter_file = CustomFormatter::new(timer, false)
-            .with_strip_prefix("stam_server::");
+        let file =
+            std::fs::File::create("stam_server.log").expect("Unable to create stam_server.log");
+        let formatter_stdout =
+            CustomFormatter::new(timer.clone(), use_ansi).with_strip_prefix("stam_server::");
+        let formatter_file = CustomFormatter::new(timer, false).with_strip_prefix("stam_server::");
 
         tracing_subscriber::registry()
             .with(
@@ -133,11 +106,12 @@ async fn main() {
                     .with_ansi(false)
                     .with_writer(file),
             )
-            .with(tracing_subscriber::filter::LevelFilter::from_level(log_level))
+            .with(tracing_subscriber::filter::LevelFilter::from_level(
+                initial_log_level,
+            ))
             .init();
     } else {
-        let formatter = CustomFormatter::new(timer, use_ansi)
-            .with_strip_prefix("stam_server::");
+        let formatter = CustomFormatter::new(timer, use_ansi).with_strip_prefix("stam_server::");
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
@@ -145,14 +119,44 @@ async fn main() {
                     .with_ansi(use_ansi)
                     .with_writer(std::io::stdout),
             )
-            .with(tracing_subscriber::filter::LevelFilter::from_level(log_level))
+            .with(tracing_subscriber::filter::LevelFilter::from_level(
+                initial_log_level,
+            ))
             .init();
     }
 
-    info!("========================================");
-    info!("   STAMINAL CORE SERVER v{}", VERSION);
-    info!("   State: Undifferentiated");
-    info!("========================================");
+    info!("Staminal Core Server v{}", VERSION);
+    info!("Copyright (C) 2025 Magius(CHE)");
+    // Load and validate configuration
+    let config = match Config::from_json_file(&args.config) {
+        Ok(mut cfg) => {
+            // Validate mod configuration and build mod lists
+            // Pass custom_home to resolve mods path correctly
+            if let Err(e) = cfg.validate_mods(args.home.as_deref()) {
+                error!("Configuration validation error: {}", e);
+                std::process::exit(1);
+            }
+            cfg
+        }
+        Err(e) => {
+            error!("Failed to load config from '{}': {}", args.config, e);
+            std::process::exit(1);
+        }
+    };
+
+    // Parse log level from config (logging already initialized, this is just for reference)
+    let _log_level = match config.log_level.to_lowercase().as_str() {
+        "trace" => Level::TRACE,
+        "debug" => Level::DEBUG,
+        "info" => Level::INFO,
+        "warn" => Level::WARN,
+        "error" => Level::ERROR,
+        _ => {
+            warn!("Invalid log level '{}', using INFO", config.log_level);
+            Level::INFO
+        }
+    };
+
     info!("Configuration: {}", args.config);
 
     debug!("Settings:");
@@ -166,17 +170,21 @@ async fn main() {
     let shutdown = Arc::new(AtomicBool::new(false));
 
     // 1. Initialize mod system (validate + load server-side mods)
-    let mod_runtimes = match mod_loader::initialize_all_games(&config, VERSION, args.home.as_deref()) {
-        Ok(runtime) => runtime,
-        Err(e) => {
-            error!("Failed to initialize mods. {}", e);
-            return;
-        }
-    };
+    let mod_runtimes =
+        match mod_loader::initialize_all_games(&config, VERSION, args.home.as_deref()) {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                error!("Failed to initialize mods. {}", e);
+                return;
+            }
+        };
 
     let total_server_mods: usize = mod_runtimes.values().map(|r| r.server_mods.len()).sum();
     let total_client_mods: usize = mod_runtimes.values().map(|r| r.client_mods.len()).sum();
-    info!("Validated client mods: {}, loaded server mods: {}", total_client_mods, total_server_mods);
+    info!(
+        "Validated client mods: {}, loaded server mods: {}",
+        total_client_mods, total_server_mods
+    );
 
     // Spawn JS event loops for any game that has server-side JS mods
     for (game_id, runtime) in &mod_runtimes {
@@ -292,7 +300,9 @@ async fn main() {
     info!("[CORE] Shutting down server gracefully...");
 
     // Disconnect all active clients with locale ID
-    client_manager.disconnect_all("disconnect-server-shutdown").await;
+    client_manager
+        .disconnect_all("disconnect-server-shutdown")
+        .await;
 
     // Give clients time to receive disconnect message before closing
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;

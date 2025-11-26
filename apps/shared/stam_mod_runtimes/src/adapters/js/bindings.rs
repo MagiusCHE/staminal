@@ -23,13 +23,12 @@
 //! This is acceptable because the Notify handles are small and will be cleaned up
 //! when the spawned task completes or is aborted.
 
-use rquickjs::{Ctx, Function, Object};
-use rquickjs::function::Rest;
+use crate::api::{AppApi, ConsoleApi, SystemApi};
+use rquickjs::{Array, Ctx, Function, Object, class::Trace};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::collections::HashMap;
 use tokio::sync::Notify;
-use crate::api::{ConsoleApi, AppApi};
 
 /// Unique timer ID counter - globally atomic to ensure unique IDs across ALL runtimes
 /// (JavaScript, Lua, C#, etc.) and all instances of each runtime type.
@@ -60,56 +59,100 @@ static TIMER_ABORT_HANDLES: std::sync::LazyLock<std::sync::Mutex<HashMap<u32, Ar
 pub fn setup_console_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
     let globals = ctx.globals();
 
-    // Create console object
-    let console = Object::new(ctx.clone())?;
+    // Create native console object with raw string-based functions
+    let console_native = Object::new(ctx.clone())?;
 
-    // console.log - maps to ConsoleApi::log
-    let log_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
+    // Native _log function - accepts a single pre-formatted string message
+    let log_fn = Function::new(ctx.clone(), |ctx: Ctx, message: String| {
         let game_id: Option<String> = ctx.globals().get("__GAME_ID__").ok();
-        let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
-        let message = args.0.join(" ");
+        let mod_id: String = ctx
+            .globals()
+            .get("__MOD_ID__")
+            .unwrap_or_else(|_| "unknown".to_string());
         ConsoleApi::log(game_id.as_deref(), "js", &mod_id, &message);
     })?;
-    console.set("log", log_fn)?;
+    console_native.set("_log", log_fn)?;
 
-    // console.error - maps to ConsoleApi::error
-    let error_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
+    // Native _error function
+    let error_fn = Function::new(ctx.clone(), |ctx: Ctx, message: String| {
         let game_id: Option<String> = ctx.globals().get("__GAME_ID__").ok();
-        let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
-        let message = args.0.join(" ");
+        let mod_id: String = ctx
+            .globals()
+            .get("__MOD_ID__")
+            .unwrap_or_else(|_| "unknown".to_string());
         ConsoleApi::error(game_id.as_deref(), "js", &mod_id, &message);
     })?;
-    console.set("error", error_fn)?;
+    console_native.set("_error", error_fn)?;
 
-    // console.warn - maps to ConsoleApi::warn
-    let warn_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
+    // Native _warn function
+    let warn_fn = Function::new(ctx.clone(), |ctx: Ctx, message: String| {
         let game_id: Option<String> = ctx.globals().get("__GAME_ID__").ok();
-        let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
-        let message = args.0.join(" ");
+        let mod_id: String = ctx
+            .globals()
+            .get("__MOD_ID__")
+            .unwrap_or_else(|_| "unknown".to_string());
         ConsoleApi::warn(game_id.as_deref(), "js", &mod_id, &message);
     })?;
-    console.set("warn", warn_fn)?;
+    console_native.set("_warn", warn_fn)?;
 
-    // console.info - maps to ConsoleApi::info
-    let info_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
+    // Native _info function
+    let info_fn = Function::new(ctx.clone(), |ctx: Ctx, message: String| {
         let game_id: Option<String> = ctx.globals().get("__GAME_ID__").ok();
-        let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
-        let message = args.0.join(" ");
+        let mod_id: String = ctx
+            .globals()
+            .get("__MOD_ID__")
+            .unwrap_or_else(|_| "unknown".to_string());
         ConsoleApi::info(game_id.as_deref(), "js", &mod_id, &message);
     })?;
-    console.set("info", info_fn)?;
+    console_native.set("_info", info_fn)?;
 
-    // console.debug - maps to ConsoleApi::debug
-    let debug_fn = Function::new(ctx.clone(), |ctx: Ctx, args: Rest<String>| {
+    // Native _debug function
+    let debug_fn = Function::new(ctx.clone(), |ctx: Ctx, message: String| {
         let game_id: Option<String> = ctx.globals().get("__GAME_ID__").ok();
-        let mod_id: String = ctx.globals().get("__MOD_ID__").unwrap_or_else(|_| "unknown".to_string());
-        let message = args.0.join(" ");
+        let mod_id: String = ctx
+            .globals()
+            .get("__MOD_ID__")
+            .unwrap_or_else(|_| "unknown".to_string());
         ConsoleApi::debug(game_id.as_deref(), "js", &mod_id, &message);
     })?;
-    console.set("debug", debug_fn)?;
+    console_native.set("_debug", debug_fn)?;
 
-    // Register console object globally
-    globals.set("console", console)?;
+    // Register native console object
+    globals.set("__console_native", console_native)?;
+
+    // Create wrapper console object in JavaScript that handles any value types
+    // The wrapper converts arguments to strings using JSON.stringify for objects
+    ctx.eval::<(), _>(
+        r#"
+        const __formatArg = (arg) => {
+            if (arg === undefined) return 'undefined';
+            if (arg === null) return 'null';
+            if (typeof arg === 'string') return arg;
+            if (typeof arg === 'number' || typeof arg === 'boolean') return String(arg);
+            if (typeof arg === 'function') return '[Function]';
+            try {
+                return JSON.stringify(arg,null,2);
+            } catch (e) {
+                return '[object]';
+            }
+        };
+        const __formatArgs = (...args) => args.map(__formatArg).join(' ');
+
+        globalThis.console = {
+            log: (...args) => __console_native._log(__formatArgs(...args)),
+            error: (...args) => __console_native._error(__formatArgs(...args)),
+            warn: (...args) => __console_native._warn(__formatArgs(...args)),
+            info: (...args) => __console_native._info(__formatArgs(...args)),
+            debug: (...args) => __console_native._debug(__formatArgs(...args)),
+        };
+
+        // Setup global error handlers for uncaught errors and unhandled promise rejections
+        globalThis.onerror = (message, source, lineno, colno, error) => {
+            const errorMsg = error ? (error.stack || error.message || String(error)) : message;
+            __console_native._error(`Uncaught Error: ${errorMsg}`);
+        };
+    "#,
+    )?;
 
     Ok(())
 }
@@ -291,4 +334,80 @@ fn set_timeout_interval_wrapper<'js, const IS_INTERVAL: bool>(
     msec: Option<u64>,
 ) -> rquickjs::Result<u32> {
     set_timeout_interval(ctx, cb, msec, IS_INTERVAL)
+}
+
+/// JavaScript System API class
+///
+/// This class is exposed to JavaScript as the `system` global object.
+/// It provides methods to query information about loaded mods.
+#[rquickjs::class]
+#[derive(Clone, Trace)]
+pub struct SystemJS {
+    #[qjs(skip_trace)]
+    system_api: SystemApi,
+}
+
+#[rquickjs::methods]
+impl SystemJS {
+    /// Get information about all loaded mods
+    ///
+    /// Returns an array of objects with properties:
+    /// - id: string
+    /// - version: string
+    /// - name: string
+    /// - description: string
+    /// - mod_type: string | null
+    /// - priority: number
+    /// - bootstrapped: boolean
+    #[qjs(rename = "get_mods")]
+    pub fn get_mods<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Array<'js>> {
+        tracing::debug!("SystemJS::get_mods called");
+
+        let mods = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.system_api.get_mods()
+        })) {
+            Ok(mods) => mods,
+            Err(e) => {
+                tracing::error!("Panic in get_mods: {:?}", e);
+                return Err(rquickjs::Error::Exception);
+            }
+        };
+
+        tracing::debug!("SystemJS::get_mods got {} mods", mods.len());
+
+        let array = Array::new(ctx.clone())?;
+
+        for (idx, mod_info) in mods.iter().enumerate() {
+            let obj = Object::new(ctx.clone())?;
+            obj.set("id", mod_info.id.as_str())?;
+            obj.set("version", mod_info.version.as_str())?;
+            obj.set("name", mod_info.name.as_str())?;
+            obj.set("description", mod_info.description.as_str())?;
+            obj.set("mod_type", mod_info.mod_type.as_deref())?;
+            obj.set("priority", mod_info.priority)?;
+            obj.set("bootstrapped", mod_info.bootstrapped)?;
+            obj.set("loaded", mod_info.loaded)?;
+            array.set(idx, obj)?;
+        }
+
+        tracing::debug!("SystemJS::get_mods returning array");
+        Ok(array)
+    }
+}
+
+/// Setup system API in the JavaScript context
+///
+/// Provides system.get_mods() function that returns an array of mod info objects.
+/// Each mod info object contains: id, version, name, description, mod_type, priority, bootstrapped
+pub fn setup_system_api(ctx: Ctx, system_api: SystemApi) -> Result<(), rquickjs::Error> {
+    // First, define the class in the runtime (required before creating instances)
+    rquickjs::Class::<SystemJS>::define(&ctx.globals())?;
+
+    // Create an instance of SystemJS
+    let system_obj = rquickjs::Class::<SystemJS>::instance(ctx.clone(), SystemJS { system_api })?;
+
+    // Register it as global 'system' object
+    ctx.globals().set("system", system_obj)?;
+
+    Ok(())
 }
