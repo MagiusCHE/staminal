@@ -24,7 +24,7 @@
 //! when the spawned task completes or is aborted.
 
 use crate::api::{AppApi, ConsoleApi, SystemApi};
-use rquickjs::{Array, Ctx, Function, Object, class::Trace};
+use rquickjs::{Array, Ctx, Function, Object, class::Trace, JsLifetime};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -150,6 +150,24 @@ pub fn setup_console_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
         globalThis.onerror = (message, source, lineno, colno, error) => {
             const errorMsg = error ? (error.stack || error.message || String(error)) : message;
             __console_native._error(`Uncaught Error: ${errorMsg}`);
+        };
+
+        // Handler for unhandled promise rejections
+        globalThis.onunhandledrejection = (event) => {
+            const reason = event && event.reason;
+            let errorMsg;
+            if (reason instanceof Error) {
+                errorMsg = reason.stack || reason.message || String(reason);
+            } else if (typeof reason === 'string') {
+                errorMsg = reason;
+            } else {
+                try {
+                    errorMsg = JSON.stringify(reason);
+                } catch {
+                    errorMsg = String(reason);
+                }
+            }
+            __console_native._error(`Unhandled Promise Rejection: ${errorMsg}`);
         };
     "#,
     )?;
@@ -341,7 +359,7 @@ fn set_timeout_interval_wrapper<'js, const IS_INTERVAL: bool>(
 /// This class is exposed to JavaScript as the `system` global object.
 /// It provides methods to query information about loaded mods.
 #[rquickjs::class]
-#[derive(Clone, Trace)]
+#[derive(Clone, Trace, JsLifetime)]
 pub struct SystemJS {
     #[qjs(skip_trace)]
     system_api: SystemApi,

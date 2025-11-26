@@ -195,7 +195,11 @@ async fn main() {
                 info!("Running JS event loop for game '{}'", gid);
                 let mut js_loop = std::pin::pin!(run_js_event_loop(js_runtime));
                 tokio::select! {
-                    _ = &mut js_loop => {},
+                    fatal_error = &mut js_loop => {
+                        if fatal_error {
+                            error!("Fatal JavaScript error in game '{}', mod event loop terminated", gid);
+                        }
+                    },
                     _ = wait_for_shutdown(shutdown_token) => {},
                 }
             });

@@ -11,7 +11,7 @@ tokio = { version = "1", features = ["sync", "time", "rt", "rt-multi-thread", "m
 time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 
 # Optional runtime-specific dependencies
-rquickjs = { version = "0.6", features = ["classes", "properties", "loader", "futures", "parallel", "macro"], optional = true }
+rquickjs = { version = "0.10", features = ["classes", "properties", "loader", "futures", "parallel", "macro"], optional = true }
 
 [features]
 default = []

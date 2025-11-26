@@ -474,9 +474,12 @@ async fn connect_to_game_server(
             }
 
             // Run JS event loop for timer callbacks
-            _ = run_js_event_loop(js_runtime) => {
-                // Event loop shouldn't exit normally
-                debug!("JavaScript event loop exited unexpectedly");
+            fatal_error = run_js_event_loop(js_runtime) => {
+                if fatal_error {
+                    error!("{}", locale.get("js-fatal-error"));
+                } else {
+                    debug!("JavaScript event loop exited unexpectedly");
+                }
             }
         }
     } else {

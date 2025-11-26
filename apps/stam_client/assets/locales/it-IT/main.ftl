@@ -41,6 +41,7 @@ disconnect-unknown = Disconnesso dal server
 error-invalid-uri = Schema URI non valido: {$uri}
 error-unexpected-message = Ricevuto messaggio inaspettato
 error-parse-failed = Impossibile interpretare la risposta del server
+js-fatal-error = Errore JavaScript fatale nel mod, arresto del client
 
 ## Generale
 ctrl-c-received = Ricevuto Ctrl+C, disconnessione in corso...

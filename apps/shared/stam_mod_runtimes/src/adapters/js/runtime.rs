@@ -1,14 +1,162 @@
 use rquickjs::loader::{Loader, ModuleLoader, Resolver};
 use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Module, Object, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, RwLock};
 use tracing::{debug, error, info};
+
+/// Registry to track already-logged promise rejections to avoid duplicates
+/// QuickJS calls the rejection tracker multiple times for the same rejection
+static LOGGED_REJECTIONS: std::sync::LazyLock<Mutex<HashSet<String>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+
+/// Flag to indicate a fatal JavaScript error occurred
+/// When set to true, the event loop should terminate and the client should exit
+static JS_FATAL_ERROR: AtomicBool = AtomicBool::new(false);
+
+/// Notify handle to wake up the event loop when a fatal error occurs
+static FATAL_ERROR_NOTIFY: std::sync::LazyLock<tokio::sync::Notify> =
+    std::sync::LazyLock::new(|| tokio::sync::Notify::new());
+
+/// Check if a fatal JavaScript error has occurred
+pub fn has_fatal_error() -> bool {
+    JS_FATAL_ERROR.load(Ordering::SeqCst)
+}
+
+/// Reset the fatal error flag (call when starting a new session)
+pub fn reset_fatal_error() {
+    JS_FATAL_ERROR.store(false, Ordering::SeqCst);
+}
+
+/// Signal that a fatal error has occurred and wake the event loop
+fn signal_fatal_error() {
+    JS_FATAL_ERROR.store(true, Ordering::SeqCst);
+    FATAL_ERROR_NOTIFY.notify_one();
+}
 
 use super::{JsRuntimeConfig, bindings};
 use crate::api::{AppApi, SystemApi, ModInfo};
 use crate::{ModReturnValue, RuntimeAdapter};
+
+/// Format a Promise rejection reason into a readable error message
+///
+/// Extracts error name, message, and stack trace from JavaScript Error objects.
+/// Also attempts to read the source code line that caused the error.
+fn format_rejection_reason(_ctx: &Ctx, reason: &Value) -> String {
+    // Try to convert to object to access Error properties
+    if let Some(obj) = reason.as_object() {
+        let mut error_name = String::from("Error");
+        let mut error_message = String::new();
+        let mut stack_trace = String::new();
+
+        // Try to get error name (e.g., "TypeError", "ReferenceError")
+        if let Ok(name_prop) = obj.get::<_, Value>("name") {
+            if let Some(name_str) = name_prop.as_string() {
+                if let Ok(name) = name_str.to_string() {
+                    error_name = name;
+                }
+            }
+        }
+
+        // Try to get error message
+        if let Ok(msg_prop) = obj.get::<_, Value>("message") {
+            if let Some(msg_str) = msg_prop.as_string() {
+                if let Ok(msg) = msg_str.to_string() {
+                    error_message = msg;
+                }
+            }
+        }
+
+        // Try to get stack trace
+        if let Ok(stack_prop) = obj.get::<_, Value>("stack") {
+            if let Some(stack_str) = stack_prop.as_string() {
+                if let Ok(stack) = stack_str.to_string() {
+                    stack_trace = stack;
+                }
+            }
+        }
+
+        // Format output
+        let mut output = if !error_message.is_empty() {
+            format!("{}: {}", error_name, error_message)
+        } else {
+            error_name
+        };
+
+        // Try to extract source code context from the first stack frame
+        if let Some(source_context) = extract_source_context(&stack_trace) {
+            output.push_str("\n  > ");
+            output.push_str(&source_context);
+        }
+
+        // Add stack trace if available and not already included
+        if !stack_trace.is_empty() && !output.contains(&stack_trace) {
+            output.push('\n');
+            output.push_str(&stack_trace);
+        }
+
+        return output;
+    }
+
+    // Fallback: try to convert directly to string
+    if let Some(s) = reason.as_string() {
+        if let Ok(msg) = s.to_string() {
+            return msg;
+        }
+    }
+
+    // Last resort: debug format
+    format!("{:?}", reason)
+}
+
+/// Extract source code context from the first line of a stack trace
+///
+/// Parses stack trace lines like:
+///   "at ensure_mods (/path/to/file.js:31:13)"
+/// And reads line 31 from the file to show the problematic code.
+fn extract_source_context(stack_trace: &str) -> Option<String> {
+    // Find first "at " line which contains file:line:col
+    for line in stack_trace.lines() {
+        let line = line.trim();
+        if line.starts_with("at ") {
+            // Parse: "at funcName (file:line:col)" or "at file:line:col"
+            if let Some(paren_start) = line.find('(') {
+                if let Some(paren_end) = line.rfind(')') {
+                    let location = &line[paren_start + 1..paren_end];
+                    return read_source_line(location);
+                }
+            } else {
+                // Format: "at file:line:col"
+                let location = &line[3..]; // Skip "at "
+                return read_source_line(location);
+            }
+        }
+    }
+    None
+}
+
+/// Read a specific line from a source file
+///
+/// Input format: "/path/to/file.js:31:13" (file:line:col)
+fn read_source_line(location: &str) -> Option<String> {
+    // Parse file:line:col - find last two colons
+    let parts: Vec<&str> = location.rsplitn(3, ':').collect();
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let _col: usize = parts[0].parse().ok()?;
+    let line_num: usize = parts[1].parse().ok()?;
+    let file_path = parts[2];
+
+    // Read the file and get the specific line
+    let content = fs::read_to_string(file_path).ok()?;
+    let line = content.lines().nth(line_num.saturating_sub(1))?;
+
+    Some(line.trim().to_string())
+}
 
 /// Global registry mapping mod aliases (@mod-id) to their entry point paths
 ///
@@ -189,6 +337,49 @@ impl JsRuntimeAdapter {
         info!("> Initializing javascript async runtime \"QuickJS\" for mods");
 
         let runtime = AsyncRuntime::new()?;
+
+        // Setup promise rejection tracker synchronously using block_on
+        // This must be done before any JavaScript code runs
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                runtime.set_host_promise_rejection_tracker(Some(Box::new(
+                    |ctx, _promise, reason, is_handled| {
+                        // Only report unhandled rejections (is_handled == false)
+                        if !is_handled {
+                            // Try to extract error message from the reason
+                            let error_msg = format_rejection_reason(&ctx, &reason);
+
+                            // Get mod ID for logging context
+                            let mod_id: String = ctx
+                                .globals()
+                                .get("__MOD_ID__")
+                                .unwrap_or_else(|_| "unknown".to_string());
+
+                            // Create a unique key for this rejection to avoid duplicates
+                            // QuickJS may call the tracker multiple times for the same rejection
+                            let rejection_key = format!("{}:{}", mod_id, error_msg);
+
+                            // Check if we've already logged this rejection
+                            let mut logged = LOGGED_REJECTIONS.lock().unwrap();
+                            if logged.contains(&rejection_key) {
+                                return;
+                            }
+                            logged.insert(rejection_key);
+
+                            // Limit the set size to prevent unbounded growth
+                            if logged.len() > 100 {
+                                logged.clear();
+                            }
+
+                            error!("js::{}: Unhandled Promise Rejection: {}", mod_id, error_msg);
+
+                            // Signal fatal error and wake the event loop
+                            signal_fatal_error();
+                        }
+                    },
+                ))).await;
+            });
+        });
 
         let js_runtime = Self {
             runtime: Arc::new(runtime),
@@ -676,16 +867,39 @@ impl RuntimeAdapter for JsRuntimeAdapter {
 /// This function should be spawned as a task and run concurrently with other tasks.
 /// It processes pending JavaScript jobs (Promises, timers spawned via ctx.spawn(), etc.)
 ///
-/// The event loop will run until cancelled (e.g., via tokio::select with ctrl+c).
+/// The event loop will run until:
+/// - Cancelled (e.g., via tokio::select with ctrl+c)
+/// - A fatal JavaScript error occurs (unhandled promise rejection)
+///
+/// Returns `true` if a fatal error occurred, `false` otherwise.
 ///
 /// Uses `runtime.drive()` which properly uses async Wakers to wait for new jobs
-/// without busy-spinning. The future completes when the runtime is dropped.
-pub async fn run_js_event_loop(runtime: Arc<AsyncRuntime>) {
+/// without busy-spinning. We use tokio::select! to also listen for fatal error signals.
+pub async fn run_js_event_loop(runtime: Arc<AsyncRuntime>) -> bool {
     debug!("Starting JavaScript event loop");
 
-    // drive() returns a future that:
-    // - Continuously polls spawned futures in the background
-    // - Uses proper async/await semantics with Waker (no busy-spinning)
-    // - Completes when the runtime is dropped
-    runtime.drive().await;
+    // Check for fatal error before starting
+    if has_fatal_error() {
+        error!("Fatal JavaScript error detected, terminating event loop");
+        return true;
+    }
+
+    // Use tokio::select to wait for either:
+    // 1. The JS runtime to complete (drive() never completes normally)
+    // 2. A fatal error notification
+    tokio::select! {
+        biased;
+
+        // Listen for fatal error signal
+        _ = FATAL_ERROR_NOTIFY.notified() => {
+            error!("Fatal JavaScript error detected, terminating event loop");
+            true
+        }
+
+        // Run the JS event loop (this blocks until runtime is dropped)
+        _ = runtime.drive() => {
+            // drive() completed, check if it was due to a fatal error
+            has_fatal_error()
+        }
+    }
 }
