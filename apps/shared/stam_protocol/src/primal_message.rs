@@ -19,7 +19,7 @@ pub enum IntentType {
     /// Game login - for game client connections
     GameLogin,
     /// Server login - for server-to-server connections
-    ServerLogin,
+    ServerLogin,    
 }
 
 /// Primal protocol messages for initial connection handling

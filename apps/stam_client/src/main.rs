@@ -179,7 +179,8 @@ async fn connect_to_game_server(
 
             // Load manifests only for mods that are present locally
             // Missing mods are tracked separately - we only fail if a required mod is missing
-            let mut available_manifests: HashMap<String, ModManifest> = HashMap::new();
+            // Tuple stores (manifest, actual_mod_dir) since mod_dir might be in client/ subdirectory
+            let mut available_manifests: HashMap<String, (ModManifest, std::path::PathBuf)> = HashMap::new();
             let mut missing_mods: Vec<String> = Vec::new();
 
             if !mods.is_empty() {
@@ -196,13 +197,21 @@ async fn connect_to_game_server(
                         continue;
                     }
 
-                    // Read manifest
-                    let manifest_path = mod_dir.join("manifest.json");
-                    if !manifest_path.exists() {
-                        warn!("Mod '{}' directory exists but missing manifest.json", mod_info.mod_id);
+                    // Read manifest - check client/ subdirectory first, then root
+                    // If manifest is in client/, use that as the mod_dir for entry_point resolution
+                    let client_dir = mod_dir.join("client");
+                    let client_manifest_path = client_dir.join("manifest.json");
+                    let root_manifest_path = mod_dir.join("manifest.json");
+
+                    let (actual_mod_dir, manifest_path) = if client_manifest_path.exists() {
+                        (client_dir, client_manifest_path)
+                    } else if root_manifest_path.exists() {
+                        (mod_dir.clone(), root_manifest_path)
+                    } else {
+                        warn!("Mod '{}' directory exists but missing manifest.json (checked client/ and root)", mod_info.mod_id);
                         missing_mods.push(mod_info.mod_id.clone());
                         continue;
-                    }
+                    };
 
                     let manifest = match ModManifest::from_json_file(manifest_path.to_str().unwrap()) {
                         Ok(m) => m,
@@ -213,8 +222,9 @@ async fn connect_to_game_server(
                         }
                     };
 
-                    info!(" ✓ {} [{}:{}] found", mod_info.mod_id, mod_info.mod_type, manifest.version);
-                    available_manifests.insert(mod_info.mod_id.clone(), manifest);
+                    info!(" ✓ {} [{}:{}] found (from {})", mod_info.mod_id, mod_info.mod_type, manifest.version,
+                        if actual_mod_dir != mod_dir { "client/" } else { "root" });
+                    available_manifests.insert(mod_info.mod_id.clone(), (manifest, actual_mod_dir));
                 }
 
                 if !missing_mods.is_empty() {
@@ -277,9 +287,9 @@ async fn connect_to_game_server(
                 // This must happen BEFORE loading any mod, so that import "@mod-id" works
                 info!("Registering mod aliases for available mods...");
 
-                for (mod_id, manifest) in &available_manifests {
-                    let mod_dir = mods_dir.join(mod_id);
-                    let entry_point_path = mod_dir.join(&manifest.entry_point);
+                for (mod_id, (manifest, actual_mod_dir)) in &available_manifests {
+                    // Use actual_mod_dir (could be root or client/ subdirectory)
+                    let entry_point_path = actual_mod_dir.join(&manifest.entry_point);
 
                     // Convert to absolute path for reliable module resolution
                     let absolute_entry_point = if entry_point_path.is_absolute() {
@@ -439,6 +449,27 @@ async fn connect_to_game_server(
                     runtime_manager.call_mod_function(mod_id, "onAttach")?;
                     // Mark mod as loaded in SystemApi
                     system_api.set_loaded(mod_id, true);
+                }
+
+                // Identify ALL bootstrap mods required by the server
+                let required_bootstrap_mods: Vec<&String> = mods.iter()
+                    .filter(|m| m.mod_type == "bootstrap")
+                    .map(|m| &m.mod_id)
+                    .collect();
+
+                // Check if any required bootstrap mod is missing or not available
+                let missing_bootstrap_mods: Vec<&String> = required_bootstrap_mods.iter()
+                    .filter(|mod_id| !bootstrap_mod_ids.contains(*mod_id))
+                    .copied()
+                    .collect();
+
+                if !missing_bootstrap_mods.is_empty() {
+                    error!("Required bootstrap mod(s) not available locally: {:?}", missing_bootstrap_mods);
+                    error!("Cannot continue without all bootstrap mods. Please ensure these mods are installed.");
+                    return Err(format!(
+                        "Missing required bootstrap mod(s): {:?}",
+                        missing_bootstrap_mods
+                    ).into());
                 }
 
                 // Call onBootstrap ONLY for bootstrap mods (not for dependencies)

@@ -55,7 +55,7 @@ export class Manager {
 
     async download_mod(mod_info) {
         console.warn(`TODO: Simulating download BEGIN of mod ${mod_info.id}...`);
-        await wait(1000);
+        await network.download(mod_info.download_url, `/mods/${mod_info.id}.zip`);
         console.warn(`TODO: Simulating download DONE of mod ${mod_info.id}`);
         throw new Error("Download failed: Not implemented yet");
     }

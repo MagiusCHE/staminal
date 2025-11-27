@@ -163,8 +163,25 @@ impl Config {
                 }
 
                 // Read mod_type from manifest if not already set in config
+                // Use same resolution logic as mod_loader: check side-specific folder first, then root
                 if mod_config.mod_type.is_none() {
-                    let manifest_path = mods_path.join(mod_id).join("manifest.json");
+                    let mod_dir = mods_path.join(mod_id);
+
+                    // Determine which side to check for manifest
+                    // For server-side mods, prefer server/manifest.json
+                    // For client-only mods, prefer client/manifest.json
+                    let side_folder = if is_server_mod { "server" } else { "client" };
+
+                    // Try side-specific manifest first, then fall back to root
+                    let manifest_path = {
+                        let side_manifest = mod_dir.join(side_folder).join("manifest.json");
+                        if side_manifest.exists() {
+                            side_manifest
+                        } else {
+                            mod_dir.join("manifest.json")
+                        }
+                    };
+
                     let manifest = ModManifest::from_json_file(manifest_path.to_str().unwrap_or(""))
                         .map_err(|e| format!(
                             "Game '{}': Failed to read manifest for mod '{}': {}",
