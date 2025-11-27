@@ -100,7 +100,7 @@ fn default_log_level() -> String {
 }
 
 fn default_mods_path() -> String {
-    "../mods".to_string()
+    "./mods".to_string()
 }
 
 fn default_tick_rate() -> u64 {

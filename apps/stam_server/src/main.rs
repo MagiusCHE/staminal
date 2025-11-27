@@ -194,13 +194,16 @@ async fn main() {
             tokio::spawn(async move {
                 info!("Running JS event loop for game '{}'", gid);
                 let mut js_loop = std::pin::pin!(run_js_event_loop(js_runtime));
+                let shutdown_for_wait = shutdown_token.clone();
                 tokio::select! {
                     fatal_error = &mut js_loop => {
                         if fatal_error {
                             error!("Fatal JavaScript error in game '{}', mod event loop terminated", gid);
+                            // Signal main loop to shutdown gracefully
+                            shutdown_token.store(true, Ordering::Relaxed);
                         }
                     },
-                    _ = wait_for_shutdown(shutdown_token) => {},
+                    _ = wait_for_shutdown(shutdown_for_wait) => {},
                 }
             });
         }

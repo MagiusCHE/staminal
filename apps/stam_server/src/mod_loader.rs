@@ -8,7 +8,7 @@ use tracing::info;
 use stam_mod_runtimes::{
     RuntimeManager,
     RuntimeType,
-    adapters::js::{JsRuntimeAdapter, JsRuntimeConfig, register_mod_alias},
+    adapters::js::{JsRuntimeAdapter, JsRuntimeConfig, register_mod_alias, has_fatal_error, flush_pending_jobs},
     api::{LocaleApi, ModInfo},
     JsAsyncRuntime,
 };
@@ -187,6 +187,15 @@ fn initialize_game_mods(
             runtime_manager
                 .call_mod_function(mod_id, "onAttach")
                 .map_err(|e| format!("{}::{} Failed to call onAttach: {}", game_id, mod_id, e))?;
+
+            // Check for fatal JS errors (unhandled promise rejections) after each attach
+            // This catches async errors that occur during onAttach
+            if has_fatal_error() {
+                return Err(format!(
+                    "{}::{} Fatal JavaScript error during onAttach",
+                    game_id, mod_id
+                ));
+            }
             //debug!("Attached '{}'", mod_id);
         }
 
@@ -202,6 +211,15 @@ fn initialize_game_mods(
                 runtime_manager
                     .call_mod_function(mod_id, "onBootstrap")
                     .map_err(|e| format!("{}::{} Failed to call onBootstrap: {}", game_id, mod_id, e))?;
+
+                // Check for fatal JS errors after each bootstrap
+                if has_fatal_error() {
+                    return Err(format!(
+                        "{}::{} Fatal JavaScript error during onBootstrap",
+                        game_id, mod_id
+                    ));
+                }
+
                 // Mark mod as bootstrapped
                 if let Some(ref system_api) = system_api_ref {
                     system_api.set_bootstrapped(mod_id, true);

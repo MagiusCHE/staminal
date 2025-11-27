@@ -956,3 +956,18 @@ pub async fn run_js_event_loop(runtime: Arc<AsyncRuntime>) -> bool {
         }
     }
 }
+
+/// Process all pending JavaScript jobs (Promises, etc.) and return whether a fatal error occurred.
+///
+/// This function should be called after operations that may spawn async JavaScript code
+/// (like `onAttach` or `onBootstrap`) to ensure any unhandled Promise rejections are
+/// detected immediately rather than later in the event loop.
+///
+/// Returns `true` if a fatal error was detected, `false` otherwise.
+pub async fn flush_pending_jobs(runtime: &Arc<AsyncRuntime>) -> bool {
+    // Process all pending jobs
+    runtime.idle().await;
+
+    // Check if any fatal error occurred during processing
+    has_fatal_error()
+}
