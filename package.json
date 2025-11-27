@@ -26,6 +26,8 @@
   },
   "scripts": {
     "server:debug": "(pkill stam_server -9 || true) && cd apps/stam_server && STAM_HOME=\"./workspace_data\" cargo run --bin stam_server -- --config workspace_data/configs/develop.json --log-file",
-    "client:debug": "(pkill stam_client -9 || true) && cd apps/stam_client && STAM_URI=\"stam://magius:324fd324@localhost:9999\" STAM_LANG=\"it-IT\" STAM_HOME=\"./workspace_data\" cargo run --bin stam_client -- --log-file"
+    "server:test": "cd apps/stam_server && cargo test",
+    "client:debug": "(pkill stam_client -9 || true) && cd apps/stam_client && STAM_URI=\"stam://magius:324fd324@localhost:9999\" STAM_LANG=\"it-IT\" STAM_HOME=\"./workspace_data\" cargo run --bin stam_client -- --log-file",
+    "client:test": "cd apps/stam_client && cargo test"
   }
 }
