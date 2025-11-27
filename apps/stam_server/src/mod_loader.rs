@@ -9,7 +9,7 @@ use stam_mod_runtimes::{
     RuntimeManager,
     RuntimeType,
     adapters::js::{JsRuntimeAdapter, JsRuntimeConfig, register_mod_alias},
-    api::ModInfo,
+    api::{LocaleApi, ModInfo},
     JsAsyncRuntime,
 };
 use stam_schema::{ModManifest, validate_mod_dependencies, Validatable};
@@ -125,6 +125,17 @@ fn initialize_game_mods(
         let mut js_adapter = JsRuntimeAdapter::new(js_config)
             .map_err(|e| format!("Game '{}': Failed to initialize JS runtime: {}", game_id, e))?;
         js_runtime_handle = Some(js_adapter.get_runtime());
+
+        // Setup locale API for server-side mods (using stub fallback)
+        // Server-side mods can have their own locale/ directories for translations
+        // The global fallback returns message IDs in brackets since server has no global locale
+        let locale_api = LocaleApi::new(
+            "en-US",  // default locale
+            "en-US",  // fallback locale
+            |id| format!("[{}]", id),  // global fallback: return ID in brackets
+            |id, _args| format!("[{}]", id),  // global fallback with args
+        );
+        js_adapter.set_locale_api(locale_api);
 
         // First pass: register aliases and mod info for all server mods
         let mut mod_entries: Vec<(String, PathBuf, String)> = Vec::new();

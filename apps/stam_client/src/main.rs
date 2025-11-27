@@ -1,11 +1,13 @@
 use clap::Parser;
 use sha2::{Digest, Sha512};
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tracing::{Level, debug, error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
+use stam_mod_runtimes::api::LocaleApi;
 use stam_mod_runtimes::logging::{create_custom_timer, CustomFormatter};
 use stam_protocol::{GameMessage, GameStream, IntentType, PrimalMessage, PrimalStream};
 use stam_schema::{ModManifest, Validatable, validate_mod_dependencies, validate_version_range};
@@ -37,7 +39,7 @@ async fn connect_to_game_server(
     username: &str,
     password: &str,
     game_id: &str,
-    locale: &LocaleManager,
+    locale: Arc<LocaleManager>,
     app_paths: &AppPaths,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize game-specific directory
@@ -231,7 +233,32 @@ async fn connect_to_game_server(
 
                 // Initialize JavaScript runtime (one shared runtime for all JS mods)
                 let runtime_config = create_js_runtime_config(&app_paths, &game_id)?;
-                let js_adapter = JsRuntimeAdapter::new(runtime_config)?;
+                let mut js_adapter = JsRuntimeAdapter::new(runtime_config)?;
+
+                // Setup locale API for internationalization in JavaScript mods
+                // LocaleApi now supports hierarchical lookup: mod locale -> global locale
+                // We wrap Arc<LocaleManager> in a Mutex to make it Send+Sync for use in closures
+                let locale_mutex: Arc<std::sync::Mutex<Arc<LocaleManager>>> = Arc::new(std::sync::Mutex::new(locale.clone()));
+                let locale_for_get = locale_mutex.clone();
+                let locale_for_get_args = locale_mutex.clone();
+                let locale_api = LocaleApi::new(
+                    locale.current_locale(),  // current locale (e.g., "it-IT")
+                    "en-US",                  // fallback locale
+                    move |id| {
+                        let guard = locale_for_get.lock().unwrap();
+                        guard.get(id)
+                    },
+                    move |id, args| {
+                        let guard = locale_for_get_args.lock().unwrap();
+                        // Convert HashMap<String, String> to FluentArgs
+                        let mut fluent_args = fluent_bundle::FluentArgs::new();
+                        for (key, value) in args {
+                            fluent_args.set(key.as_str(), fluent_bundle::FluentValue::from(value.clone()));
+                        }
+                        guard.get_with_args(id, Some(&fluent_args))
+                    },
+                );
+                js_adapter.set_locale_api(locale_api);
 
                 // Get runtime handle BEFORE moving the adapter to the manager
                 let js_runtime = js_adapter.get_runtime();
@@ -469,7 +496,7 @@ async fn connect_to_game_server(
             }
 
             // Maintain game connection
-            _ = maintain_game_connection(&mut stream, locale) => {
+            _ = maintain_game_connection(&mut stream, locale.clone()) => {
                 info!("{}", locale.get("connection-closed"));
             }
 
@@ -485,7 +512,7 @@ async fn connect_to_game_server(
     } else {
         // No JS runtime, just wait for connection or Ctrl+C
         tokio::select! {
-            _ = maintain_game_connection(&mut stream, locale) => {
+            _ = maintain_game_connection(&mut stream, locale.clone()) => {
                 info!("{}", locale.get("connection-closed"));
             }
             _ = tokio::signal::ctrl_c() => {
@@ -499,7 +526,7 @@ async fn connect_to_game_server(
 }
 
 /// Maintain game connection - read messages from server
-async fn maintain_game_connection(stream: &mut TcpStream, locale: &LocaleManager) {
+async fn maintain_game_connection(stream: &mut TcpStream, locale: Arc<LocaleManager>) {
     loop {
         match stream.read_game_message().await {
             Ok(GameMessage::Disconnect { message }) => {
@@ -638,9 +665,9 @@ async fn main() {
         }
     };
 
-    // Initialize locale manager
+    // Initialize locale manager (wrapped in Arc for sharing with JS runtime)
     let locale = match LocaleManager::new(&args.assets, args.lang.as_deref()) {
-        Ok(lm) => lm,
+        Ok(lm) => Arc::new(lm),
         Err(e) => {
             error!("Failed to initialize locale system: {}", e);
             error!("Continuing without localization support");
@@ -869,7 +896,7 @@ async fn main() {
                 &username,
                 &password,
                 &first_server.game_id,
-                &locale,
+                locale.clone(),
                 &app_paths,
             )
             .await

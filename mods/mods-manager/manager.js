@@ -31,13 +31,15 @@ export class Manager {
             console.log(`Downloading mod: ${mod.id}...`);
             this.download_mod(mod).then(() => toload.splice(toload.indexOf(mod), 1)).catch((e) => {
                 console.error(`Failed to download mod ${mod.id}: ${e}`);
-                error_occurred = locale.translate("mod-download-failed", { mod_id: mod.id });
+                error_occurred = locale.get_with_args("mod-download-failed", { mod_id: mod.id });
             });
             if (error_occurred) {
                 break;
             }
         }
-
+        while (!error_occurred && toload.length > 0) {
+            await wait(100);
+        }
 
         if (error_occurred) {
             // TOOD: Show error in UI

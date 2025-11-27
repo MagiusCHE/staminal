@@ -5,10 +5,12 @@
 //! (in adapters) expose them to the scripting languages.
 
 pub mod console;
+pub mod locale;
 pub mod process;
 pub mod system;
 
 pub use console::ConsoleApi;
+pub use locale::LocaleApi;
 pub use process::{ProcessApi, AppApi};
 pub use system::{SystemApi, ModInfo};
 

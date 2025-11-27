@@ -1,10 +1,15 @@
-use fluent::{FluentBundle, FluentResource};
+use fluent::FluentResource;
+use fluent_bundle::concurrent::FluentBundle;
 use fluent_bundle::{FluentArgs, FluentValue};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 use tracing::{error, info, warn};
 use unic_langid::LanguageIdentifier;
+
+/// Thread-safe FluentBundle type using concurrent IntlLangMemoizer
+/// This allows LocaleManager to be shared across threads when wrapped in Arc
+type ConcurrentFluentBundle = FluentBundle<FluentResource>;
 
 /// Strip Unicode bidirectional isolate characters from a string.
 /// Fluent inserts these (U+2068 FSI, U+2069 PDI, U+2066 LRI, U+2067 RLI) around placeholders
@@ -16,8 +21,11 @@ fn strip_bidi_chars(s: &str) -> String {
 }
 
 /// Locale manager for internationalization
+///
+/// Uses thread-safe FluentBundle with concurrent IntlLangMemoizer
+/// so it can be shared across threads when wrapped in Arc<Mutex<>>.
 pub struct LocaleManager {
-    bundles: HashMap<String, FluentBundle<FluentResource>>,
+    bundles: HashMap<String, ConcurrentFluentBundle>,
     current_locale: String,
     fallback_locale: String,
 }
@@ -107,8 +115,8 @@ impl LocaleManager {
         // Parse language identifier
         let langid: LanguageIdentifier = locale_name.parse()?;
 
-        // Create bundle
-        let mut bundle = FluentBundle::new(vec![langid]);
+        // Create bundle with concurrent memoizer for thread-safety
+        let mut bundle = FluentBundle::new_concurrent(vec![langid]);
 
         // Load main.ftl file
         let main_file = locale_path.join("main.ftl");
@@ -206,3 +214,4 @@ macro_rules! fluent_args {
         args
     }};
 }
+

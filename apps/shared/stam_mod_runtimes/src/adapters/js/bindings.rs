@@ -23,7 +23,7 @@
 //! This is acceptable because the Notify handles are small and will be cleaned up
 //! when the spawned task completes or is aborted.
 
-use crate::api::{AppApi, ConsoleApi, SystemApi};
+use crate::api::{AppApi, ConsoleApi, LocaleApi, SystemApi};
 use rquickjs::{Array, Ctx, Function, Object, class::Trace, JsLifetime};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -426,6 +426,92 @@ pub fn setup_system_api(ctx: Ctx, system_api: SystemApi) -> Result<(), rquickjs:
 
     // Register it as global 'system' object
     ctx.globals().set("system", system_obj)?;
+
+    Ok(())
+}
+
+/// JavaScript Locale API class
+///
+/// This class is exposed to JavaScript as the `locale` global object.
+/// It provides methods to get localized strings with optional arguments.
+///
+/// The locale lookup is hierarchical:
+/// 1. First checks the current mod's locale files (if present)
+/// 2. Falls back to the global application locale
+#[rquickjs::class]
+#[derive(Clone, Trace, JsLifetime)]
+pub struct LocaleJS {
+    #[qjs(skip_trace)]
+    locale_api: LocaleApi,
+}
+
+#[rquickjs::methods]
+impl LocaleJS {
+    /// Get a localized message by ID
+    ///
+    /// First checks the current mod's locale, then falls back to global locale.
+    ///
+    /// # Arguments
+    /// * `id` - The message ID to look up
+    ///
+    /// # Returns
+    /// The localized string, or `[id]` if not found
+    #[qjs(rename = "get")]
+    pub fn get(&self, ctx: Ctx<'_>, id: String) -> String {
+        // Get the current mod_id from context globals
+        let mod_id: String = ctx
+            .globals()
+            .get("__MOD_ID__")
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        self.locale_api.get(&mod_id, &id)
+    }
+
+    /// Get a localized message with arguments
+    ///
+    /// First checks the current mod's locale, then falls back to global locale.
+    ///
+    /// # Arguments
+    /// * `id` - The message ID to look up
+    /// * `args` - An object with key-value pairs for substitution
+    ///
+    /// # Returns
+    /// The localized string with arguments substituted, or `[id]` if not found
+    #[qjs(rename = "get_with_args")]
+    pub fn get_with_args(&self, ctx: Ctx<'_>, id: String, args: Object<'_>) -> rquickjs::Result<String> {
+        // Get the current mod_id from context globals
+        let mod_id: String = ctx
+            .globals()
+            .get("__MOD_ID__")
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        // Convert JavaScript object to HashMap<String, String>
+        let mut args_map = HashMap::new();
+
+        // Iterate over object properties
+        for result in args.props::<String, String>() {
+            if let Ok((key, value)) = result {
+                args_map.insert(key, value);
+            }
+        }
+
+        Ok(self.locale_api.get_with_args(&mod_id, &id, &args_map))
+    }
+}
+
+/// Setup locale API in the JavaScript context
+///
+/// Provides locale.get(id) and locale.get_with_args(id, args) functions
+/// for internationalization support in mods.
+pub fn setup_locale_api(ctx: Ctx, locale_api: LocaleApi) -> Result<(), rquickjs::Error> {
+    // First, define the class in the runtime (required before creating instances)
+    rquickjs::Class::<LocaleJS>::define(&ctx.globals())?;
+
+    // Create an instance of LocaleJS
+    let locale_obj = rquickjs::Class::<LocaleJS>::instance(ctx.clone(), LocaleJS { locale_api })?;
+
+    // Register it as global 'locale' object
+    ctx.globals().set("locale", locale_obj)?;
 
     Ok(())
 }

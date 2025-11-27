@@ -37,7 +37,7 @@ fn signal_fatal_error() {
 }
 
 use super::{JsRuntimeConfig, bindings};
-use crate::api::{AppApi, SystemApi, ModInfo};
+use crate::api::{AppApi, LocaleApi, SystemApi, ModInfo};
 use crate::{ModReturnValue, RuntimeAdapter};
 
 /// Format a Promise rejection reason into a readable error message
@@ -109,6 +109,30 @@ fn format_rejection_reason(_ctx: &Ctx, reason: &Value) -> String {
 
     // Last resort: debug format
     format!("{:?}", reason)
+}
+
+/// Normalize a path by resolving `.` and `..` components without requiring the path to exist
+fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
+    use std::path::{Component, PathBuf};
+
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::CurDir => {
+                // Skip `.` components
+            }
+            Component::ParentDir => {
+                // Go up one directory if possible
+                normalized.pop();
+            }
+            _ => {
+                normalized.push(component);
+            }
+        }
+    }
+
+    normalized
 }
 
 /// Extract source code context from the first line of a stack trace
@@ -213,9 +237,11 @@ impl Resolver for ModAliasResolver {
                 let resolved = if let Some(sub) = subpath {
                     // @mod-id/subpath -> mod_dir/subpath
                     let mod_dir = entry_point.parent().unwrap_or(Path::new("."));
-                    mod_dir.join(sub).to_string_lossy().to_string()
+                    let joined = mod_dir.join(sub);
+                    // Normalize the path to remove ./ and .. components
+                    normalize_path(&joined).to_string_lossy().to_string()
                 } else {
-                    // @mod-id -> mod's entry point
+                    // @mod-id -> mod's entry point (already normalized via canonicalize)
                     entry_point.to_string_lossy().to_string()
                 };
 
@@ -235,7 +261,9 @@ impl Resolver for ModAliasResolver {
         if name.starts_with('.') {
             let base_dir = Path::new(base).parent().unwrap_or(Path::new("."));
             let resolved = base_dir.join(name);
-            let resolved_str = resolved.to_string_lossy().to_string();
+            // Normalize the path to remove ./ and .. components
+            let normalized = normalize_path(&resolved);
+            let resolved_str = normalized.to_string_lossy().to_string();
             //debug!("ModAliasResolver: relative '{}' (from '{}') -> '{}'", name, base, resolved_str);
             return Ok(resolved_str);
         }
@@ -326,6 +354,8 @@ pub struct JsRuntimeAdapter {
     mod_dirs: Vec<PathBuf>,
     /// System API shared across all mod contexts
     system_api: SystemApi,
+    /// Locale API for internationalization (optional)
+    locale_api: Option<LocaleApi>,
 }
 
 impl JsRuntimeAdapter {
@@ -387,10 +417,19 @@ impl JsRuntimeAdapter {
             loaded_mods: HashMap::new(),
             mod_dirs: Vec::new(),
             system_api: SystemApi::new(),
+            locale_api: None,
         };
 
         info!("< JavaScript async runtime \"QuickJS\" initialized successfully");
         Ok(js_runtime)
+    }
+
+    /// Set the locale API for internationalization support
+    ///
+    /// This should be called before loading any mods to ensure
+    /// the `locale` global object is available in all mod contexts.
+    pub fn set_locale_api(&mut self, locale_api: LocaleApi) {
+        self.locale_api = Some(locale_api);
     }
 
     /// Get a clone of the async runtime for the event loop
@@ -426,6 +465,7 @@ impl JsRuntimeAdapter {
         let game_data_dir = self.config.game_data_dir().clone();
         let game_config_dir = self.config.game_config_dir().clone();
         let system_api = self.system_api.clone();
+        let locale_api = self.locale_api.clone();
 
         // debug!(
         //     "setup_global_apis: game_data_dir={:?}, game_config_dir={:?}",
@@ -447,6 +487,11 @@ impl JsRuntimeAdapter {
 
                 // Register system API (system.get_mods())
                 bindings::setup_system_api(ctx.clone(), system_api)?;
+
+                // Register locale API (locale.get(), locale.get_with_args())
+                if let Some(locale) = locale_api {
+                    bindings::setup_locale_api(ctx.clone(), locale)?;
+                }
 
                 //debug!(" > API registrations completed successfully");
                 Ok::<(), rquickjs::Error>(())
@@ -552,6 +597,14 @@ impl JsRuntimeAdapter {
                 )
             })?
             .to_path_buf();
+
+        // Load mod-specific locales if the mod has a locale/ directory
+        if let Some(ref locale_api) = self.locale_api {
+            if let Err(e) = locale_api.load_mod_locales(mod_id, &mod_dir) {
+                // Log warning but don't fail - mod can still work without custom locales
+                tracing::warn!("Failed to load locales for mod '{}': {}", mod_id, e);
+            }
+        }
 
         // Register mod alias for cross-mod imports (@mod-id syntax)
         // Use absolute path for reliable resolution - canonicalize to remove ./ and normalize

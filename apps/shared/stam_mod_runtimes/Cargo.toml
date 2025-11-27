@@ -10,6 +10,11 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "time"]
 tokio = { version = "1", features = ["sync", "time", "rt", "rt-multi-thread", "macros"] }
 time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 
+# Internationalization (for mod-specific locales)
+fluent = "0.16"
+fluent-bundle = "0.15"
+unic-langid = "0.9"
+
 # Optional runtime-specific dependencies
 rquickjs = { version = "0.10", features = ["classes", "properties", "loader", "futures", "parallel", "macro"], optional = true }
 
