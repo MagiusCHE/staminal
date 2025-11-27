@@ -5,7 +5,7 @@ export class Manager {
 
     async register() {
         // Initialization logic here
-        system.register_event(SystemEvents.RequestUri, this.handle_mod_download_request.bind(this), 100, "stam://", "mods-manager/download");
+        system.register_event(SystemEvents.RequestUri, this.handle_mod_download_request.bind(this), 100, "stam://", "/mods-manager/download");
     }
 
     async run() {

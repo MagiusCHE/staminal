@@ -23,8 +23,8 @@
 //! This is acceptable because the Notify handles are small and will be cleaned up
 //! when the spawned task completes or is aborted.
 
-use crate::api::{AppApi, ConsoleApi, LocaleApi, SystemApi};
-use rquickjs::{Array, Ctx, Function, Object, class::Trace, JsLifetime};
+use crate::api::{AppApi, ConsoleApi, LocaleApi, RequestUriProtocol, SystemApi, SystemEvents};
+use rquickjs::{Array, Ctx, Function, JsLifetime, Object, class::Trace};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -51,6 +51,57 @@ pub fn next_timer_id() -> u32 {
 /// from a different context than the one that created the timer.
 static TIMER_ABORT_HANDLES: std::sync::LazyLock<std::sync::Mutex<HashMap<u32, Arc<Notify>>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Name of the global JavaScript object used to store event handlers
+const JS_EVENT_HANDLERS_MAP: &str = "__eventHandlers";
+
+/// Store a JavaScript function handler in the context's handler map
+pub fn store_js_handler<'js>(
+    ctx: &Ctx<'js>,
+    handler_id: u64,
+    handler: Function<'js>,
+) -> rquickjs::Result<()> {
+    let globals = ctx.globals();
+    let handlers_map: Object = globals.get(JS_EVENT_HANDLERS_MAP)?;
+    handlers_map.set(handler_id.to_string(), handler)?;
+    Ok(())
+}
+
+/// Remove a JavaScript function handler from the context's handler map
+pub fn remove_js_handler(ctx: &Ctx<'_>, handler_id: u64) -> rquickjs::Result<bool> {
+    let globals = ctx.globals();
+    let handlers_map: Object = globals.get(JS_EVENT_HANDLERS_MAP)?;
+    let key = handler_id.to_string();
+    let exists: bool = handlers_map.contains_key(&key)?;
+    if exists {
+        // Delete the property by setting to undefined
+        handlers_map.set(&key, rquickjs::Undefined)?;
+    }
+    Ok(exists)
+}
+
+/// Get a JavaScript function handler by ID from the context's handler map
+pub fn get_js_handler<'js>(
+    ctx: &Ctx<'js>,
+    handler_id: u64,
+) -> rquickjs::Result<Option<Function<'js>>> {
+    let globals = ctx.globals();
+    let handlers_map: Object = globals.get(JS_EVENT_HANDLERS_MAP)?;
+    let key = handler_id.to_string();
+    let handler: rquickjs::Value = handlers_map.get(&key)?;
+    if handler.is_undefined() || handler.is_null() {
+        Ok(None)
+    } else {
+        Ok(handler.into_function())
+    }
+}
+
+/// Initialize the event handlers map in a JavaScript context
+pub fn init_event_handlers_map(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+    let handlers_map = Object::new(ctx.clone())?;
+    ctx.globals().set(JS_EVENT_HANDLERS_MAP, handlers_map)?;
+    Ok(())
+}
 
 /// Setup console API in the JavaScript context
 ///
@@ -411,6 +462,114 @@ impl SystemJS {
         tracing::debug!("SystemJS::get_mods returning array");
         Ok(array)
     }
+
+    /// Register an event handler
+    ///
+    /// # Arguments
+    /// * `event` - The event type (SystemEvents enum value)
+    /// * `handler` - The callback function to invoke
+    /// * `priority` - Handler priority (lower numbers execute first)
+    /// * `protocol` - Protocol filter string for RequestUri ("stam://", "http://", or "" for all)
+    /// * `route` - Route prefix filter for RequestUri
+    ///
+    /// # Returns
+    /// Unique handler ID for later removal
+    #[qjs(rename = "register_event")]
+    pub fn register_event<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        event: u32,
+        handler: Function<'js>,
+        priority: i32,
+        protocol_str: Option<String>,
+        route: Option<String>,
+    ) -> rquickjs::Result<u64> {
+        // Get the current mod_id from context globals
+        let mod_id: String = ctx
+            .globals()
+            .get("__MOD_ID__")
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        tracing::debug!(
+            "SystemJS::register_event called: mod={}, event={}, priority={}, protocol={:?}, route={:?}",
+            mod_id,
+            event,
+            priority,
+            protocol_str,
+            route
+        );
+
+        // Validate event type
+        let event_type = match SystemEvents::from_u32(event) {
+            Some(e) => e,
+            None => {
+                tracing::error!("Invalid event type: {}", event);
+                return Err(rquickjs::Error::Exception);
+            }
+        };
+
+        // Parse protocol filter
+        let protocol = match protocol_str.as_deref() {
+            Some("stam://") | Some("stam") => RequestUriProtocol::Stam,
+            Some("http://") | Some("https://") | Some("http") => RequestUriProtocol::Http,
+            Some("") | None => RequestUriProtocol::All,
+            Some(other) => {
+                tracing::warn!("Unknown protocol filter '{}', using All", other);
+                RequestUriProtocol::All
+            }
+        };
+
+        // Register the handler with the event dispatcher
+        let handler_id = self.system_api.event_dispatcher().register_handler(
+            event_type,
+            &mod_id,
+            priority,
+            protocol,
+            route.unwrap_or_default(),
+        );
+
+        // Store the handler function in the context's handler map
+        store_js_handler(&ctx, handler_id, handler)?;
+
+        tracing::info!(
+            "Registered event handler: mod={}, event={:?}, handler_id={}, priority={}",
+            mod_id,
+            event_type,
+            handler_id,
+            priority
+        );
+
+        Ok(handler_id)
+    }
+
+    /// Unregister an event handler
+    ///
+    /// # Arguments
+    /// * `handler_id` - The handler ID returned from register_event
+    ///
+    /// # Returns
+    /// true if the handler was found and removed, false otherwise
+    #[qjs(rename = "unregister_event")]
+    pub fn unregister_event(&self, ctx: Ctx<'_>, handler_id: u64) -> rquickjs::Result<bool> {
+        tracing::debug!(
+            "SystemJS::unregister_event called: handler_id={}",
+            handler_id
+        );
+
+        // Remove from event dispatcher
+        let removed = self
+            .system_api
+            .event_dispatcher()
+            .unregister_handler(handler_id);
+
+        // Remove the handler function from the context's map
+        if removed {
+            remove_js_handler(&ctx, handler_id)?;
+            tracing::info!("Unregistered event handler: handler_id={}", handler_id);
+        }
+
+        Ok(removed)
+    }
 }
 
 /// Setup system API in the JavaScript context
@@ -418,6 +577,9 @@ impl SystemJS {
 /// Provides system.get_mods() function that returns an array of mod info objects.
 /// Each mod info object contains: id, version, name, description, mod_type, priority, bootstrapped
 pub fn setup_system_api(ctx: Ctx, system_api: SystemApi) -> Result<(), rquickjs::Error> {
+    // Initialize the event handlers map (must be done before any handler registration)
+    init_event_handlers_map(&ctx)?;
+
     // First, define the class in the runtime (required before creating instances)
     rquickjs::Class::<SystemJS>::define(&ctx.globals())?;
 
@@ -426,6 +588,19 @@ pub fn setup_system_api(ctx: Ctx, system_api: SystemApi) -> Result<(), rquickjs:
 
     // Register it as global 'system' object
     ctx.globals().set("system", system_obj)?;
+
+    // Create SystemEvents enum object
+    let system_events = Object::new(ctx.clone())?;
+    system_events.set("RequestUri", SystemEvents::RequestUri.to_u32())?;
+    ctx.globals().set("SystemEvents", system_events)?;
+
+    // Create RequestUriProtocol enum object
+    let request_uri_protocol = Object::new(ctx.clone())?;
+    request_uri_protocol.set("All", RequestUriProtocol::All.to_u32())?;
+    request_uri_protocol.set("Stam", RequestUriProtocol::Stam.to_u32())?;
+    request_uri_protocol.set("Http", RequestUriProtocol::Http.to_u32())?;
+    ctx.globals()
+        .set("RequestUriProtocol", request_uri_protocol)?;
 
     Ok(())
 }
@@ -478,7 +653,12 @@ impl LocaleJS {
     /// # Returns
     /// The localized string with arguments substituted, or `[id]` if not found
     #[qjs(rename = "get_with_args")]
-    pub fn get_with_args(&self, ctx: Ctx<'_>, id: String, args: Object<'_>) -> rquickjs::Result<String> {
+    pub fn get_with_args(
+        &self,
+        ctx: Ctx<'_>,
+        id: String,
+        args: Object<'_>,
+    ) -> rquickjs::Result<String> {
         // Get the current mod_id from context globals
         let mod_id: String = ctx
             .globals()

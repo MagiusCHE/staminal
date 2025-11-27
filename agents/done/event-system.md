@@ -12,7 +12,7 @@ L'obiettivo è creare un sistema di **Event Dispatcher** e un **API Adapter** pe
     * **ID del Mod** (per tracciamento e *detach*).
     * **Riferimento Richiamabile:** Per JavaScript, questo deve essere `rquickjs::Persistent<Function>`.
     * **Priorità** (`i32`).
-    * **Filtri Specifici** (Protocollo, Route) per `SystemEvents::UriRequest`.
+    * **Filtri Specifici** (Protocollo, Route) per `SystemEvents::RequestUri`.
 * **Dispatcher:** La funzione di *dispatch* deve eseguire la catena di handler in modo **sequenziale**, rispettando l'ordine di priorità (dal valore più piccolo al più grande).
 
 ---
@@ -25,11 +25,11 @@ L'obiettivo è creare un sistema di **Event Dispatcher** e un **API Adapter** pe
 
 ---
 
-### 3. Implementazione `SystemEvents::UriRequest`
+### 3. Implementazione `SystemEvents::RequestUri`
 
 #### 3.1. Filtri di Registrazione
 
-Quando un Mod si registra per `SystemEvents::UriRequest`, i parametri aggiuntivi sono:
+Quando un Mod si registra per `SystemEvents::RequestUri`, i parametri aggiuntivi sono:
 
 * **Protocollo (Protocol):** Enum `RequestUriProtocols` (`.Stam`, `.Http`, `.All` - default).
 * **Route (Route):** Stringa opzionale.
@@ -82,5 +82,5 @@ I Mod devono accedere ai campi `Response` tramite funzioni esposte dall'Adapter 
 * **Scenario:** Verificare la registrazione dell'evento in `Mods-Manager` (come già inserito nell'`onAttach`).
 * **Aggiungere Test:** Implementare un test unitario o di integrazione in Rust che:
     1.  Simuli la registrazione dell'handler dal Mod.
-    2.  Richiami la funzione di *dispatch* per `SystemEvents::UriRequest`.
+    2.  Richiami la funzione di *dispatch* per `SystemEvents::RequestUri`.
     3.  Verifichi che l'handler del Mod venga correttamente richiamato e che la logica di *dispatch* e filtro sia funzionante.

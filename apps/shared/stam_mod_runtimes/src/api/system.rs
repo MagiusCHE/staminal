@@ -4,6 +4,7 @@
 //! The `system.get_mods()` function returns an array of mod info objects.
 
 use std::sync::{Arc, RwLock};
+use super::events::EventDispatcher;
 
 /// Information about a mod
 ///
@@ -38,6 +39,8 @@ pub struct ModInfo {
 pub struct SystemApi {
     /// Shared registry of all loaded mods
     mods: Arc<RwLock<Vec<ModInfo>>>,
+    /// Event dispatcher for handling system events
+    event_dispatcher: EventDispatcher,
 }
 
 impl SystemApi {
@@ -45,7 +48,13 @@ impl SystemApi {
     pub fn new() -> Self {
         Self {
             mods: Arc::new(RwLock::new(Vec::new())),
+            event_dispatcher: EventDispatcher::new(),
         }
+    }
+
+    /// Get a reference to the event dispatcher
+    pub fn event_dispatcher(&self) -> &EventDispatcher {
+        &self.event_dispatcher
     }
 
     /// Add a mod to the registry
