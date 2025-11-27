@@ -28,6 +28,8 @@ pub struct ModInfo {
     pub bootstrapped: bool,
     /// Whether this mod has been loaded into the runtime
     pub loaded: bool,
+    /// Download URL for this mod (stam:// URI from server)
+    pub download_url: Option<String>,
 }
 
 /// System API providing access to mod registry and system state

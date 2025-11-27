@@ -23,7 +23,7 @@
 //! This is acceptable because the Notify handles are small and will be cleaned up
 //! when the spawned task completes or is aborted.
 
-use crate::api::{AppApi, ConsoleApi, LocaleApi, RequestUriProtocol, SystemApi, SystemEvents};
+use crate::api::{AppApi, ConsoleApi, LocaleApi, NetworkApi, RequestUriProtocol, SystemApi, SystemEvents};
 use rquickjs::{Array, Ctx, Function, JsLifetime, Object, class::Trace};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -456,6 +456,7 @@ impl SystemJS {
             obj.set("priority", mod_info.priority)?;
             obj.set("bootstrapped", mod_info.bootstrapped)?;
             obj.set("loaded", mod_info.loaded)?;
+            obj.set("download_url", mod_info.download_url.as_deref())?;
             array.set(idx, obj)?;
         }
 
@@ -569,6 +570,19 @@ impl SystemJS {
         }
 
         Ok(removed)
+    }
+
+    /// Exit the application immediately with the specified exit code
+    ///
+    /// # Arguments
+    /// * `code` - The exit code (0 = success, non-zero = error)
+    ///
+    /// # Note
+    /// This function does not return - it terminates the process immediately
+    #[qjs(rename = "exit")]
+    pub fn exit(&self, code: i32) {
+        tracing::info!("SystemJS::exit called with code {}", code);
+        std::process::exit(code);
     }
 }
 
@@ -692,6 +706,85 @@ pub fn setup_locale_api(ctx: Ctx, locale_api: LocaleApi) -> Result<(), rquickjs:
 
     // Register it as global 'locale' object
     ctx.globals().set("locale", locale_obj)?;
+
+    Ok(())
+}
+
+/// JavaScript Network API class
+///
+/// This class is exposed to JavaScript as the `network` global object.
+/// It provides methods for network operations like downloading resources.
+#[rquickjs::class]
+#[derive(Clone, Trace, JsLifetime)]
+pub struct NetworkJS {
+    #[qjs(skip_trace)]
+    network_api: NetworkApi,
+}
+
+#[rquickjs::methods]
+impl NetworkJS {
+    /// Download a resource from a URI
+    ///
+    /// # Arguments
+    /// * `uri` - The URI to download from (stam://, http://, https://)
+    ///
+    /// # Returns
+    /// A Promise that resolves to an object with:
+    /// - status: HTTP status code (u16)
+    /// - buffer: Uint8Array | null
+    /// - file_name: string | null
+    /// - file_content: Uint8Array | null
+    #[qjs(rename = "download")]
+    pub async fn download<'js>(&self, ctx: Ctx<'js>, uri: String) -> rquickjs::Result<Object<'js>> {
+        tracing::debug!("NetworkJS::download called: uri={}", uri);
+
+        // Perform the download
+        let response = self.network_api.download(&uri).await;
+
+        // Create response object
+        let result = Object::new(ctx.clone())?;
+        result.set("status", response.status)?;
+
+        // Convert buffer to Uint8Array or null
+        if let Some(buffer) = response.buffer {
+            let array = rquickjs::TypedArray::<u8>::new(ctx.clone(), buffer)?;
+            result.set("buffer", array)?;
+        } else {
+            result.set("buffer", rquickjs::Null)?;
+        }
+
+        // Set file_name
+        if let Some(file_name) = response.file_name {
+            result.set("file_name", file_name)?;
+        } else {
+            result.set("file_name", rquickjs::Null)?;
+        }
+
+        // Convert file_content to Uint8Array or null
+        if let Some(file_content) = response.file_content {
+            let array = rquickjs::TypedArray::<u8>::new(ctx.clone(), file_content)?;
+            result.set("file_content", array)?;
+        } else {
+            result.set("file_content", rquickjs::Null)?;
+        }
+
+        Ok(result)
+    }
+}
+
+/// Setup network API in the JavaScript context
+///
+/// Provides network.download(uri) function that returns a Promise
+/// for downloading resources via stam:// protocol.
+pub fn setup_network_api(ctx: Ctx, network_api: NetworkApi) -> Result<(), rquickjs::Error> {
+    // First, define the class in the runtime (required before creating instances)
+    rquickjs::Class::<NetworkJS>::define(&ctx.globals())?;
+
+    // Create an instance of NetworkJS
+    let network_obj = rquickjs::Class::<NetworkJS>::instance(ctx.clone(), NetworkJS { network_api })?;
+
+    // Register it as global 'network' object
+    ctx.globals().set("network", network_obj)?;
 
     Ok(())
 }

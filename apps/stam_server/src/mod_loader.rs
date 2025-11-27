@@ -2,14 +2,14 @@ use std::collections::HashMap;
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use tracing::info;
 
 use stam_mod_runtimes::{
-    RuntimeManager,
-    RuntimeType,
-    adapters::js::{JsRuntimeAdapter, JsRuntimeConfig, register_mod_alias, has_fatal_error, flush_pending_jobs},
-    api::{LocaleApi, ModInfo},
+    RuntimeAdapter,
+    adapters::js::{JsRuntimeAdapter, JsRuntimeConfig, register_mod_alias, has_fatal_error},
+    api::{LocaleApi, ModInfo, SystemApi, UriResponse},
     JsAsyncRuntime,
 };
 use stam_schema::{ModManifest, validate_mod_dependencies, Validatable};
@@ -18,10 +18,29 @@ use crate::config::{Config, GameConfig};
 
 /// Runtime container for a single game's server-side mods
 pub struct GameModRuntime {
-    pub runtime_manager: RuntimeManager,
     pub js_runtime: Option<Arc<JsAsyncRuntime>>,
     pub server_mods: Vec<String>,
     pub client_mods: Vec<String>,
+    /// System API containing the event dispatcher for RequestUri handling
+    pub system_api: Option<SystemApi>,
+    /// Direct reference to the JS adapter for event dispatch
+    /// Wrapped in Arc<RwLock> to allow async access from multiple handlers
+    pub js_adapter: Option<Arc<RwLock<JsRuntimeAdapter>>>,
+}
+
+impl GameModRuntime {
+    /// Dispatch a RequestUri event to registered handlers
+    ///
+    /// Returns a UriResponse with the result of handler processing
+    pub async fn dispatch_request_uri(&self, uri: &str) -> UriResponse {
+        if let Some(ref adapter) = self.js_adapter {
+            let adapter = adapter.read().await;
+            adapter.dispatch_request_uri(uri).await
+        } else {
+            // No JS adapter, return default 404 response
+            UriResponse::default()
+        }
+    }
 }
 
 /// Initialize mods for all games defined in configuration.
@@ -113,10 +132,10 @@ fn initialize_game_mods(
         }
     }
 
-    // Prepare runtime manager and JS adapter (only if we have server mods)
-    let mut runtime_manager = RuntimeManager::new();
+    // Prepare JS adapter (only if we have server mods)
     let mut js_runtime_handle: Option<Arc<JsAsyncRuntime>> = None;
     let mut system_api_ref = None;
+    let mut js_adapter_ref: Option<Arc<RwLock<JsRuntimeAdapter>>> = None;
 
     if !server_mods.is_empty() {
         let (data_dir, config_dir) = server_runtime_paths(game_id)?;
@@ -156,8 +175,9 @@ fn initialize_game_mods(
 
             register_mod_alias(mod_id, absolute_entry_point);
 
-            // Register mod info with the system API (before adapter is boxed)
+            // Register mod info with the system API
             // Server loads all mods immediately, so loaded: true
+            // download_url is None on server (mods are already local)
             js_adapter.register_mod_info(ModInfo {
                 id: mod_id.clone(),
                 version: manifest.version.clone(),
@@ -167,6 +187,7 @@ fn initialize_game_mods(
                 priority: manifest.priority,
                 bootstrapped: false,
                 loaded: true,
+                download_url: None,
             });
 
             mod_entries.push((mod_id.clone(), entry_point_path, manifest.mod_type.clone().unwrap_or_default()));
@@ -175,16 +196,13 @@ fn initialize_game_mods(
         // Store reference to system API for setting bootstrapped state later
         system_api_ref = Some(js_adapter.system_api().clone());
 
-        // Now register the adapter with the runtime manager
-        runtime_manager.register_adapter(RuntimeType::JavaScript, Box::new(js_adapter));
-
         // Second pass: load mods and call onAttach
         info!("  - Attaching server mods for game '{}'", game_id);
         for (mod_id, entry_point_path, _mod_type) in &mod_entries {
-            runtime_manager
-                .load_mod(mod_id, entry_point_path)
+            js_adapter
+                .load_mod(&entry_point_path, mod_id)
                 .map_err(|e| format!("{}::{} Failed to load mod: {}", game_id, mod_id, e))?;
-            runtime_manager
+            js_adapter
                 .call_mod_function(mod_id, "onAttach")
                 .map_err(|e| format!("{}::{} Failed to call onAttach: {}", game_id, mod_id, e))?;
 
@@ -208,7 +226,7 @@ fn initialize_game_mods(
         if !bootstrap_mods.is_empty() {
             info!("  - Bootstrapping server mods for game '{}'", game_id);
             for (mod_id, _, _) in &bootstrap_mods {
-                runtime_manager
+                js_adapter
                     .call_mod_function(mod_id, "onBootstrap")
                     .map_err(|e| format!("{}::{} Failed to call onBootstrap: {}", game_id, mod_id, e))?;
 
@@ -227,6 +245,10 @@ fn initialize_game_mods(
                 //debug!("Bootstrapped '{}'", mod_id);
             }
         }
+
+        // Wrap adapter in Arc<RwLock> for shared access AFTER initialization is complete
+        // This avoids blocking calls within the async runtime
+        js_adapter_ref = Some(Arc::new(RwLock::new(js_adapter)));
     }
 
     info!(
@@ -237,10 +259,11 @@ fn initialize_game_mods(
     );
 
     Ok(GameModRuntime {
-        runtime_manager,
         js_runtime: js_runtime_handle,
         server_mods,
         client_mods,
+        system_api: system_api_ref,
+        js_adapter: js_adapter_ref,
     })
 }
 

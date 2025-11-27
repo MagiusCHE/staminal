@@ -7,7 +7,7 @@ use tracing::{Level, debug, error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use stam_mod_runtimes::api::LocaleApi;
+use stam_mod_runtimes::api::{DownloadResponse, LocaleApi, NetworkApi, NetworkConfig, parse_stam_uri, sanitize_uri};
 use stam_mod_runtimes::logging::{create_custom_timer, CustomFormatter};
 use stam_protocol::{GameMessage, GameStream, IntentType, PrimalMessage, PrimalStream};
 use stam_schema::{ModManifest, Validatable, validate_mod_dependencies, validate_version_range};
@@ -31,6 +31,158 @@ fn sha512_hash(input: &str) -> String {
     hasher.update(input.as_bytes());
     let result = hasher.finalize();
     format!("{:x}", result)
+}
+
+/// Perform a stam:// URI request and return the response
+///
+/// This function creates a new TCP connection to the server, performs
+/// the RequestUri protocol exchange, and returns the response.
+///
+/// # Arguments
+/// * `uri` - The stam:// URI to request
+/// * `username` - Default username if not in URI
+/// * `password_hash` - Default password hash if not in URI
+/// * `game_id` - The game ID for the request
+/// * `client_version` - Client version string
+/// * `default_server` - Default server address (host:port) to use if URI has no host
+async fn perform_stam_request(
+    uri: &str,
+    username: &str,
+    password_hash: &str,
+    game_id: &str,
+    client_version: &str,
+    default_server: &str,
+) -> DownloadResponse {
+    // Parse the URI to extract host:port
+    let (mut host_port, path, uri_username, uri_password) = match parse_stam_uri(uri) {
+        Some(parsed) => parsed,
+        None => {
+            error!("Invalid stam:// URI: {}", uri);
+            return DownloadResponse {
+                status: 400,
+                buffer: None,
+                file_name: None,
+                file_content: None,
+            };
+        }
+    };
+
+    // If URI has no host, use the default server
+    if host_port.is_empty() {
+        host_port = default_server.to_string();
+    }
+
+    // Use credentials from URI if provided, otherwise use default
+    let effective_username = uri_username.as_ref().map(|s| s.as_str()).unwrap_or(username);
+    let effective_password_hash = if let Some(pwd) = uri_password {
+        sha512_hash(&pwd)
+    } else {
+        password_hash.to_string()
+    };
+
+    // Sanitize URI (remove credentials) for sending to server
+    let sanitized_uri = sanitize_uri(uri);
+
+    debug!("Performing stam:// request: host={}, path={}", host_port, path);
+
+    // Connect to server
+    let mut stream = match TcpStream::connect(&host_port).await {
+        Ok(s) => s,
+        Err(e) => {
+            error!("Failed to connect to {}: {}", host_port, e);
+            return DownloadResponse {
+                status: 503, // Service Unavailable
+                buffer: None,
+                file_name: None,
+                file_content: None,
+            };
+        }
+    };
+
+    // Read Welcome message
+    match stream.read_primal_message().await {
+        Ok(PrimalMessage::Welcome { version: _ }) => {
+            // Version check could be done here, but for now we just proceed
+        }
+        Ok(msg) => {
+            error!("Unexpected message during RequestUri: {:?}", msg);
+            return DownloadResponse {
+                status: 500,
+                buffer: None,
+                file_name: None,
+                file_content: None,
+            };
+        }
+        Err(e) => {
+            error!("Failed to read Welcome during RequestUri: {}", e);
+            return DownloadResponse {
+                status: 500,
+                buffer: None,
+                file_name: None,
+                file_content: None,
+            };
+        }
+    }
+
+    // Send RequestUri Intent
+    let intent = PrimalMessage::Intent {
+        intent_type: IntentType::RequestUri,
+        client_version: client_version.to_string(),
+        username: effective_username.to_string(),
+        password_hash: effective_password_hash,
+        game_id: Some(game_id.to_string()),
+        uri: Some(sanitized_uri),
+    };
+
+    if let Err(e) = stream.write_primal_message(&intent).await {
+        error!("Failed to send RequestUri Intent: {}", e);
+        return DownloadResponse {
+            status: 500,
+            buffer: None,
+            file_name: None,
+            file_content: None,
+        };
+    }
+
+    // Wait for UriResponse
+    match stream.read_primal_message().await {
+        Ok(PrimalMessage::UriResponse { status, buffer, file_name, file_size: _ }) => {
+            debug!("Received UriResponse: status={}, file_name={:?}", status, file_name);
+            DownloadResponse {
+                status,
+                buffer: buffer.clone(),
+                file_name,
+                file_content: buffer, // For simple responses, buffer is the file content
+            }
+        }
+        Ok(PrimalMessage::Error { message }) => {
+            error!("Server error during RequestUri: {}", message);
+            DownloadResponse {
+                status: 500,
+                buffer: None,
+                file_name: None,
+                file_content: None,
+            }
+        }
+        Ok(msg) => {
+            error!("Unexpected response to RequestUri: {:?}", msg);
+            DownloadResponse {
+                status: 500,
+                buffer: None,
+                file_name: None,
+                file_content: None,
+            }
+        }
+        Err(e) => {
+            error!("Failed to read UriResponse: {}", e);
+            DownloadResponse {
+                status: 500,
+                buffer: None,
+                file_name: None,
+                file_content: None,
+            }
+        }
+    }
 }
 
 /// Connect to game server and maintain connection
@@ -149,8 +301,9 @@ async fn connect_to_game_server(
         intent_type: IntentType::GameLogin,
         client_version: VERSION.to_string(),
         username: username.to_string(),
-        password_hash,
+        password_hash: password_hash.clone(),
         game_id: Some(game_id.to_string()),
+        uri: None,
     };
 
     stream.write_primal_message(&intent).await?;
@@ -270,6 +423,34 @@ async fn connect_to_game_server(
                 );
                 js_adapter.set_locale_api(locale_api);
 
+                // Setup network API for downloading resources via stam:// protocol
+                // Capture credentials, game_id, and server address for use in the download callback
+                let network_username = username.to_string();
+                let network_password_hash = password_hash.clone();
+                let network_game_id = game_id.to_string();
+                let network_server = host_port.to_string();  // Default server for URIs without host
+                let network_config = NetworkConfig {
+                    game_id: game_id.to_string(),
+                    username: username.to_string(),
+                    password_hash: password_hash.clone(),
+                    client_version: VERSION.to_string(),
+                };
+                let mut network_api = NetworkApi::new(network_config);
+
+                // Set the download callback that performs stam:// requests
+                network_api.set_download_callback(Arc::new(move |uri: String| {
+                    let username = network_username.clone();
+                    let password_hash = network_password_hash.clone();
+                    let game_id = network_game_id.clone();
+                    let client_version = VERSION.to_string();
+                    let default_server = network_server.clone();
+
+                    Box::pin(async move {
+                        perform_stam_request(&uri, &username, &password_hash, &game_id, &client_version, &default_server).await
+                    })
+                }));
+                js_adapter.set_network_api(network_api);
+
                 // Get runtime handle BEFORE moving the adapter to the manager
                 let js_runtime = js_adapter.get_runtime();
 
@@ -326,6 +507,7 @@ async fn connect_to_game_server(
                             priority: mod_data.manifest.priority,
                             bootstrapped: false,
                             loaded: false,  // Will be set to true when actually loaded
+                            download_url: Some(mod_info.download_url.clone()),
                         });
                     } else {
                         // Missing mod - use info from server with placeholder values
@@ -338,6 +520,7 @@ async fn connect_to_game_server(
                             priority: 999,  // Low priority for missing mods
                             bootstrapped: false,
                             loaded: false,  // Will remain false as it's missing
+                            download_url: Some(mod_info.download_url.clone()),
                         });
                     }
                 }
@@ -879,6 +1062,7 @@ async fn main() {
         username: username.clone(),
         password_hash,
         game_id: None, // Not needed for PrimalLogin
+        uri: None,
     };
 
     if let Err(e) = stream.write_primal_message(&intent).await {

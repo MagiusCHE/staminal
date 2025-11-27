@@ -19,7 +19,9 @@ pub enum IntentType {
     /// Game login - for game client connections
     GameLogin,
     /// Server login - for server-to-server connections
-    ServerLogin,    
+    ServerLogin,
+    /// URI request - one-shot request for downloading resources via stam:// protocol
+    RequestUri,
 }
 
 /// Primal protocol messages for initial connection handling
@@ -64,8 +66,31 @@ pub enum PrimalMessage {
         username: String,
         /// SHA-512 hash of the password (not plaintext)
         password_hash: String,
-        /// Game ID (required for GameLogin, optional for PrimalLogin)
+        /// Game ID (required for GameLogin and RequestUri, optional for PrimalLogin)
         game_id: Option<String>,
+        /// URI being requested (required for RequestUri intent, sanitized without credentials)
+        uri: Option<String>,
+    },
+
+    // Server -> Client messages for RequestUri
+    /// URI response - sent as response to RequestUri intent
+    UriResponse {
+        /// HTTP status code (200 = success, 404 = not found, 500 = error, etc.)
+        status: u16,
+        /// Response buffer data (if any)
+        buffer: Option<Vec<u8>>,
+        /// File name (if response is a file)
+        file_name: Option<String>,
+        /// File size in bytes (if response is a file)
+        file_size: Option<u64>,
+    },
+
+    /// URI response chunk - sent for large file transfers
+    UriResponseChunk {
+        /// Chunk data
+        data: Vec<u8>,
+        /// Whether this is the final chunk
+        is_final: bool,
     },
 }
 

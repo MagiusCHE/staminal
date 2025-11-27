@@ -54,11 +54,32 @@ export class Manager {
     }
 
     async download_mod(mod_info) {
-        console.warn(`TODO: Simulating download BEGIN of mod ${mod_info.id}...`);
-        //await network.download(mod_info.download_url, `/mods/${mod_info.id}.zip`);
-        await wait(2000); // Simulate download time
-        console.warn(`TODO: Simulating download DONE of mod ${mod_info.id}`);
-        //throw new Error("Download failed: Not implemented yet");
+        // Build the stam:// URI for this mod
+        const uri = mod_info.download_url;
+        console.log(mod_info)
+        console.log(`Downloading: ${uri}`);
+
+        try {
+            const response = await network.download(uri);
+
+            if (response.status !== 200) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            if (!response.buffer && !response.file_content) {
+                throw new Error("No data received");
+            }
+
+            // Use file_content if available (from response body), otherwise use buffer
+            const data = response.file_content || response.buffer;
+            console.log(`Downloaded ${mod_info.id}: ${data.length} bytes`);
+
+            // TODO: Save to disk and extract
+            // For now, just verify we got data
+            return data;
+        } catch (error) {
+            throw new Error(`Download failed: ${error.message || error}`);
+        }
     }
 
 

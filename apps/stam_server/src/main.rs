@@ -186,8 +186,11 @@ async fn main() {
         total_client_mods, total_server_mods
     );
 
+    // Wrap mod_runtimes in Arc for sharing with PrimalClient handlers
+    let game_runtimes = Arc::new(mod_runtimes);
+
     // Spawn JS event loops for any game that has server-side JS mods
-    for (game_id, runtime) in &mod_runtimes {
+    for (game_id, runtime) in game_runtimes.iter() {
         if let Some(js_runtime) = runtime.js_runtime.clone() {
             let gid = game_id.clone();
             let shutdown_token = shutdown.clone();
@@ -211,21 +214,21 @@ async fn main() {
 
     // 2. Avvio TCP Listener for Primal Clients
     let bind_addr = format!("{}:{}", config.local_ip, config.local_port);
-    info!("[NET] Binding TCP on {}...", bind_addr);
+    info!("Binding TCP on {}...", bind_addr);
 
     let listener = match TcpListener::bind(&bind_addr).await {
         Ok(listener) => {
-            info!("[NET] TCP listener started successfully");
+            info!("TCP listener started successfully");
             listener
         }
         Err(e) => {
-            error!("[NET] Failed to bind TCP listener on {}: {}", bind_addr, e);
-            error!("[CORE] Cannot start server without network listener");
+            error!("Failed to bind TCP listener on {}: {}", bind_addr, e);
+            error!("Cannot start server without network listener");
             return;
         }
     };
 
-    info!("[CORE] Entering Main Loop. Waiting for intents...(Use Ctrl+C to save & shutdown)");
+    info!("Entering Main Loop. Waiting for intents...(Use Ctrl+C to save & shutdown)");
 
     // Create client manager for tracking active connections
     let client_manager = ClientManager::new();
@@ -235,11 +238,11 @@ async fn main() {
     tokio::spawn(async move {
         match signal::ctrl_c().await {
             Ok(()) => {
-                info!("[CORE] Received shutdown signal (Ctrl+C)");
+                info!("Received shutdown signal (Ctrl+C)");
                 shutdown_clone.store(true, Ordering::Relaxed);
             }
             Err(err) => {
-                warn!("[CORE] Error listening for shutdown signal: {}", err);
+                warn!("Error listening for shutdown signal: {}", err);
             }
         }
     });
@@ -252,11 +255,11 @@ async fn main() {
             match signal::unix::signal(signal::unix::SignalKind::terminate()) {
                 Ok(mut stream) => {
                     stream.recv().await;
-                    info!("[CORE] Received SIGTERM signal");
+                    info!("Received SIGTERM signal");
                     shutdown_clone.store(true, Ordering::Relaxed);
                 }
                 Err(err) => {
-                    warn!("[CORE] Error setting up SIGTERM handler: {}", err);
+                    warn!("Error setting up SIGTERM handler: {}", err);
                 }
             }
         });
@@ -284,27 +287,28 @@ async fn main() {
             result = listener.accept() => {
                 match result {
                     Ok((stream, addr)) => {
-                        info!("[NET] Accepted connection from {}", addr);
+                        info!("Accepted connection from {}", addr);
 
-                        // Clone config and client_manager for the spawned task
+                        // Clone config, client_manager, and game_runtimes for the spawned task
                         let config_clone = config.clone();
                         let client_manager_clone = client_manager.clone();
+                        let game_runtimes_clone = Arc::clone(&game_runtimes);
 
                         // Spawn a task to handle this client
                         tokio::spawn(async move {
-                            let client = PrimalClient::new(stream, addr, config_clone, client_manager_clone);
+                            let client = PrimalClient::new(stream, addr, config_clone, client_manager_clone, game_runtimes_clone);
                             client.handle().await;
                         });
                     }
                     Err(e) => {
-                        error!("[NET] Error accepting connection: {}", e);
+                        error!("Error accepting connection: {}", e);
                     }
                 }
             }
         }
     }
 
-    info!("[CORE] Shutting down server gracefully...");
+    info!("Shutting down server gracefully...");
 
     // Disconnect all active clients with locale ID
     client_manager
@@ -315,5 +319,5 @@ async fn main() {
     tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
     // TODO: Cleanup resources, save state, etc.
-    info!("[CORE] Shutdown complete.");
+    info!("Shutdown complete.");
 }

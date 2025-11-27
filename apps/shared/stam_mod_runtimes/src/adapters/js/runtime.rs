@@ -1,5 +1,5 @@
 use rquickjs::loader::{Loader, ModuleLoader, Resolver};
-use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Module, Object, Value};
+use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Function, Module, Object, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,7 +37,7 @@ fn signal_fatal_error() {
 }
 
 use super::{JsRuntimeConfig, bindings};
-use crate::api::{AppApi, LocaleApi, SystemApi, ModInfo};
+use crate::api::{AppApi, LocaleApi, NetworkApi, SystemApi, ModInfo, UriResponse};
 use crate::{ModReturnValue, RuntimeAdapter};
 
 /// Format a Promise rejection reason into a readable error message
@@ -356,6 +356,8 @@ pub struct JsRuntimeAdapter {
     system_api: SystemApi,
     /// Locale API for internationalization (optional)
     locale_api: Option<LocaleApi>,
+    /// Network API for downloading resources (optional, client-side only)
+    network_api: Option<NetworkApi>,
 }
 
 impl JsRuntimeAdapter {
@@ -418,6 +420,7 @@ impl JsRuntimeAdapter {
             mod_dirs: Vec::new(),
             system_api: SystemApi::new(),
             locale_api: None,
+            network_api: None,
         };
 
         info!("< JavaScript async runtime \"QuickJS\" initialized successfully");
@@ -430,6 +433,15 @@ impl JsRuntimeAdapter {
     /// the `locale` global object is available in all mod contexts.
     pub fn set_locale_api(&mut self, locale_api: LocaleApi) {
         self.locale_api = Some(locale_api);
+    }
+
+    /// Set the network API for network operations
+    ///
+    /// This should be called before loading any mods to ensure
+    /// the `network` global object is available in all mod contexts.
+    /// Typically only used on the client side.
+    pub fn set_network_api(&mut self, network_api: NetworkApi) {
+        self.network_api = Some(network_api);
     }
 
     /// Get a clone of the async runtime for the event loop
@@ -466,6 +478,7 @@ impl JsRuntimeAdapter {
         let game_config_dir = self.config.game_config_dir().clone();
         let system_api = self.system_api.clone();
         let locale_api = self.locale_api.clone();
+        let network_api = self.network_api.clone();
 
         // debug!(
         //     "setup_global_apis: game_data_dir={:?}, game_config_dir={:?}",
@@ -491,6 +504,11 @@ impl JsRuntimeAdapter {
                 // Register locale API (locale.get(), locale.get_with_args())
                 if let Some(locale) = locale_api {
                     bindings::setup_locale_api(ctx.clone(), locale)?;
+                }
+
+                // Register network API (network.download()) - client-side only
+                if let Some(network) = network_api {
+                    bindings::setup_network_api(ctx.clone(), network)?;
                 }
 
                 //debug!(" > API registrations completed successfully");
@@ -807,6 +825,177 @@ impl JsRuntimeAdapter {
             .await;
 
         result.map_err(|e| -> Box<dyn std::error::Error> { e.into() })
+    }
+
+    /// Dispatch a RequestUri event to all registered handlers
+    ///
+    /// This method finds all handlers registered for the given URI, calls them
+    /// in priority order (lowest first), and returns the final UriResponse.
+    ///
+    /// # Arguments
+    /// * `uri` - The URI being requested
+    ///
+    /// # Returns
+    /// A `UriResponse` containing the result of handler processing
+    pub async fn dispatch_request_uri(
+        &self,
+        uri: &str,
+    ) -> UriResponse {
+        let handlers = self.system_api.event_dispatcher().get_handlers_for_uri_request(uri);
+
+        if handlers.is_empty() {
+            debug!("No handlers registered for URI: {}", uri);
+            return UriResponse::default();
+        }
+
+        debug!("Dispatching RequestUri to {} handlers for URI: {}", handlers.len(), uri);
+
+        let mut response = UriResponse::default();
+        let uri_owned = uri.to_string();
+
+        for handler in handlers {
+            // Get the mod's context
+            let loaded_mod = match self.loaded_mods.get(&handler.mod_id) {
+                Some(m) => m,
+                None => {
+                    error!("Handler mod '{}' not loaded", handler.mod_id);
+                    continue;
+                }
+            };
+
+            let handler_id = handler.handler_id;
+            let mod_id = handler.mod_id.clone();
+            let uri_for_closure = uri_owned.clone();
+
+            // Call the handler function with request and response objects
+            let result: Result<(u16, bool, Vec<u8>, u64, String), String> = loaded_mod
+                .context
+                .with(|ctx| {
+                    // Get the handler function from the context's handler map
+                    match bindings::get_js_handler(&ctx, handler_id) {
+                        Ok(Some(func)) => {
+                            // Create request object
+                            let request = Object::new(ctx.clone()).map_err(|e| format!("Failed to create request object: {:?}", e))?;
+                            request.set("uri", uri_for_closure.as_str()).map_err(|e| format!("Failed to set uri: {:?}", e))?;
+
+                            // Create response object with methods
+                            let response_obj = Object::new(ctx.clone()).map_err(|e| format!("Failed to create response object: {:?}", e))?;
+                            response_obj.set("status", 404i32).map_err(|e| format!("Failed to set status: {:?}", e))?;
+                            response_obj.set("handled", false).map_err(|e| format!("Failed to set handled: {:?}", e))?;
+                            response_obj.set("buffer", rquickjs::Array::new(ctx.clone()).map_err(|e| format!("Failed to create buffer: {:?}", e))?).map_err(|e| format!("Failed to set buffer: {:?}", e))?;
+                            response_obj.set("buffer_size", 0i32).map_err(|e| format!("Failed to set buffer_size: {:?}", e))?;
+                            response_obj.set("filepath", "").map_err(|e| format!("Failed to set filepath: {:?}", e))?;
+
+                            // Add setStatus method
+                            let set_status = Function::new(ctx.clone(), |ctx: Ctx, status: i32| -> rquickjs::Result<()> {
+                                let this: Object = ctx.globals().get("__currentResponse")?;
+                                this.set("status", status)?;
+                                Ok(())
+                            }).map_err(|e| format!("Failed to create setStatus: {:?}", e))?;
+                            response_obj.set("setStatus", set_status).map_err(|e| format!("Failed to set setStatus: {:?}", e))?;
+
+                            // Add setFilepath method
+                            let set_filepath = Function::new(ctx.clone(), |ctx: Ctx, path: String| -> rquickjs::Result<()> {
+                                let this: Object = ctx.globals().get("__currentResponse")?;
+                                this.set("filepath", path)?;
+                                Ok(())
+                            }).map_err(|e| format!("Failed to create setFilepath: {:?}", e))?;
+                            response_obj.set("setFilepath", set_filepath).map_err(|e| format!("Failed to set setFilepath: {:?}", e))?;
+
+                            // Add setHandled method
+                            let set_handled = Function::new(ctx.clone(), |ctx: Ctx, handled: bool| -> rquickjs::Result<()> {
+                                let this: Object = ctx.globals().get("__currentResponse")?;
+                                this.set("handled", handled)?;
+                                Ok(())
+                            }).map_err(|e| format!("Failed to create setHandled: {:?}", e))?;
+                            response_obj.set("setHandled", set_handled).map_err(|e| format!("Failed to set setHandled: {:?}", e))?;
+
+                            // Store response object as global for method access
+                            ctx.globals().set("__currentResponse", response_obj.clone()).map_err(|e| format!("Failed to set __currentResponse: {:?}", e))?;
+
+                            // Call the handler function
+                            let call_result = func.call::<(Object, Object), Value>((request, response_obj.clone()));
+
+                            match call_result {
+                                Ok(result) => {
+                                    // If result is a Promise, resolve it
+                                    if let Some(promise) = result.into_promise() {
+                                        if let Err(e) = promise.finish::<()>() {
+                                            let error_msg = Self::format_js_error(&ctx, &e);
+                                            error!("Handler error in mod '{}': {}", mod_id, error_msg);
+                                            return Err(format!("Handler error: {}", error_msg));
+                                        }
+                                    }
+
+                                    // Read back the response values
+                                    let status: i32 = response_obj.get("status").unwrap_or(404);
+                                    let handled: bool = response_obj.get("handled").unwrap_or(false);
+                                    let filepath: String = response_obj.get("filepath").unwrap_or_default();
+
+                                    // Read buffer if present (convert JS array to Vec<u8>)
+                                    let buffer: Vec<u8> = if let Ok(arr) = response_obj.get::<_, rquickjs::Array>("buffer") {
+                                        let len = arr.len();
+                                        let mut buf = Vec::with_capacity(len);
+                                        for i in 0..len {
+                                            if let Ok(byte) = arr.get::<u8>(i) {
+                                                buf.push(byte);
+                                            }
+                                        }
+                                        buf
+                                    } else {
+                                        Vec::new()
+                                    };
+
+                                    let buffer_size = buffer.len() as u64;
+
+                                    Ok((status as u16, handled, buffer, buffer_size, filepath))
+                                }
+                                Err(e) => {
+                                    let error_msg = Self::format_js_error(&ctx, &e);
+                                    error!("Handler call error in mod '{}': {}", mod_id, error_msg);
+                                    Err(format!("Handler call error: {}", error_msg))
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            error!("Handler {} not found in mod '{}'", handler_id, mod_id);
+                            Err(format!("Handler {} not found", handler_id))
+                        }
+                        Err(e) => {
+                            error!("Failed to get handler {} from mod '{}': {:?}", handler_id, mod_id, e);
+                            Err(format!("Failed to get handler: {:?}", e))
+                        }
+                    }
+                })
+                .await;
+
+            // Update response based on handler result
+            match result {
+                Ok((status, handled, buffer, buffer_size, filepath)) => {
+                    response.status = status;
+                    response.handled = handled;
+                    if !buffer.is_empty() {
+                        response.buffer = buffer;
+                    }
+                    response.buffer_size = buffer_size;
+                    if !filepath.is_empty() {
+                        response.filepath = filepath;
+                    }
+
+                    // If handler set handled=true, stop processing more handlers
+                    if handled {
+                        debug!("Handler in mod '{}' marked request as handled", handler.mod_id);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("Handler execution failed: {}", e);
+                    // Continue to next handler on error
+                }
+            }
+        }
+
+        response
     }
 
     /// Call a mod function asynchronously with return value

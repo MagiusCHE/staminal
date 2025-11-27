@@ -7,12 +7,14 @@
 pub mod console;
 pub mod events;
 pub mod locale;
+pub mod network;
 pub mod process;
 pub mod system;
 
 pub use console::ConsoleApi;
 pub use events::{EventDispatcher, EventHandler, SystemEvents, RequestUriProtocol, RequestUri, UriResponse};
 pub use locale::LocaleApi;
+pub use network::{NetworkApi, NetworkConfig, DownloadResponse, parse_stam_uri, sanitize_uri};
 pub use process::{ProcessApi, AppApi};
 pub use system::{SystemApi, ModInfo};
 

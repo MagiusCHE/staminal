@@ -12,3 +12,4 @@ pub use runtime::register_mod_alias;
 pub use runtime::has_fatal_error;
 pub use runtime::flush_pending_jobs;
 pub use config::JsRuntimeConfig;
+pub use bindings::setup_network_api;

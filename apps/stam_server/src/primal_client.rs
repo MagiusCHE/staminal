@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
@@ -8,7 +9,12 @@ use stam_protocol::{IntentType, PrimalMessage, PrimalStream, ServerInfo};
 use crate::game_client::GameClient;
 use crate::config::Config;
 use crate::client_manager::{ClientManager, ClientType};
+use crate::mod_loader::GameModRuntime;
 use crate::VERSION;
+
+/// Shared registry of GameModRuntime instances for each game
+/// Used for dispatching RequestUri events to mod handlers
+pub type GameRuntimes = Arc<HashMap<String, GameModRuntime>>;
 
 /// PrimalClient represents a client connection in its initial state
 /// Used for authentication and server list distribution
@@ -21,13 +27,21 @@ pub struct PrimalClient {
     config: Config,
     /// Client manager for tracking connections
     client_manager: ClientManager,
+    /// Game mod runtimes for event dispatch
+    game_runtimes: GameRuntimes,
 }
 
 impl PrimalClient {
     /// Create a new PrimalClient from an accepted TCP connection
-    pub fn new(stream: TcpStream, addr: SocketAddr, config: Config, client_manager: ClientManager) -> Self {
+    pub fn new(
+        stream: TcpStream,
+        addr: SocketAddr,
+        config: Config,
+        client_manager: ClientManager,
+        game_runtimes: GameRuntimes,
+    ) -> Self {
         info!("New client connected from {}", addr);
-        Self { stream, addr, config, client_manager }
+        Self { stream, addr, config, client_manager, game_runtimes }
     }
 
     /// Get the client's remote address
@@ -62,8 +76,8 @@ impl PrimalClient {
 
         // Wait for Intent message
         match self.stream.read_primal_message().await {
-            Ok(PrimalMessage::Intent { intent_type, client_version, username, password_hash, game_id }) => {
-                debug!("Received Intent from {}: {:?}, user={}, client_version={}, game_id={:?}", addr, intent_type, username, client_version, game_id);
+            Ok(PrimalMessage::Intent { intent_type, client_version, username, password_hash, game_id, uri }) => {
+                debug!("Received Intent from {}: {:?}, user={}, client_version={}, game_id={:?}, uri={:?}", addr, intent_type, username, client_version, game_id, uri);
 
                 // Validate client version (major.minor must match server)
                 if !self.is_version_compatible(&client_version) {
@@ -119,6 +133,42 @@ impl PrimalClient {
                         }).await;
                         client_manager.unregister_client(&addr).await;
                         info!("Client {} disconnected", addr);
+                    }
+                    IntentType::RequestUri => {
+                        // Validate required fields
+                        if game_id.is_none() {
+                            error!("Missing game_id for RequestUri from {}", addr);
+                            let _ = self.stream.write_primal_message(&PrimalMessage::Error {
+                                message: "game_id required for RequestUri".to_string(),
+                            }).await;
+                            client_manager.unregister_client(&addr).await;
+                            info!("Client {} disconnected (missing game_id)", addr);
+                            return;
+                        }
+                        if uri.is_none() {
+                            error!("Missing uri for RequestUri from {}", addr);
+                            let _ = self.stream.write_primal_message(&PrimalMessage::Error {
+                                message: "uri required for RequestUri".to_string(),
+                            }).await;
+                            client_manager.unregister_client(&addr).await;
+                            info!("Client {} disconnected (missing uri)", addr);
+                            return;
+                        }
+
+                        let gid = game_id.unwrap();
+                        if !self.config.games.contains_key(&gid) {
+                            error!("Invalid game_id '{}' for RequestUri from {}", gid, addr);
+                            let _ = self.stream.write_primal_message(&PrimalMessage::Error {
+                                message: format!("Invalid game_id: {}", gid),
+                            }).await;
+                            client_manager.unregister_client(&addr).await;
+                            info!("Client {} disconnected (invalid game_id)", addr);
+                            return;
+                        }
+
+                        self.handle_request_uri(username, password_hash, gid, uri.unwrap()).await;
+                        client_manager.unregister_client(&addr).await;
+                        info!("Client {} disconnected (RequestUri completed)", addr);
                     }
                 }
             }
@@ -197,6 +247,77 @@ impl PrimalClient {
         // Create GameClient and hand off the connection
         let game_client = GameClient::new(self.stream, self.addr, username, game_id, Arc::new(self.config.clone()), self.client_manager);
         game_client.handle().await;
+    }
+
+    /// Handle RequestUri intent - one-shot URI request for resource download
+    async fn handle_request_uri(mut self, username: String, password_hash: String, game_id: String, uri: String) {
+        debug!("Processing RequestUri for user '{}' on game '{}': {}", username, game_id, uri);
+
+        // Authenticate with provided credentials
+        let authenticated = self.authenticate(&username, &password_hash, IntentType::RequestUri).await;
+
+        if !authenticated {
+            error!("RequestUri authentication failed for user '{}'", username);
+            let _ = self.stream.write_primal_message(&PrimalMessage::UriResponse {
+                status: 401,
+                buffer: None,
+                file_name: None,
+                file_size: None,
+            }).await;
+            return;
+        }
+
+        info!("User '{}' authenticated for RequestUri on game '{}': {}", username, game_id, uri);
+
+        // Get the game runtime for event dispatch
+        let response = if let Some(game_runtime) = self.game_runtimes.get(&game_id) {
+            // Dispatch to registered RequestUri handlers
+            game_runtime.dispatch_request_uri(&uri).await
+        } else {
+            warn!("No game runtime found for game '{}', returning 404", game_id);
+            stam_mod_runtimes::api::UriResponse::default()
+        };
+
+        // Check if we need to read file content
+        let (buffer, file_size) = if !response.filepath.is_empty() {
+            // Handler specified a file path, read and send the file
+            match std::fs::read(&response.filepath) {
+                Ok(content) => {
+                    let size = content.len() as u64;
+                    debug!("Sending file '{}' ({} bytes) for URI '{}'", response.filepath, size, uri);
+                    (Some(content), Some(size))
+                }
+                Err(e) => {
+                    error!("Failed to read file '{}': {}", response.filepath, e);
+                    (None, None)
+                }
+            }
+        } else if !response.buffer.is_empty() {
+            // Handler provided buffer directly
+            let size = response.buffer.len() as u64;
+            (Some(response.buffer), Some(size))
+        } else {
+            (None, None)
+        };
+
+        // Extract filename from filepath if present
+        let file_name = if !response.filepath.is_empty() {
+            std::path::Path::new(&response.filepath)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_string())
+        } else {
+            None
+        };
+
+        debug!("RequestUri response: status={}, file_name={:?}, file_size={:?}", response.status, file_name, file_size);
+
+        let _ = self.stream.write_primal_message(&PrimalMessage::UriResponse {
+            status: response.status,
+            buffer,
+            file_name,
+            file_size,
+        }).await;
     }
 
     /// Authenticate user credentials based on intent type
