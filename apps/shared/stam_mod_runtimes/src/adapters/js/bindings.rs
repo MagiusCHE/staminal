@@ -23,7 +23,7 @@
 //! This is acceptable because the Notify handles are small and will be cleaned up
 //! when the spawned task completes or is aborted.
 
-use crate::api::{AppApi, ConsoleApi, LocaleApi, NetworkApi, RequestUriProtocol, SystemApi, SystemEvents};
+use crate::api::{AppApi, ConsoleApi, LocaleApi, NetworkApi, RequestUriProtocol, SystemApi, SystemEvents, ModSide};
 use rquickjs::{Array, Ctx, Function, JsLifetime, Object, class::Trace};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -584,6 +584,78 @@ impl SystemJS {
         tracing::info!("SystemJS::exit called with code {}", code);
         std::process::exit(code);
     }
+
+    /// Get mod packages filtered by side (client or server)
+    ///
+    /// # Arguments
+    /// * `side` - ModSides enum value (0 = Client, 1 = Server)
+    ///
+    /// # Returns
+    /// Array of mod package info objects with properties:
+    /// - id: string
+    /// - sha512: string
+    /// - path: string
+    /// - manifest: object with name, version, description, entry_point, etc.
+    #[qjs(rename = "get_mod_packages")]
+    pub fn get_mod_packages<'js>(&self, ctx: Ctx<'js>, side: u32) -> rquickjs::Result<Array<'js>> {
+        let mod_side = match ModSide::from_u32(side) {
+            Some(s) => s,
+            None => {
+                tracing::error!("Invalid ModSide value: {}", side);
+                return Err(rquickjs::Error::Exception);
+            }
+        };
+
+        let packages = self.system_api.get_mod_packages(mod_side);
+        tracing::debug!("SystemJS::get_mod_packages called: side={:?}, found {} packages", mod_side, packages.len());
+
+        let array = Array::new(ctx.clone())?;
+
+        for (idx, pkg) in packages.iter().enumerate() {
+            let obj = Object::new(ctx.clone())?;
+            obj.set("id", pkg.id.as_str())?;
+            obj.set("sha512", pkg.sha512.as_str())?;
+            obj.set("path", pkg.path.as_str())?;
+
+            // Create manifest object
+            let manifest_obj = Object::new(ctx.clone())?;
+            manifest_obj.set("name", pkg.manifest.name.as_str())?;
+            manifest_obj.set("version", pkg.manifest.version.as_str())?;
+            manifest_obj.set("description", pkg.manifest.description.as_str())?;
+            manifest_obj.set("entry_point", pkg.manifest.entry_point.as_str())?;
+            manifest_obj.set("priority", pkg.manifest.priority)?;
+            if let Some(ref mod_type) = pkg.manifest.mod_type {
+                manifest_obj.set("type", mod_type.as_str())?;
+            }
+
+            obj.set("manifest", manifest_obj)?;
+            array.set(idx, obj)?;
+        }
+
+        Ok(array)
+    }
+
+    /// Get the file path for a mod package by ID
+    ///
+    /// # Arguments
+    /// * `mod_id` - The mod identifier
+    /// * `side` - ModSides enum value (0 = Client, 1 = Server)
+    ///
+    /// # Returns
+    /// The absolute file path to the mod package ZIP, or null if not found
+    #[qjs(rename = "get_mod_package_file_path")]
+    pub fn get_mod_package_file_path(&self, mod_id: String, side: u32) -> rquickjs::Result<Option<String>> {
+        let mod_side = match ModSide::from_u32(side) {
+            Some(s) => s,
+            None => {
+                tracing::error!("Invalid ModSide value: {}", side);
+                return Err(rquickjs::Error::Exception);
+            }
+        };
+
+        let path = self.system_api.get_mod_package_file_path(&mod_id, mod_side);
+        Ok(path.map(|p| p.to_string_lossy().to_string()))
+    }
 }
 
 /// Setup system API in the JavaScript context
@@ -615,6 +687,12 @@ pub fn setup_system_api(ctx: Ctx, system_api: SystemApi) -> Result<(), rquickjs:
     request_uri_protocol.set("Http", RequestUriProtocol::Http.to_u32())?;
     ctx.globals()
         .set("RequestUriProtocol", request_uri_protocol)?;
+
+    // Create ModSides enum object (for filtering mod packages by client/server)
+    let mod_sides = Object::new(ctx.clone())?;
+    mod_sides.set("Client", ModSide::Client.to_u32())?;
+    mod_sides.set("Server", ModSide::Server.to_u32())?;
+    ctx.globals().set("ModSides", mod_sides)?;
 
     Ok(())
 }
@@ -785,6 +863,53 @@ pub fn setup_network_api(ctx: Ctx, network_api: NetworkApi) -> Result<(), rquick
 
     // Register it as global 'network' object
     ctx.globals().set("network", network_obj)?;
+
+    Ok(())
+}
+
+/// Setup Text API in the JavaScript context
+///
+/// Provides Text.DecodeUTF8(u8array) function that decodes a Uint8Array to a UTF-8 string.
+pub fn setup_text_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
+    let globals = ctx.globals();
+
+    // Create Text object
+    let text_obj = Object::new(ctx.clone())?;
+
+    // Text.DecodeUTF8(u8array) -> string
+    // Accepts a Uint8Array (or any array-like with numeric values) and returns a UTF-8 decoded string
+    let decode_utf8_fn = Function::new(ctx.clone(), |_ctx: Ctx, input: rquickjs::Value| -> rquickjs::Result<String> {
+        // Try to get bytes from the input
+        let bytes: Vec<u8> = if let Some(typed_array) = input.as_object().and_then(|o| rquickjs::TypedArray::<u8>::from_object(o.clone()).ok()) {
+            // It's a Uint8Array
+            typed_array.as_bytes().map(|b| b.to_vec()).unwrap_or_default()
+        } else if let Some(array) = input.as_array() {
+            // It's a regular Array - convert elements to u8
+            let mut bytes = Vec::new();
+            for i in 0..array.len() {
+                let val: i32 = array.get(i)?;
+                bytes.push(val as u8);
+            }
+            bytes
+        } else {
+            tracing::error!("Text.DecodeUTF8: expected Uint8Array or Array, got {:?}", input.type_of());
+            return Err(rquickjs::Error::Exception);
+        };
+
+        // Decode as UTF-8
+        match String::from_utf8(bytes) {
+            Ok(s) => Ok(s),
+            Err(e) => {
+                // Try lossy conversion if strict UTF-8 fails
+                tracing::warn!("Text.DecodeUTF8: invalid UTF-8 sequence, using lossy conversion: {}", e);
+                Ok(String::from_utf8_lossy(e.as_bytes()).to_string())
+            }
+        }
+    })?;
+    text_obj.set("DecodeUTF8", decode_utf8_fn)?;
+
+    // Register Text object globally
+    globals.set("Text", text_obj)?;
 
     Ok(())
 }

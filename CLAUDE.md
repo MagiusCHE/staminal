@@ -134,3 +134,17 @@ When developing features for the mod system (`stam_mod_runtimes`):
 
 ### Logging Hygiene
 - Ensure ANSI color codes are disabled when logs are redirected to files or piped (respect TTY detection and `NO_COLOR`), so log files stay plain and readable with correct mod identifiers.
+
+### Script Files (CRITICAL)
+**NEVER modify script files (JavaScript, Lua, etc.) unless the user EXPLICITLY requests it.**
+
+Script files in `mods/` directories are authored by the user and must not be touched without explicit permission.
+
+Only modify:
+- Rust code (client, server, shared libraries)
+- Configuration files when explicitly requested
+
+Mod directories structure:
+- Mods are located in `mods/` directories
+- Each mod may have `client/` and/or `server/` subdirectories
+- Files like `index.js` and other scripts belong to the user

@@ -63,6 +63,19 @@ impl AppPaths {
         &self.data_dir
     }
 
+    /// Get the temporary directory for downloads
+    pub fn tmp_dir(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let tmp_dir = self.data_dir.join("tmp");
+
+        // Create directory if it doesn't exist
+        if !tmp_dir.exists() {
+            fs::create_dir_all(&tmp_dir)?;
+            debug!("Created tmp directory: {}", tmp_dir.display());
+        }
+
+        Ok(tmp_dir)
+    }
+
     /// Get the game-specific data directory
     ///
     /// # Arguments

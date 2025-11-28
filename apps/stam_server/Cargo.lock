@@ -1397,6 +1397,8 @@ dependencies = [
  "fluent",
  "fluent-bundle",
  "rquickjs",
+ "serde",
+ "serde_json",
  "time",
  "tokio",
  "tracing",

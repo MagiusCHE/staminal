@@ -279,36 +279,86 @@ impl PrimalClient {
         };
 
         // Check if we need to read file content
-        let (buffer, file_size) = if !response.filepath.is_empty() {
-            // Handler specified a file path, read and send the file
-            match std::fs::read(&response.filepath) {
-                Ok(content) => {
-                    let size = content.len() as u64;
-                    debug!("Sending file '{}' ({} bytes) for URI '{}'", response.filepath, size, uri);
-                    (Some(content), Some(size))
+        let (buffer, file_size, resolved_filepath) = if !response.filepath.is_empty() {
+            // Handler specified a file path - resolve it relative to STAM_HOME
+            // and verify it doesn't escape the allowed directory (security check)
+            let home_dir = self.game_runtimes.get(&game_id)
+                .and_then(|runtime| runtime.get_home_dir());
+
+            let resolved_path: Option<std::path::PathBuf> = if let Some(home) = home_dir {
+                // Resolve the path relative to STAM_HOME
+                let full_path = home.join(&response.filepath);
+
+                // Canonicalize to resolve any .. or symlinks
+                match full_path.canonicalize() {
+                    Ok(canonical) => {
+                        // Security check: ensure the resolved path is within STAM_HOME
+                        match home.canonicalize() {
+                            Ok(home_canonical) => {
+                                if canonical.starts_with(&home_canonical) {
+                                    Some(canonical)
+                                } else {
+                                    error!("Security violation: filepath '{}' resolves to '{}' which is outside STAM_HOME '{}'",
+                                        response.filepath, canonical.display(), home_canonical.display());
+                                    None
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to canonicalize STAM_HOME '{}': {}", home.display(), e);
+                                None
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to resolve filepath '{}': {}", full_path.display(), e);
+                        None
+                    }
                 }
-                Err(e) => {
-                    error!("Failed to read file '{}': {}", response.filepath, e);
-                    (None, None)
+            } else {
+                error!("No STAM_HOME configured for game '{}', cannot resolve filepath", game_id);
+                None
+            };
+
+            if let Some(ref path) = resolved_path {
+                match std::fs::read(path) {
+                    Ok(content) => {
+                        let size = content.len() as u64;
+                        // Log file transfers at INFO level, especially for mod downloads (ZIP files)
+                        if path.to_string_lossy().ends_with(".zip") {
+                            info!("Sending ZIP file '{}' ({} bytes) to user '{}' for URI '{}'",
+                                path.display(), size, username, uri);
+                        } else {
+                            debug!("Sending file '{}' ({} bytes) for URI '{}'", path.display(), size, uri);
+                        }
+                        (Some(content), Some(size), resolved_path)
+                    }
+                    Err(e) => {
+                        error!("Failed to read file '{}': {}", path.display(), e);
+                        (None, None, None)
+                    }
                 }
+            } else {
+                (None, None, None)
             }
         } else if !response.buffer.is_empty() {
             // Handler provided buffer directly
-            let size = response.buffer.len() as u64;
-            (Some(response.buffer), Some(size))
+            // Use buffer_size from response to truncate buffer (optimization for network transfer)
+            let effective_size = if response.buffer_size > 0 {
+                (response.buffer_size as usize).min(response.buffer.len())
+            } else {
+                response.buffer.len()
+            };
+            let truncated_buffer = response.buffer[..effective_size].to_vec();
+            (Some(truncated_buffer), Some(effective_size as u64), None)
         } else {
-            (None, None)
+            (None, None, None)
         };
 
-        // Extract filename from filepath if present
-        let file_name = if !response.filepath.is_empty() {
-            std::path::Path::new(&response.filepath)
-                .file_name()
-                .and_then(|n| n.to_str())
-                .map(|s| s.to_string())
-        } else {
-            None
-        };
+        // Extract filename from resolved filepath if present
+        let file_name = resolved_filepath.as_ref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_string());
 
         debug!("RequestUri response: status={}, file_name={:?}, file_size={:?}", response.status, file_name, file_size);
 

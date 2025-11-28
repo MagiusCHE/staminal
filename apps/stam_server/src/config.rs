@@ -154,24 +154,72 @@ impl Config {
 
                 let mod_dir = mods_path.join(mod_id);
 
-                // Try server/manifest.json first, then root manifest.json
-                let manifest_path = {
-                    let server_manifest = mod_dir.join("server").join("manifest.json");
-                    if server_manifest.exists() {
-                        server_manifest
-                    } else {
-                        mod_dir.join("manifest.json")
+                // Collect execute_on from all available manifests
+                // A mod can have: root manifest.json, server/manifest.json, client/manifest.json
+                // We need to check all of them to determine full execute_on scope
+                let mut combined_execute_on: Vec<String> = Vec::new();
+                let mut primary_manifest: Option<ModManifest> = None;
+
+                // Check root manifest.json
+                let root_manifest_path = mod_dir.join("manifest.json");
+                if root_manifest_path.exists() {
+                    let manifest = ModManifest::from_json_file(root_manifest_path.to_str().unwrap_or(""))
+                        .map_err(|e| format!(
+                            "Game '{}': Failed to read root manifest for mod '{}': {}",
+                            game_id, mod_id, e
+                        ))?;
+                    for platform in manifest.execute_on.iter() {
+                        if !combined_execute_on.contains(platform) {
+                            combined_execute_on.push(platform.clone());
+                        }
                     }
-                };
+                    primary_manifest = Some(manifest);
+                }
 
-                let manifest = ModManifest::from_json_file(manifest_path.to_str().unwrap_or(""))
-                    .map_err(|e| format!(
-                        "Game '{}': Failed to read manifest for mod '{}': {}",
-                        game_id, mod_id, e
-                    ))?;
+                // Check server/manifest.json
+                let server_manifest_path = mod_dir.join("server").join("manifest.json");
+                if server_manifest_path.exists() {
+                    let manifest = ModManifest::from_json_file(server_manifest_path.to_str().unwrap_or(""))
+                        .map_err(|e| format!(
+                            "Game '{}': Failed to read server manifest for mod '{}': {}",
+                            game_id, mod_id, e
+                        ))?;
+                    for platform in manifest.execute_on.iter() {
+                        if !combined_execute_on.contains(platform) {
+                            combined_execute_on.push(platform.clone());
+                        }
+                    }
+                    if primary_manifest.is_none() {
+                        primary_manifest = Some(manifest);
+                    }
+                }
 
-                // Populate execute_on from manifest
-                mod_config.execute_on = manifest.execute_on.clone();
+                // Check client/manifest.json
+                let client_manifest_path = mod_dir.join("client").join("manifest.json");
+                if client_manifest_path.exists() {
+                    let manifest = ModManifest::from_json_file(client_manifest_path.to_str().unwrap_or(""))
+                        .map_err(|e| format!(
+                            "Game '{}': Failed to read client manifest for mod '{}': {}",
+                            game_id, mod_id, e
+                        ))?;
+                    for platform in manifest.execute_on.iter() {
+                        if !combined_execute_on.contains(platform) {
+                            combined_execute_on.push(platform.clone());
+                        }
+                    }
+                    if primary_manifest.is_none() {
+                        primary_manifest = Some(manifest);
+                    }
+                }
+
+                // Ensure we found at least one manifest
+                let manifest = primary_manifest.ok_or_else(|| format!(
+                    "Game '{}': No manifest.json found for mod '{}'",
+                    game_id, mod_id
+                ))?;
+
+                // Populate execute_on from combined manifests
+                mod_config.execute_on = StringOrArray(combined_execute_on);
 
                 // Populate mod_type from manifest if not set in config
                 if mod_config.mod_type.is_none() {
@@ -194,6 +242,28 @@ impl Config {
                         "Game '{}': Mod '{}' has no 'type' field in manifest",
                         game_id, mod_id
                     ));
+                }
+
+                // Replace placeholders in client_download
+                // {{public_uri}} -> server's public_uri
+                // {{mod_id}} -> current mod's id
+                if !mod_config.client_download.is_empty() {
+                    let public_uri = self.public_uri.as_deref().unwrap_or("");
+                    mod_config.client_download = mod_config.client_download
+                        .replace("{{public_uri}}", public_uri)
+                        .replace("{{mod_id}}", mod_id);
+
+                    // Normalize URL: replace multiple slashes with single slash (except after scheme)
+                    // e.g., stam://host:port//path -> stam://host:port/path
+                    if let Some(scheme_end) = mod_config.client_download.find("://") {
+                        let (scheme, rest) = mod_config.client_download.split_at(scheme_end + 3);
+                        // Split by / and rejoin, preserving the leading slash for the path
+                        if let Some(first_slash) = rest.find('/') {
+                            let (host_port, path) = rest.split_at(first_slash);
+                            let normalized_path = path.split('/').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("/");
+                            mod_config.client_download = format!("{}{}/{}", scheme, host_port, normalized_path);
+                        }
+                    }
                 }
 
                 // Validate client_download is not empty for client mods

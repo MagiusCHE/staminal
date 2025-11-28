@@ -9,7 +9,7 @@ use tracing::info;
 use stam_mod_runtimes::{
     RuntimeAdapter,
     adapters::js::{JsRuntimeAdapter, JsRuntimeConfig, register_mod_alias, has_fatal_error},
-    api::{LocaleApi, ModInfo, SystemApi, UriResponse},
+    api::{LocaleApi, ModInfo, SystemApi, UriResponse, ModPackagesRegistry},
     JsAsyncRuntime,
 };
 use stam_schema::{ModManifest, validate_mod_dependencies, Validatable};
@@ -41,6 +41,11 @@ impl GameModRuntime {
             UriResponse::default()
         }
     }
+
+    /// Get the home directory path from the system API
+    pub fn get_home_dir(&self) -> Option<PathBuf> {
+        self.system_api.as_ref().and_then(|api| api.get_home_dir())
+    }
 }
 
 /// Initialize mods for all games defined in configuration.
@@ -52,10 +57,23 @@ pub fn initialize_all_games(
     custom_home: Option<&str>,
 ) -> Result<HashMap<String, GameModRuntime>, String> {
     let mods_root = resolve_mods_root(&config.mods_path, custom_home)?;
+
+    // Determine home directory for mod-packages.json
+    let home_dir = if let Some(home) = custom_home {
+        PathBuf::from(home)
+    } else {
+        env::current_dir()
+            .map_err(|e| format!("Failed to get current directory: {}", e))?
+    };
+
+    // Load mod packages registry from STAM_HOME/mod-packages/mod-packages.json
+    let mod_packages = ModPackagesRegistry::load_from_home(&home_dir)
+        .map_err(|e| format!("Failed to load mod-packages.json: {}", e))?;
+
     let mut runtimes: HashMap<String, GameModRuntime> = HashMap::new();
 
-    for (game_id, game_config) in &config.games {        
-        let game_runtime = initialize_game_mods(game_id, game_config, &mods_root, server_version)?;
+    for (game_id, game_config) in &config.games {
+        let game_runtime = initialize_game_mods(game_id, game_config, &mods_root, server_version, &home_dir, &mod_packages)?;
         runtimes.insert(game_id.clone(), game_runtime);
     }
 
@@ -67,6 +85,8 @@ fn initialize_game_mods(
     game_config: &GameConfig,
     mods_root: &std::path::Path,
     server_version: &str,
+    home_dir: &std::path::Path,
+    mod_packages: &ModPackagesRegistry,
 ) -> Result<GameModRuntime, String> {
     // Load manifests for all enabled mods first (per side based on execute_on from manifest)
     let mut client_manifests: HashMap<String, ModManifest> = HashMap::new();
@@ -159,6 +179,10 @@ fn initialize_game_mods(
             |id, _args| format!("[{}]", id),  // global fallback with args
         );
         js_adapter.set_locale_api(locale_api);
+
+        // Set mod packages registry and home directory for system.get_mod_packages()
+        js_adapter.system_api().set_mod_packages(mod_packages.clone());
+        js_adapter.system_api().set_home_dir(home_dir.to_path_buf());
 
         // First pass: register aliases and mod info for all server mods
         let mut mod_entries: Vec<(String, PathBuf, String)> = Vec::new();

@@ -63,7 +63,7 @@ export class Manager {
             const response = await network.download(uri);
 
             if (response.status !== 200) {
-                throw new Error(`HTTP ${response.status}`);
+                throw new Error(`Status ${response.status}`);
             }
 
             if (!response.buffer && !response.file_content) {
@@ -73,6 +73,7 @@ export class Manager {
             // Use file_content if available (from response body), otherwise use buffer
             const data = response.file_content || response.buffer;
             console.log(`Downloaded ${mod_info.id}: ${data.length} bytes`);
+            console.log("Response is:", response);
 
             // TODO: Save to disk and extract
             // For now, just verify we got data

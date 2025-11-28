@@ -17,7 +17,8 @@
  *   --purge     Remove obsolete ZIP files after packing
  */
 
-import { createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync } from 'fs';
+import { createHash } from 'crypto';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
 import { basename, join, relative, resolve } from 'path';
 import archiver from 'archiver';
 
@@ -206,6 +207,19 @@ function purgeObsolete(outputDir, validZips) {
 }
 
 /**
+ * Calculate SHA512 hash of a file
+ */
+async function calculateSha512(filePath) {
+    return new Promise((resolve, reject) => {
+        const hash = createHash('sha512');
+        const stream = createReadStream(filePath);
+        stream.on('data', (data) => hash.update(data));
+        stream.on('end', () => resolve(hash.digest('hex')));
+        stream.on('error', reject);
+    });
+}
+
+/**
  * Format bytes to human readable string
  */
 function formatBytes(bytes) {
@@ -273,10 +287,15 @@ async function main() {
 
     const packed = [];
     const errors = [];
+    // Collect mod package info grouped by platform
+    const modPackages = {
+        client: [],
+        server: []
+    };
 
     for (const { modDir, manifestPath } of modRoots) {
         try {
-            const { id, version, platforms, zipName } = parseManifest(manifestPath);
+            const { id, version, platforms, zipName, manifest } = parseManifest(manifestPath);
             const outputPath = join(resolvedOutput, zipName);
 
             const relPath = relative(resolvedInput, modDir);
@@ -285,6 +304,26 @@ async function main() {
 
             const size = await createModZip(modDir, outputPath);
             console.log(`  -> ${zipName} (${formatBytes(size)})`);
+
+            // Calculate SHA512 hash
+            const sha512 = await calculateSha512(outputPath);
+
+            // Create package info
+            const packageInfo = {
+                id,
+                manifest,
+                sha512,
+                path: zipName
+            };
+
+            // Add to appropriate platform lists
+            const platformList = platforms.split('+');
+            if (platformList.includes('client')) {
+                modPackages.client.push(packageInfo);
+            }
+            if (platformList.includes('server')) {
+                modPackages.server.push(packageInfo);
+            }
 
             packed.push(zipName);
         } catch (e) {
@@ -303,6 +342,14 @@ async function main() {
         console.log(`Purged: ${purged.length} file(s)`);
         console.log('');
     }
+
+    // Write mod-packages.json
+    const modPackagesPath = join(resolvedOutput, 'mod-packages.json');
+    writeFileSync(modPackagesPath, JSON.stringify(modPackages, null, 2), 'utf-8');
+    console.log(`Generated: mod-packages.json`);
+    console.log(`  Client mods: ${modPackages.client.length}`);
+    console.log(`  Server mods: ${modPackages.server.length}`);
+    console.log('');
 
     // Summary
     console.log('Summary:');

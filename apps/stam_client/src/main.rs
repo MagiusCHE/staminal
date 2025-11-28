@@ -148,11 +148,22 @@ async fn perform_stam_request(
     match stream.read_primal_message().await {
         Ok(PrimalMessage::UriResponse { status, buffer, file_name, file_size: _ }) => {
             debug!("Received UriResponse: status={}, file_name={:?}", status, file_name);
-            DownloadResponse {
-                status,
-                buffer: buffer.clone(),
-                file_name,
-                file_content: buffer, // For simple responses, buffer is the file content
+            // If file_name is present, this is a file download -> put data in file_content only
+            // Otherwise, it's a simple response -> put data in buffer only
+            if file_name.is_some() {
+                DownloadResponse {
+                    status,
+                    buffer: None,
+                    file_name,
+                    file_content: buffer,
+                }
+            } else {
+                DownloadResponse {
+                    status,
+                    buffer,
+                    file_name: None,
+                    file_content: None,
+                }
             }
         }
         Ok(PrimalMessage::Error { message }) => {
@@ -320,12 +331,11 @@ async fn connect_to_game_server(
             // Log mod list received
             if !mods.is_empty() {
                 info!("Received {} required mod(s):", mods.len());
-                // for mod_info in &mods {
-                //     info!(
-                //         "  - {} [{}]: {}",
-                //         mod_info.mod_id, mod_info.mod_type, mod_info.download_url
-                //     );
-                // }
+                // Print mods as indented JSON for debugging
+                match serde_json::to_string_pretty(&mods) {
+                    Ok(json) => info!("Mods list:\n{}", json),
+                    Err(e) => warn!("Failed to serialize mods list: {}", e),
+                }
             } else {
                 info!("No mods required for this game");
             }
@@ -385,6 +395,215 @@ async fn connect_to_game_server(
                 }
             } else {
                 info!("No mods required");
+            }
+
+            // CRITICAL: Check if any required bootstrap mod (or its dependencies) is missing
+            // If so, download them from the server before proceeding
+            // This loop continues until ALL bootstrap mods AND their recursive dependencies are downloaded
+            let required_bootstrap_mods: Vec<&stam_protocol::ModInfo> = mods.iter()
+                .filter(|m| m.mod_type == "bootstrap")
+                .collect();
+
+            if !required_bootstrap_mods.is_empty() {
+                // Get tmp directory for downloads (once, outside the loop)
+                let tmp_dir = app_paths.tmp_dir()?;
+
+                // Keep downloading until all dependencies are satisfied
+                let mut download_iteration = 0;
+                const MAX_DOWNLOAD_ITERATIONS: u32 = 100; // Safety limit to prevent infinite loops
+
+                loop {
+                    download_iteration += 1;
+                    if download_iteration > MAX_DOWNLOAD_ITERATIONS {
+                        error!("FATAL: Too many download iterations ({}), possible circular dependency", download_iteration);
+                        return Err("Download loop limit exceeded - possible circular dependency".into());
+                    }
+
+                    // Calculate all mods needed for bootstrap (bootstrap mods + their dependencies recursively)
+                    // We need to use manifests from available mods to calculate dependencies
+                    fn collect_required_mods_recursive(
+                        mod_id: &str,
+                        available_manifests: &HashMap<String, (ModManifest, std::path::PathBuf)>,
+                        all_mods: &[stam_protocol::ModInfo],
+                        required: &mut Vec<String>,
+                        chain: &mut Vec<String>,
+                    ) {
+                        // Avoid infinite loops
+                        if chain.contains(&mod_id.to_string()) || required.contains(&mod_id.to_string()) {
+                            return;
+                        }
+                        chain.push(mod_id.to_string());
+
+                        // If mod is available locally, check its dependencies from manifest
+                        if let Some((manifest, _)) = available_manifests.get(mod_id) {
+                            for (dep_id, _) in &manifest.requires {
+                                if !dep_id.starts_with('@') {
+                                    collect_required_mods_recursive(dep_id, available_manifests, all_mods, required, chain);
+                                }
+                            }
+                        }
+                        // Note: if mod is NOT available locally, we can't know its dependencies yet
+                        // They will be resolved after download
+
+                        chain.pop();
+                        required.push(mod_id.to_string());
+                    }
+
+                    let mut mods_required_for_bootstrap: Vec<String> = Vec::new();
+                    let mut chain: Vec<String> = Vec::new();
+
+                    for bootstrap_mod in &required_bootstrap_mods {
+                        collect_required_mods_recursive(
+                            &bootstrap_mod.mod_id,
+                            &available_manifests,
+                            &mods,
+                            &mut mods_required_for_bootstrap,
+                            &mut chain,
+                        );
+                    }
+
+                    // Find which of the required mods are missing
+                    let mods_to_download: Vec<&stam_protocol::ModInfo> = mods_required_for_bootstrap.iter()
+                        .filter(|mod_id| !available_manifests.contains_key(*mod_id))
+                        .filter_map(|mod_id| mods.iter().find(|m| &m.mod_id == mod_id))
+                        .collect();
+
+                    // If nothing to download, we're done!
+                    if mods_to_download.is_empty() {
+                        if download_iteration > 1 {
+                            info!("All bootstrap mods and dependencies downloaded after {} iteration(s)", download_iteration - 1);
+                        }
+                        break;
+                    }
+
+                    info!("[Iteration {}] Need to download {} mod(s) for bootstrap: {:?}",
+                        download_iteration,
+                        mods_to_download.len(),
+                        mods_to_download.iter().map(|m| &m.mod_id).collect::<Vec<_>>());
+
+                    // Download each missing mod
+                    for mod_info in &mods_to_download {
+                        if mod_info.download_url.is_empty() {
+                            error!("FATAL: Mod '{}' has no download URL", mod_info.mod_id);
+                            return Err(format!(
+                                "Cannot download mod '{}': no download URL provided by server",
+                                mod_info.mod_id
+                            ).into());
+                        }
+
+                        info!("Downloading mod '{}' from {}...", mod_info.mod_id, mod_info.download_url);
+
+                        let response = perform_stam_request(
+                            &mod_info.download_url,
+                            &username,
+                            &password_hash,
+                            game_id,
+                            VERSION,
+                            host_port,
+                        ).await;
+
+                        if response.status != 200 {
+                            error!("FATAL: Failed to download mod '{}': server returned status {}",
+                                mod_info.mod_id, response.status);
+                            return Err(format!(
+                                "Failed to download mod '{}': HTTP {}",
+                                mod_info.mod_id, response.status
+                            ).into());
+                        }
+
+                        let file_content = response.file_content.ok_or_else(|| {
+                            format!("Server returned empty content for mod '{}'", mod_info.mod_id)
+                        })?;
+
+                        // Save ZIP to tmp directory
+                        let zip_filename = response.file_name.unwrap_or_else(|| format!("{}.zip", mod_info.mod_id));
+                        let zip_path = tmp_dir.join(&zip_filename);
+
+                        std::fs::write(&zip_path, &file_content)?;
+                        info!("  Saved {} ({} bytes)", zip_filename, file_content.len());
+
+                        // Extract ZIP to mods directory
+                        let mod_target_dir = mods_dir.join(&mod_info.mod_id);
+                        info!("  Extracting to {}...", mod_target_dir.display());
+
+                        // Remove existing directory if present
+                        if mod_target_dir.exists() {
+                            std::fs::remove_dir_all(&mod_target_dir)?;
+                        }
+                        std::fs::create_dir_all(&mod_target_dir)?;
+
+                        // Extract ZIP
+                        let zip_file = std::fs::File::open(&zip_path)?;
+                        let mut archive = zip::ZipArchive::new(zip_file)?;
+
+                        for i in 0..archive.len() {
+                            let mut file = archive.by_index(i)?;
+                            let outpath = mod_target_dir.join(file.mangled_name());
+
+                            if file.is_dir() {
+                                std::fs::create_dir_all(&outpath)?;
+                            } else {
+                                if let Some(parent) = outpath.parent() {
+                                    if !parent.exists() {
+                                        std::fs::create_dir_all(parent)?;
+                                    }
+                                }
+                                let mut outfile = std::fs::File::create(&outpath)?;
+                                std::io::copy(&mut file, &mut outfile)?;
+                            }
+                        }
+
+                        info!("  ✓ Mod '{}' installed successfully", mod_info.mod_id);
+
+                        // Clean up ZIP file
+                        std::fs::remove_file(&zip_path)?;
+
+                        // Immediately load the manifest of the newly downloaded mod
+                        // so that its dependencies can be discovered in the next iteration
+                        let client_dir = mod_target_dir.join("client");
+                        let client_manifest_path = client_dir.join("manifest.json");
+                        let root_manifest_path = mod_target_dir.join("manifest.json");
+
+                        let (actual_mod_dir, manifest_path) = if client_manifest_path.exists() {
+                            (client_dir, client_manifest_path)
+                        } else if root_manifest_path.exists() {
+                            (mod_target_dir.clone(), root_manifest_path)
+                        } else {
+                            warn!("Downloaded mod '{}' has no manifest.json", mod_info.mod_id);
+                            continue;
+                        };
+
+                        match ModManifest::from_json_file(manifest_path.to_str().unwrap()) {
+                            Ok(manifest) => {
+                                info!("  Loaded manifest: {} v{} (dependencies: {:?})",
+                                    manifest.name, manifest.version,
+                                    manifest.requires.keys().filter(|k| !k.starts_with('@')).collect::<Vec<_>>());
+                                available_manifests.insert(mod_info.mod_id.clone(), (manifest, actual_mod_dir));
+                                // Remove from missing_mods if it was there
+                                missing_mods.retain(|id| id != &mod_info.mod_id);
+                            }
+                            Err(e) => {
+                                warn!("Failed to load manifest for downloaded mod '{}': {}", mod_info.mod_id, e);
+                            }
+                        }
+                    }
+
+                    // Continue loop to check if newly downloaded mods have more dependencies
+                }
+
+                // Final check: ensure all bootstrap mods are available
+                let still_missing: Vec<&str> = required_bootstrap_mods.iter()
+                    .filter(|m| !available_manifests.contains_key(&m.mod_id))
+                    .map(|m| m.mod_id.as_str())
+                    .collect();
+
+                if !still_missing.is_empty() {
+                    error!("FATAL: Bootstrap mod(s) still missing after download: {:?}", still_missing);
+                    return Err(format!(
+                        "Failed to install bootstrap mod(s): {:?}",
+                        still_missing
+                    ).into());
+                }
             }
 
             // Initialize mod runtime manager and load ONLY bootstrap mods + their dependencies
@@ -634,28 +853,8 @@ async fn connect_to_game_server(
                     system_api.set_loaded(mod_id, true);
                 }
 
-                // Identify ALL bootstrap mods required by the server
-                let required_bootstrap_mods: Vec<&String> = mods.iter()
-                    .filter(|m| m.mod_type == "bootstrap")
-                    .map(|m| &m.mod_id)
-                    .collect();
-
-                // Check if any required bootstrap mod is missing or not available
-                let missing_bootstrap_mods: Vec<&String> = required_bootstrap_mods.iter()
-                    .filter(|mod_id| !bootstrap_mod_ids.contains(*mod_id))
-                    .copied()
-                    .collect();
-
-                if !missing_bootstrap_mods.is_empty() {
-                    error!("Required bootstrap mod(s) not available locally: {:?}", missing_bootstrap_mods);
-                    error!("Cannot continue without all bootstrap mods. Please ensure these mods are installed.");
-                    return Err(format!(
-                        "Missing required bootstrap mod(s): {:?}",
-                        missing_bootstrap_mods
-                    ).into());
-                }
-
                 // Call onBootstrap ONLY for bootstrap mods (not for dependencies)
+                // Note: Missing bootstrap mods check is done earlier, before runtime initialization
                 if !bootstrap_mod_ids.is_empty() {
                     info!("Bootstrapping {} mod(s)...", bootstrap_mod_ids.len());
                     for mod_id in &bootstrap_mod_ids {

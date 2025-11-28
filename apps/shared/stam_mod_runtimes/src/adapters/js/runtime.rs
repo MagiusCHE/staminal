@@ -135,6 +135,42 @@ fn normalize_path(path: &std::path::Path) -> std::path::PathBuf {
     normalized
 }
 
+/// Parse URI components: host, path, and optional query string
+///
+/// Input format: "scheme://host:port/path?query" or "scheme://host/path"
+/// Returns: (host, path, Option<query>)
+///
+/// Examples:
+/// - "stam://localhost:9999/mods-manager/test/download" -> ("localhost:9999", "/mods-manager/test/download", None)
+/// - "http://example.com/api?foo=bar" -> ("example.com", "/api", Some("foo=bar"))
+fn parse_uri_components(uri: &str) -> (String, String, Option<String>) {
+    // Find scheme separator
+    let after_scheme = if let Some(pos) = uri.find("://") {
+        &uri[pos + 3..]
+    } else {
+        uri
+    };
+
+    // Split host from path
+    let (host, path_and_query) = if let Some(slash_pos) = after_scheme.find('/') {
+        (&after_scheme[..slash_pos], &after_scheme[slash_pos..])
+    } else {
+        (after_scheme, "/")
+    };
+
+    // Split path from query
+    let (path, query) = if let Some(query_pos) = path_and_query.find('?') {
+        (
+            &path_and_query[..query_pos],
+            Some(path_and_query[query_pos + 1..].to_string()),
+        )
+    } else {
+        (path_and_query, None)
+    };
+
+    (host.to_string(), path.to_string(), query)
+}
+
 /// Extract source code context from the first line of a stack trace
 ///
 /// Parses stack trace lines like:
@@ -511,6 +547,9 @@ impl JsRuntimeAdapter {
                     bindings::setup_network_api(ctx.clone(), network)?;
                 }
 
+                // Register text API (Text.DecodeUTF8())
+                bindings::setup_text_api(ctx.clone())?;
+
                 //debug!(" > API registrations completed successfully");
                 Ok::<(), rquickjs::Error>(())
             })
@@ -841,14 +880,18 @@ impl JsRuntimeAdapter {
         &self,
         uri: &str,
     ) -> UriResponse {
+        // Log total number of RequestUri handlers registered
+        // let total_handlers = self.system_api.event_dispatcher().handler_count(crate::api::SystemEvents::RequestUri);
+        //info!("dispatch_request_uri: uri='{}', total_handlers={}", uri, total_handlers);
+
         let handlers = self.system_api.event_dispatcher().get_handlers_for_uri_request(uri);
 
         if handlers.is_empty() {
-            debug!("No handlers registered for URI: {}", uri);
+            //info!("No handlers matched for URI: {} (total registered: {})", uri, total_handlers);
             return UriResponse::default();
         }
 
-        debug!("Dispatching RequestUri to {} handlers for URI: {}", handlers.len(), uri);
+        //info!("Dispatching RequestUri to {} handlers for URI: {}", handlers.len(), uri);
 
         let mut response = UriResponse::default();
         let uri_owned = uri.to_string();
@@ -867,6 +910,9 @@ impl JsRuntimeAdapter {
             let mod_id = handler.mod_id.clone();
             let uri_for_closure = uri_owned.clone();
 
+            // Parse URI components for the request object
+            let (host, path, query) = parse_uri_components(&uri_for_closure);
+
             // Call the handler function with request and response objects
             let result: Result<(u16, bool, Vec<u8>, u64, String), String> = loaded_mod
                 .context
@@ -874,9 +920,16 @@ impl JsRuntimeAdapter {
                     // Get the handler function from the context's handler map
                     match bindings::get_js_handler(&ctx, handler_id) {
                         Ok(Some(func)) => {
-                            // Create request object
+                            // Create request object with uri, path, host, query
                             let request = Object::new(ctx.clone()).map_err(|e| format!("Failed to create request object: {:?}", e))?;
                             request.set("uri", uri_for_closure.as_str()).map_err(|e| format!("Failed to set uri: {:?}", e))?;
+                            request.set("path", path.as_str()).map_err(|e| format!("Failed to set path: {:?}", e))?;
+                            request.set("host", host.as_str()).map_err(|e| format!("Failed to set host: {:?}", e))?;
+                            if let Some(ref q) = query {
+                                request.set("query", q.as_str()).map_err(|e| format!("Failed to set query: {:?}", e))?;
+                            } else {
+                                request.set("query", rquickjs::Null).map_err(|e| format!("Failed to set query: {:?}", e))?;
+                            }
 
                             // Create response object with methods
                             let response_obj = Object::new(ctx.clone()).map_err(|e| format!("Failed to create response object: {:?}", e))?;
@@ -932,11 +985,21 @@ impl JsRuntimeAdapter {
                                     let handled: bool = response_obj.get("handled").unwrap_or(false);
                                     let filepath: String = response_obj.get("filepath").unwrap_or_default();
 
+                                    // Read buffer_size from script (if set), otherwise use buffer length
+                                    let script_buffer_size: i64 = response_obj.get("buffer_size").unwrap_or(0);
+
                                     // Read buffer if present (convert JS array to Vec<u8>)
+                                    // Only read up to buffer_size bytes if script set it
                                     let buffer: Vec<u8> = if let Ok(arr) = response_obj.get::<_, rquickjs::Array>("buffer") {
-                                        let len = arr.len();
-                                        let mut buf = Vec::with_capacity(len);
-                                        for i in 0..len {
+                                        let arr_len = arr.len();
+                                        // If script set buffer_size, use it; otherwise use array length
+                                        let effective_len = if script_buffer_size > 0 {
+                                            (script_buffer_size as usize).min(arr_len)
+                                        } else {
+                                            arr_len
+                                        };
+                                        let mut buf = Vec::with_capacity(effective_len);
+                                        for i in 0..effective_len {
                                             if let Ok(byte) = arr.get::<u8>(i) {
                                                 buf.push(byte);
                                             }
@@ -946,7 +1009,12 @@ impl JsRuntimeAdapter {
                                         Vec::new()
                                     };
 
-                                    let buffer_size = buffer.len() as u64;
+                                    // Use script's buffer_size if set, otherwise use actual buffer length
+                                    let buffer_size = if script_buffer_size > 0 {
+                                        script_buffer_size as u64
+                                    } else {
+                                        buffer.len() as u64
+                                    };
 
                                     Ok((status as u16, handled, buffer, buffer_size, filepath))
                                 }
