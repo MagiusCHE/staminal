@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
-use stam_schema::{ModManifest, Validatable};
+use stam_schema::{ModManifest, Validatable, StringOrArray};
 use stam_protocol::ModInfo;
 use std::collections::HashMap;
 use std::path::Path;
@@ -10,15 +10,15 @@ use std::path::Path;
 pub struct ModConfig {
     /// Whether this mod is enabled
     pub enabled: bool,
-    /// Mod type (e.g., "bootstrap", "library") - read from manifest, stored here after validation
+    /// Mod type (e.g., "bootstrap", "library") - read from manifest at validation time
     #[serde(rename = "type", skip_serializing_if = "Option::is_none", default)]
     pub mod_type: Option<String>,
     /// URI for client to download this mod
     #[serde(default)]
     pub client_download: String,
-    /// Which side(s) this mod applies to ("client", "server")
-    #[serde(default)]
-    pub side: Vec<String>,
+    /// Which side(s) this mod applies to - populated from manifest's execute_on at validation time
+    #[serde(skip)]
+    pub execute_on: StringOrArray,
 }
 
 /// Game configuration
@@ -124,7 +124,7 @@ impl Default for Config {
 
 impl Config {
     /// Validate the configuration and build mod lists for all games
-    /// Reads mod_type from each mod's manifest.json file
+    /// Reads mod_type and execute_on from each mod's manifest.json file
     /// Returns an error if any game has mods with missing required fields
     pub fn validate_mods(&mut self, custom_home: Option<&str>) -> Result<(), String> {
         // Resolve mods path similar to mod_loader::resolve_mods_root
@@ -142,7 +142,7 @@ impl Config {
         };
 
         for (game_id, game_config) in &mut self.games {
-            // First pass: read manifests and populate mod_type for each enabled mod
+            // First pass: read manifests and populate mod_type and execute_on for each enabled mod
             let mod_ids: Vec<String> = game_config.mods.keys().cloned().collect();
 
             for mod_id in &mod_ids {
@@ -152,43 +152,40 @@ impl Config {
                     continue; // Skip disabled mods
                 }
 
-                let is_client_mod = mod_config.side.iter().any(|s| s == "client");
-                let is_server_mod = mod_config.side.iter().any(|s| s == "server");
+                let mod_dir = mods_path.join(mod_id);
+
+                // Try server/manifest.json first, then root manifest.json
+                let manifest_path = {
+                    let server_manifest = mod_dir.join("server").join("manifest.json");
+                    if server_manifest.exists() {
+                        server_manifest
+                    } else {
+                        mod_dir.join("manifest.json")
+                    }
+                };
+
+                let manifest = ModManifest::from_json_file(manifest_path.to_str().unwrap_or(""))
+                    .map_err(|e| format!(
+                        "Game '{}': Failed to read manifest for mod '{}': {}",
+                        game_id, mod_id, e
+                    ))?;
+
+                // Populate execute_on from manifest
+                mod_config.execute_on = manifest.execute_on.clone();
+
+                // Populate mod_type from manifest if not set in config
+                if mod_config.mod_type.is_none() {
+                    mod_config.mod_type = manifest.mod_type;
+                }
+
+                let is_client_mod = mod_config.execute_on.contains("client");
+                let is_server_mod = mod_config.execute_on.contains("server");
 
                 if !is_client_mod && !is_server_mod {
                     return Err(format!(
-                        "Game '{}': Mod '{}' must declare at least one side ('client' or 'server')",
+                        "Game '{}': Mod '{}' must declare execute_on with at least one of 'client' or 'server' in manifest",
                         game_id, mod_id
                     ));
-                }
-
-                // Read mod_type from manifest if not already set in config
-                // Use same resolution logic as mod_loader: check side-specific folder first, then root
-                if mod_config.mod_type.is_none() {
-                    let mod_dir = mods_path.join(mod_id);
-
-                    // Determine which side to check for manifest
-                    // For server-side mods, prefer server/manifest.json
-                    // For client-only mods, prefer client/manifest.json
-                    let side_folder = if is_server_mod { "server" } else { "client" };
-
-                    // Try side-specific manifest first, then fall back to root
-                    let manifest_path = {
-                        let side_manifest = mod_dir.join(side_folder).join("manifest.json");
-                        if side_manifest.exists() {
-                            side_manifest
-                        } else {
-                            mod_dir.join("manifest.json")
-                        }
-                    };
-
-                    let manifest = ModManifest::from_json_file(manifest_path.to_str().unwrap_or(""))
-                        .map_err(|e| format!(
-                            "Game '{}': Failed to read manifest for mod '{}': {}",
-                            game_id, mod_id, e
-                        ))?;
-
-                    mod_config.mod_type = manifest.mod_type;
                 }
 
                 // Validate mod_type is set (from manifest or config)
@@ -202,7 +199,7 @@ impl Config {
                 // Validate client_download is not empty for client mods
                 if is_client_mod && mod_config.client_download.is_empty() {
                     return Err(format!(
-                        "Game '{}': Mod '{}' has empty 'client_download' field",
+                        "Game '{}': Mod '{}' has empty 'client_download' field (required for client mods)",
                         game_id, mod_id
                     ));
                 }
@@ -211,7 +208,7 @@ impl Config {
             // Build mod list for this game (done once at boot)
             game_config.mod_list = game_config.mods.iter()
                 .filter(|(_, mod_config)| mod_config.enabled)
-                .filter(|(_, mod_config)| mod_config.side.iter().any(|s| s == "client"))
+                .filter(|(_, mod_config)| mod_config.execute_on.contains("client"))
                 .map(|(mod_id, mod_config)| {
                     ModInfo {
                         mod_id: mod_id.clone(),

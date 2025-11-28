@@ -1,7 +1,111 @@
 use serde::{Deserialize, Serialize};
 use schemars::JsonSchema;
+use schemars::r#gen::SchemaGenerator;
+use schemars::schema::{Schema, SchemaObject, SingleOrVec, InstanceType};
 use std::collections::HashMap;
 use crate::Validatable;
+
+/// Wrapper type for execute_on that can be either a string or array of strings
+/// This type handles both JSON Schema generation and serde deserialization
+#[derive(Debug, Clone, Default)]
+pub struct StringOrArray(pub Vec<String>);
+
+impl StringOrArray {
+    /// Check if the array contains a specific value
+    pub fn contains(&self, value: &str) -> bool {
+        self.0.iter().any(|s| s == value)
+    }
+
+    /// Get an iterator over the strings
+    pub fn iter(&self) -> impl Iterator<Item = &String> {
+        self.0.iter()
+    }
+}
+
+impl JsonSchema for StringOrArray {
+    fn schema_name() -> String {
+        "StringOrArray".to_string()
+    }
+
+    fn json_schema(_gen: &mut SchemaGenerator) -> Schema {
+        // Create a schema that accepts either a string or array of strings
+        let string_schema = SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
+            ..Default::default()
+        };
+
+        let array_schema = SchemaObject {
+            instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::Array))),
+            array: Some(Box::new(schemars::schema::ArrayValidation {
+                items: Some(SingleOrVec::Single(Box::new(Schema::Object(SchemaObject {
+                    instance_type: Some(SingleOrVec::Single(Box::new(InstanceType::String))),
+                    ..Default::default()
+                })))),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
+
+        Schema::Object(SchemaObject {
+            subschemas: Some(Box::new(schemars::schema::SubschemaValidation {
+                any_of: Some(vec![
+                    Schema::Object(string_schema),
+                    Schema::Object(array_schema),
+                ]),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })
+    }
+}
+
+impl Serialize for StringOrArray {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for StringOrArray {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{self, Visitor};
+
+        struct StringOrArrayVisitor;
+
+        impl<'de> Visitor<'de> for StringOrArrayVisitor {
+            type Value = StringOrArray;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("a string or array of strings")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(StringOrArray(vec![value.to_string()]))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+            where
+                A: de::SeqAccess<'de>,
+            {
+                let mut values = Vec::new();
+                while let Some(value) = seq.next_element::<String>()? {
+                    values.push(value);
+                }
+                Ok(StringOrArray(values))
+            }
+        }
+
+        deserializer.deserialize_any(StringOrArrayVisitor)
+    }
+}
 
 /// Mod manifest structure (manifest.json)
 /// This defines the metadata for a mod package
@@ -41,6 +145,12 @@ pub struct ModManifest {
     #[schemars(description = "Dependencies: mod-id -> version constraint. Use '@client', '@server' or '@game' for engine/game requirements.")]
     #[serde(default)]
     pub requires: HashMap<String, String>,
+
+    /// Where this mod should execute: "server", "client", or both
+    /// Can be a single string or an array of strings
+    #[schemars(description = "Where this mod executes: 'server', 'client', or ['server', 'client'] for both")]
+    #[serde(default)]
+    pub execute_on: StringOrArray,
 }
 
 impl Validatable for ModManifest {}

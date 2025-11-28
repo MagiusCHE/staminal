@@ -1,0 +1,14 @@
+{
+  "name": "staminal-mods-packer",
+  "version": "1.0.0",
+  "description": "Mods packaging tool for Staminal Engine",
+  "type": "module",
+  "main": "mods-packer.mjs",
+  "scripts": {
+    "pack": "node mods-packer.mjs",
+    "pack:purge": "node mods-packer.mjs --purge"
+  },
+  "dependencies": {
+    "archiver": "^7.0.1"
+  }
+}

@@ -68,7 +68,7 @@ fn initialize_game_mods(
     mods_root: &std::path::Path,
     server_version: &str,
 ) -> Result<GameModRuntime, String> {
-    // Load manifests for all enabled mods first (per side)
+    // Load manifests for all enabled mods first (per side based on execute_on from manifest)
     let mut client_manifests: HashMap<String, ModManifest> = HashMap::new();
     let mut server_manifests: HashMap<String, ModManifest> = HashMap::new();
     let mut client_mods: Vec<String> = Vec::new();
@@ -82,8 +82,12 @@ fn initialize_game_mods(
 
         let mod_dir = mods_root.join(mod_id);
 
+        // execute_on is populated from manifest during config validation
+        let is_client_mod = mod_cfg.execute_on.contains("client");
+        let is_server_mod = mod_cfg.execute_on.contains("server");
+
         // Client manifest resolution
-        if mod_cfg.side.iter().any(|s| s == "client") {
+        if is_client_mod {
             client_mods.push(mod_id.clone());
             let (client_manifest, _client_base) =
                 resolve_manifest(game_id, mod_id, &mod_dir, Some("client"))?;
@@ -91,7 +95,7 @@ fn initialize_game_mods(
         }
 
         // Server manifest resolution
-        if mod_cfg.side.iter().any(|s| s == "server") {
+        if is_server_mod {
             server_mods.push(mod_id.clone());
             let (server_manifest, server_base_dir) =
                 resolve_manifest(game_id, mod_id, &mod_dir, Some("server"))?;

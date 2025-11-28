@@ -3,6 +3,7 @@
     "version": "0.1.0",
     "description": "Server side manager to handle moddownload request via stam:// URIs",
     "entry_point": "index.js",
+    "execute_on": "server",
     "priority": 0,
     "requires": {
         "@server": "0.1.0",

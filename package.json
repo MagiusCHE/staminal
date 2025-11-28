@@ -25,9 +25,12 @@
     "doc": "docs"
   },
   "scripts": {
-    "server:debug": "(pkill stam_server -9 || true) && cd apps/stam_server && STAM_HOME=\"./workspace_data\" cargo run --bin stam_server -- --config workspace_data/configs/develop.json --log-file",
+    "postinstall": "cd apps/server_mods_packer && npm install",
+    "server:debug": "(pkill stam_server -9 || true) && npm run pack:mods:purge && cd apps/stam_server && STAM_HOME=\"./workspace_data\" cargo run --bin stam_server -- --config workspace_data/configs/develop.json --log-file",
     "server:test": "cd apps/stam_server && cargo test && cargo test -p stam_mod_runtimes -p stam_protocol -p stam_schema",
     "client:debug": "(pkill stam_client -9 || true) && cd apps/stam_client && STAM_URI=\"stam://magius:324fd324@localhost:9999\" STAM_LANG=\"it-IT\" STAM_HOME=\"./workspace_data\" cargo run --bin stam_client -- --log-file",
-    "client:test": "cd apps/stam_client && cargo test"
+    "client:test": "cd apps/stam_client && cargo test",
+    "pack:mods": "cd apps/server_mods_packer && node mods-packer.mjs ../../apps/stam_server/workspace_data/mods ../../apps/stam_server/workspace_data/mod-packages",
+    "pack:mods:purge": "cd apps/server_mods_packer && node mods-packer.mjs ../../apps/stam_server/workspace_data/mods ../../apps/stam_server/workspace_data/mod-packages --purge"
   }
 }

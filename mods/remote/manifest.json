@@ -3,6 +3,7 @@
     "version": "1.0.0",
     "description": "Allows server to be controlled via socket",
     "entry_point": "index.js",
+    "execute_on": "server",
     "type": "bootstrap",
     "priority": 0,
     "requires": {
