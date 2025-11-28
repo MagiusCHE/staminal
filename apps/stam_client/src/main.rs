@@ -7,7 +7,7 @@ use tracing::{Level, debug, error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use stam_mod_runtimes::api::{DownloadResponse, LocaleApi, NetworkApi, NetworkConfig, parse_stam_uri, sanitize_uri};
+use stam_mod_runtimes::api::{DownloadResponse, LocaleApi, NetworkApi, NetworkConfig, parse_stam_uri, sanitize_uri, extract_mod_zip};
 use stam_mod_runtimes::logging::{create_custom_timer, CustomFormatter};
 use stam_protocol::{GameMessage, GameStream, IntentType, PrimalMessage, PrimalStream};
 use stam_schema::{ModManifest, Validatable, validate_mod_dependencies, validate_version_range};
@@ -399,6 +399,11 @@ async fn connect_to_game_server(
     // Wait for LoginSuccess
     // JS runtime handle for event loop integration
     let mut js_runtime_handle: Option<std::sync::Arc<stam_mod_runtimes::JsAsyncRuntime>> = None;
+    // Runtime manager and system API for dynamic mod loading
+    let mut runtime_manager_opt: Option<ModRuntimeManager> = None;
+    let mut system_api_opt: Option<stam_mod_runtimes::api::SystemApi> = None;
+    // Game root directory for resolving mod paths
+    let mut game_root_opt: Option<std::path::PathBuf> = None;
 
     match stream.read_game_message().await {
         Ok(GameMessage::LoginSuccess { game_name, game_version, mods }) => {
@@ -609,32 +614,8 @@ async fn connect_to_game_server(
                         let mod_target_dir = mods_dir.join(&mod_info.mod_id);
                         info!("  Extracting to {}...", mod_target_dir.display());
 
-                        // Remove existing directory if present
-                        if mod_target_dir.exists() {
-                            std::fs::remove_dir_all(&mod_target_dir)?;
-                        }
-                        std::fs::create_dir_all(&mod_target_dir)?;
-
-                        // Extract ZIP
-                        let zip_file = std::fs::File::open(&zip_path)?;
-                        let mut archive = zip::ZipArchive::new(zip_file)?;
-
-                        for i in 0..archive.len() {
-                            let mut file = archive.by_index(i)?;
-                            let outpath = mod_target_dir.join(file.mangled_name());
-
-                            if file.is_dir() {
-                                std::fs::create_dir_all(&outpath)?;
-                            } else {
-                                if let Some(parent) = outpath.parent() {
-                                    if !parent.exists() {
-                                        std::fs::create_dir_all(parent)?;
-                                    }
-                                }
-                                let mut outfile = std::fs::File::create(&outpath)?;
-                                std::io::copy(&mut file, &mut outfile)?;
-                            }
-                        }
+                        extract_mod_zip(&zip_path, &mod_target_dir)
+                            .map_err(|e| format!("Failed to extract mod '{}': {}", mod_info.mod_id, e))?;
 
                         info!("  ✓ Mod '{}' installed successfully", mod_info.mod_id);
 
@@ -699,6 +680,9 @@ async fn connect_to_game_server(
                 // Initialize JavaScript runtime (one shared runtime for all JS mods)
                 let runtime_config = create_js_runtime_config(&app_paths, &game_id)?;
                 let mut js_adapter = JsRuntimeAdapter::new(runtime_config)?;
+
+                // Set home directory for mod installation (used by system.install_mod_from_path)
+                js_adapter.system_api().set_home_dir(game_root.clone());
 
                 // Setup locale API for internationalization in JavaScript mods
                 // LocaleApi now supports hierarchical lookup: mod locale -> global locale
@@ -952,6 +936,11 @@ async fn connect_to_game_server(
                 info!("Mod system initialized successfully ({} loaded, {} deferred)",
                     mods_to_load.len(), mods_not_loaded.len());
                 js_runtime_handle = Some(js_runtime);
+
+                // Save for dynamic mod loading in main loop
+                runtime_manager_opt = Some(runtime_manager);
+                system_api_opt = Some(system_api);
+                game_root_opt = Some(game_root);
             }
         }
         Ok(GameMessage::Error { message }) => {
@@ -985,25 +974,60 @@ async fn connect_to_game_server(
     // This is necessary for setTimeout/setInterval to work properly
     if let Some(js_runtime) = js_runtime_handle {
         debug!("Starting JavaScript event loop for timer support");
-        tokio::select! {
-            biased;
 
-            // Handle Ctrl+C first
-            _ = tokio::signal::ctrl_c() => {
-                info!("{}", locale.get("ctrl-c-received"));
-            }
+        // Take the attach request receiver from SystemApi
+        let mut attach_rx = if let Some(ref system_api) = system_api_opt {
+            system_api.take_attach_receiver().await
+        } else {
+            None
+        };
 
-            // Maintain game connection
-            _ = maintain_game_connection(&mut stream, locale.clone()) => {
-                info!("{}", locale.get("connection-closed"));
-            }
+        // Main event loop - handles JS events, attach requests, and connection
+        loop {
+            tokio::select! {
+                biased;
 
-            // Run JS event loop for timer callbacks
-            fatal_error = run_js_event_loop(js_runtime) => {
-                if fatal_error {
-                    error!("{}", locale.get("js-fatal-error"));
-                } else {
-                    debug!("JavaScript event loop exited unexpectedly");
+                // Handle Ctrl+C first
+                _ = tokio::signal::ctrl_c() => {
+                    info!("{}", locale.get("ctrl-c-received"));
+                    break;
+                }
+
+                // Handle attach mod requests from JavaScript
+                request = async {
+                    if let Some(ref mut rx) = attach_rx {
+                        rx.recv().await
+                    } else {
+                        // No receiver, wait forever
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Some(request) = request {
+                        let result = handle_attach_mod_request(
+                            &request.mod_id,
+                            &mut runtime_manager_opt,
+                            &system_api_opt,
+                            &game_root_opt,
+                        ).await;
+                        // Send response back to JS
+                        let _ = request.response_tx.send(result);
+                    }
+                }
+
+                // Maintain game connection
+                _ = maintain_game_connection(&mut stream, locale.clone()) => {
+                    info!("{}", locale.get("connection-closed"));
+                    break;
+                }
+
+                // Run JS event loop for timer callbacks
+                fatal_error = run_js_event_loop(js_runtime.clone()) => {
+                    if fatal_error {
+                        error!("{}", locale.get("js-fatal-error"));
+                    } else {
+                        debug!("JavaScript event loop exited unexpectedly");
+                    }
+                    break;
                 }
             }
         }
@@ -1020,6 +1044,81 @@ async fn connect_to_game_server(
     }
 
     info!("{}", locale.get("game-shutdown"));
+    Ok(())
+}
+
+/// Handle a request to attach (load and initialize) a mod at runtime
+///
+/// This is called when JavaScript code calls `system.attach_mod(mod_id)`.
+/// It reads the mod's manifest, loads the mod into the runtime, and calls onAttach.
+async fn handle_attach_mod_request(
+    mod_id: &str,
+    runtime_manager_opt: &mut Option<ModRuntimeManager>,
+    system_api_opt: &Option<stam_mod_runtimes::api::SystemApi>,
+    game_root_opt: &Option<std::path::PathBuf>,
+) -> Result<(), String> {
+    info!("Attaching mod '{}' at runtime...", mod_id);
+
+    let runtime_manager = runtime_manager_opt.as_mut()
+        .ok_or_else(|| "Runtime manager not available".to_string())?;
+
+    let system_api = system_api_opt.as_ref()
+        .ok_or_else(|| "System API not available".to_string())?;
+
+    let game_root = game_root_opt.as_ref()
+        .ok_or_else(|| "Game root not available".to_string())?;
+
+    // Find the mod directory (check client/ subdirectory first, then root)
+    let mods_dir = game_root.join("mods");
+    let mod_dir = mods_dir.join(mod_id);
+
+    if !mod_dir.exists() {
+        return Err(format!("Mod directory '{}' not found", mod_dir.display()));
+    }
+
+    // Check for client/ subdirectory first
+    let client_dir = mod_dir.join("client");
+    let actual_mod_dir = if client_dir.exists() && client_dir.join("manifest.json").exists() {
+        client_dir
+    } else {
+        mod_dir.clone()
+    };
+
+    // Read manifest
+    let manifest_path = actual_mod_dir.join("manifest.json");
+    let manifest_content = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Failed to read manifest: {}", e))?;
+
+    let manifest: stam_schema::ModManifest = serde_json::from_str(&manifest_content)
+        .map_err(|e| format!("Failed to parse manifest: {}", e))?;
+
+    // Build entry point path
+    let entry_point_path = actual_mod_dir.join(&manifest.entry_point);
+
+    // Convert to absolute path for reliable module resolution
+    let absolute_entry_point = if entry_point_path.is_absolute() {
+        entry_point_path.clone()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("Failed to get current dir: {}", e))?
+            .join(&entry_point_path)
+    };
+
+    // Register mod alias before loading
+    stam_mod_runtimes::adapters::js::register_mod_alias(mod_id, absolute_entry_point.clone());
+
+    // Load the mod
+    runtime_manager.load_mod(mod_id, &entry_point_path)
+        .map_err(|e| format!("Failed to load mod: {}", e))?;
+
+    // Call onAttach
+    runtime_manager.call_mod_function(mod_id, "onAttach")
+        .map_err(|e| format!("Failed to call onAttach: {}", e))?;
+
+    // Mark mod as loaded in SystemApi
+    system_api.set_loaded(mod_id, true);
+
+    info!("Mod '{}' attached successfully", mod_id);
     Ok(())
 }
 

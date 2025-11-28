@@ -17,6 +17,9 @@ fluent = "0.16"
 fluent-bundle = "0.15"
 unic-langid = "0.9"
 
+# ZIP file extraction
+zip = "2.2"
+
 # Optional runtime-specific dependencies
 rquickjs = { version = "0.10", features = ["classes", "properties", "loader", "futures", "parallel", "macro"], optional = true }
 

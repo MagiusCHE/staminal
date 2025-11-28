@@ -7,7 +7,20 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
+use tokio::sync::{mpsc, oneshot};
 use super::events::EventDispatcher;
+
+/// Request to attach (load and initialize) a mod at runtime
+///
+/// This is used by `system.attach_mod(mod_id)` to request the main loop
+/// to load a mod that was previously installed via `install_mod_from_path`.
+#[derive(Debug)]
+pub struct AttachModRequest {
+    /// The mod ID to attach
+    pub mod_id: String,
+    /// Channel to send the result back to the caller
+    pub response_tx: oneshot::Sender<Result<(), String>>,
+}
 
 /// Filter for mod packages (client or server side)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -102,6 +115,22 @@ impl ModPackagesRegistry {
     }
 }
 
+/// Minimal manifest structure for reading installed mod metadata
+///
+/// This is a subset of the full ModManifest schema, containing only
+/// the fields needed for runtime registration.
+#[derive(Debug, Clone, Deserialize)]
+struct InstalledModManifest {
+    pub name: String,
+    pub version: String,
+    pub description: String,
+    pub entry_point: String,
+    #[serde(default)]
+    pub priority: i32,
+    #[serde(rename = "type", default)]
+    pub mod_type: Option<String>,
+}
+
 /// Information about a mod
 ///
 /// This struct is returned by `system.get_mods()` to provide
@@ -143,17 +172,61 @@ pub struct SystemApi {
     mod_packages: Arc<RwLock<Option<ModPackagesRegistry>>>,
     /// Home directory path for mod packages
     home_dir: Arc<RwLock<Option<PathBuf>>>,
+    /// Channel sender for attach mod requests (JS -> main loop)
+    attach_request_tx: Arc<RwLock<Option<mpsc::Sender<AttachModRequest>>>>,
+    /// Channel receiver for attach mod requests (main loop)
+    attach_request_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<AttachModRequest>>>>,
 }
 
 impl SystemApi {
     /// Create a new SystemApi with an empty mod list
     pub fn new() -> Self {
+        // Create mpsc channel for attach requests (buffered with capacity 16)
+        let (tx, rx) = mpsc::channel::<AttachModRequest>(16);
+
         Self {
             mods: Arc::new(RwLock::new(Vec::new())),
             event_dispatcher: EventDispatcher::new(),
             mod_packages: Arc::new(RwLock::new(None)),
             home_dir: Arc::new(RwLock::new(None)),
+            attach_request_tx: Arc::new(RwLock::new(Some(tx))),
+            attach_request_rx: Arc::new(tokio::sync::Mutex::new(Some(rx))),
         }
+    }
+
+    /// Send a request to attach a mod and wait for the result
+    ///
+    /// This is called by the JS binding `system.attach_mod(mod_id)`.
+    /// The request is sent to the main loop which will process it and respond.
+    pub async fn request_attach_mod(&self, mod_id: String) -> Result<(), String> {
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = AttachModRequest {
+            mod_id: mod_id.clone(),
+            response_tx,
+        };
+
+        // Get the sender
+        let tx = {
+            let guard = self.attach_request_tx.read().unwrap();
+            guard.clone()
+        };
+
+        let tx = tx.ok_or_else(|| "Attach request channel not available".to_string())?;
+
+        // Send the request
+        tx.send(request).await.map_err(|_| "Failed to send attach request".to_string())?;
+
+        // Wait for the response
+        response_rx.await.map_err(|_| "Attach request was cancelled".to_string())?
+    }
+
+    /// Take the attach request receiver (can only be called once)
+    ///
+    /// This is used by the main loop to receive and process attach requests.
+    pub async fn take_attach_receiver(&self) -> Option<mpsc::Receiver<AttachModRequest>> {
+        let mut guard = self.attach_request_rx.lock().await;
+        guard.take()
     }
 
     /// Set the mod packages registry (loaded from mod-packages.json)
@@ -268,10 +341,145 @@ impl SystemApi {
         let mods = self.mods.read().unwrap();
         mods.len()
     }
+
+    /// Get the mods directory path (home_dir/mods)
+    pub fn get_mods_dir(&self) -> Option<PathBuf> {
+        self.get_home_dir().map(|h| h.join("mods"))
+    }
+
+    /// Install a mod from a ZIP file
+    ///
+    /// Extracts the ZIP file contents to the mods directory under the specified mod_id.
+    /// If the mod directory already exists, it is removed first.
+    /// After extraction, reads the manifest and registers the mod with `loaded=false`.
+    ///
+    /// # Arguments
+    /// * `zip_path` - Path to the ZIP file to extract
+    /// * `mod_id` - The mod identifier (directory name)
+    ///
+    /// # Returns
+    /// Ok(PathBuf) with the mod installation path on success, or Err(String) on failure
+    pub fn install_mod_from_zip(&self, zip_path: &std::path::Path, mod_id: &str) -> Result<PathBuf, String> {
+        let mods_dir = self.get_mods_dir()
+            .ok_or_else(|| "Home directory not configured".to_string())?;
+
+        let mod_target_dir = mods_dir.join(mod_id);
+
+        tracing::info!("Installing mod '{}' from {} to {}",
+            mod_id,
+            zip_path.display(),
+            mod_target_dir.display());
+
+        // Use the standalone extraction function
+        extract_mod_zip(zip_path, &mod_target_dir)?;
+
+        // Read manifest and register the mod with loaded=false
+        // Check client/ subdirectory first, then root
+        let client_manifest_path = mod_target_dir.join("client").join("manifest.json");
+        let root_manifest_path = mod_target_dir.join("manifest.json");
+
+        let manifest_path = if client_manifest_path.exists() {
+            client_manifest_path
+        } else if root_manifest_path.exists() {
+            root_manifest_path
+        } else {
+            return Err(format!("No manifest.json found for mod '{}'", mod_id));
+        };
+
+        let manifest_content = std::fs::read_to_string(&manifest_path)
+            .map_err(|e| format!("Failed to read manifest for mod '{}': {}", mod_id, e))?;
+
+        let manifest: InstalledModManifest = serde_json::from_str(&manifest_content)
+            .map_err(|e| format!("Failed to parse manifest for mod '{}': {}", mod_id, e))?;
+
+        // Register the mod with loaded=false
+        let mod_info = ModInfo {
+            id: mod_id.to_string(),
+            version: manifest.version,
+            name: manifest.name,
+            description: manifest.description,
+            mod_type: manifest.mod_type,
+            priority: manifest.priority,
+            bootstrapped: false,
+            loaded: false,
+            download_url: None,
+        };
+
+        self.register_mod(mod_info);
+        tracing::info!("Mod '{}' installed and registered (loaded=false)", mod_id);
+
+        Ok(mod_target_dir)
+    }
 }
 
 impl Default for SystemApi {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Extract a mod from a ZIP file to a target directory
+///
+/// This is a standalone function that can be used without a SystemApi instance.
+/// It extracts the ZIP file contents to the specified target directory.
+/// If the target directory already exists, it is removed first.
+///
+/// # Arguments
+/// * `zip_path` - Path to the ZIP file to extract
+/// * `target_dir` - Target directory where the mod will be extracted
+///
+/// # Returns
+/// Ok(()) on success, or Err(String) on failure
+pub fn extract_mod_zip(zip_path: &std::path::Path, target_dir: &std::path::Path) -> Result<(), String> {
+    tracing::info!("Extracting ZIP {} to {}",
+        zip_path.display(),
+        target_dir.display());
+
+    // Remove existing directory if present
+    if target_dir.exists() {
+        std::fs::remove_dir_all(target_dir)
+            .map_err(|e| format!("Failed to remove existing directory: {}", e))?;
+    }
+
+    // Create target directory
+    std::fs::create_dir_all(target_dir)
+        .map_err(|e| format!("Failed to create target directory: {}", e))?;
+
+    // Open ZIP file
+    let zip_file = std::fs::File::open(zip_path)
+        .map_err(|e| format!("Failed to open ZIP file: {}", e))?;
+
+    let mut archive = zip::ZipArchive::new(zip_file)
+        .map_err(|e| format!("Failed to read ZIP archive: {}", e))?;
+
+    // Extract all files
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)
+            .map_err(|e| format!("Failed to read ZIP entry {}: {}", i, e))?;
+
+        let outpath = target_dir.join(file.mangled_name());
+
+        if file.is_dir() {
+            std::fs::create_dir_all(&outpath)
+                .map_err(|e| format!("Failed to create directory {:?}: {}", outpath, e))?;
+        } else {
+            // Create parent directories if needed
+            if let Some(parent) = outpath.parent() {
+                if !parent.exists() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("Failed to create parent directory {:?}: {}", parent, e))?;
+                }
+            }
+
+            // Extract file
+            let mut outfile = std::fs::File::create(&outpath)
+                .map_err(|e| format!("Failed to create file {:?}: {}", outpath, e))?;
+
+            std::io::copy(&mut file, &mut outfile)
+                .map_err(|e| format!("Failed to write file {:?}: {}", outpath, e))?;
+        }
+    }
+
+    tracing::info!("ZIP extracted successfully to {}", target_dir.display());
+    Ok(())
 }

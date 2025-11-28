@@ -29,8 +29,8 @@ export class Manager {
         let error_occurred = undefined;
         for (const mod of toload) {
             console.log(`Downloading mod: ${mod.id}...`);
-            this.download_mod(mod).then(() => toload.splice(toload.indexOf(mod), 1)).catch((e) => {
-                console.error(`Failed to download mod "${mod.id}":`,e);
+            this.download_install_mod(mod).then(() => toload.splice(toload.indexOf(mod), 1)).catch((e) => {
+                console.error(`Failed to download mod "${mod.id}":`, e);
                 error_occurred = locale.get_with_args("mod-download-failed", { mod_id: mod.id });
             });
             if (error_occurred) {
@@ -53,7 +53,7 @@ export class Manager {
         system.exit(1);
     }
 
-    async download_mod(mod_info) {
+    async download_install_mod(mod_info) {
         // Build the stam:// URI for this mod
         const uri = mod_info.download_url;
         console.log(mod_info)
@@ -70,9 +70,8 @@ export class Manager {
         }
 
         console.log(`Downloaded ${mod_info.id} into %o`, response.temp_file_path);
-
-        // TODO: Save to disk and extract
-        // For now, just verify we got data
+        await system.install_mod_from_path(response.temp_file_path, mod_info.id); //test
+        await system.attach_mod(mod_info.id);
         return;
     }
 

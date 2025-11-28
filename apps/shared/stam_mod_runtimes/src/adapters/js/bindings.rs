@@ -733,6 +733,78 @@ impl SystemJS {
         let path = self.system_api.get_mod_package_file_path(&mod_id, mod_side);
         Ok(path.map(|p| p.to_string_lossy().to_string()))
     }
+
+    /// Install a mod from a ZIP file (async)
+    ///
+    /// Extracts the ZIP file contents to the mods directory under the specified mod_id.
+    /// If the mod directory already exists, it is removed first.
+    /// This operation runs in a blocking thread pool to avoid blocking the event loop.
+    ///
+    /// # Arguments
+    /// * `zip_path` - Path to the ZIP file to extract
+    /// * `mod_id` - The mod identifier (directory name)
+    ///
+    /// # Returns
+    /// Promise that resolves to the installation path on success, or rejects on failure
+    #[qjs(rename = "install_mod_from_path")]
+    pub async fn install_mod_from_path(&self, zip_path: String, mod_id: String) -> rquickjs::Result<String> {
+        tracing::debug!("SystemJS::install_mod_from_path called: zip_path={}, mod_id={}", zip_path, mod_id);
+
+        let system_api = self.system_api.clone();
+        let zip_path_owned = zip_path.clone();
+        let mod_id_owned = mod_id.clone();
+
+        // Run the blocking ZIP extraction in a separate thread
+        let result = tokio::task::spawn_blocking(move || {
+            let path = std::path::Path::new(&zip_path_owned);
+            system_api.install_mod_from_zip(path, &mod_id_owned)
+        })
+        .await
+        .map_err(|e| {
+            tracing::error!("Task join error for mod '{}': {}", mod_id, e);
+            rquickjs::Error::Exception
+        })?;
+
+        match result {
+            Ok(install_path) => Ok(install_path.to_string_lossy().to_string()),
+            Err(e) => {
+                tracing::error!("Failed to install mod '{}': {}", mod_id, e);
+                Err(rquickjs::Error::Exception)
+            }
+        }
+    }
+
+    /// Attach (load and initialize) a mod at runtime
+    ///
+    /// This function requests the main loop to load a mod that was previously
+    /// installed via `install_mod_from_path`. It:
+    /// 1. Reads the mod manifest to find the entry point
+    /// 2. Loads the mod into the runtime
+    /// 3. Calls `onAttach()` on the mod
+    /// 4. Marks the mod as loaded
+    ///
+    /// # Arguments
+    /// * `mod_id` - The mod identifier (directory name)
+    ///
+    /// # Returns
+    /// Promise that resolves on success, or rejects on failure
+    #[qjs(rename = "attach_mod")]
+    pub async fn attach_mod(&self, mod_id: String) -> rquickjs::Result<()> {
+        //tracing::debug!("SystemJS::attach_mod called: mod_id={}", mod_id);
+
+        let result = self.system_api.request_attach_mod(mod_id.clone()).await;
+
+        match result {
+            Ok(()) => {
+                //tracing::info!("Mod '{}' attached successfully", mod_id);
+                Ok(())
+            }
+            Err(e) => {
+                tracing::error!("Failed to attach mod '{}': {}", mod_id, e);
+                Err(rquickjs::Error::Exception)
+            }
+        }
+    }
 }
 
 /// Setup system API in the JavaScript context
@@ -893,17 +965,17 @@ impl NetworkJS {
     /// - temp_file_path: string | null (path to temp file containing downloaded content)
     #[qjs(rename = "download")]
     pub async fn download<'js>(&self, ctx: Ctx<'js>, uri: String) -> rquickjs::Result<Object<'js>> {
-        tracing::debug!("NetworkJS::download called: uri={}", uri);
+        //tracing::debug!("NetworkJS::download called: uri={}", uri);
 
         // Perform the download
         let response = self.network_api.download(&uri).await;
 
-        tracing::debug!("NetworkJS::download response: status={}, buffer_len={:?}, file_name={:?}, file_content_len={:?}, temp_file_path={:?}",
-            response.status,
-            response.buffer.as_ref().map(|b| b.len()),
-            response.file_name,
-            response.file_content.as_ref().map(|b| b.len()),
-            response.temp_file_path);
+        // tracing::debug!("NetworkJS::download response: status={}, buffer_len={:?}, file_name={:?}, file_content_len={:?}, temp_file_path={:?}",
+        //     response.status,
+        //     response.buffer.as_ref().map(|b| b.len()),
+        //     response.file_name,
+        //     response.file_content.as_ref().map(|b| b.len()),
+        //     response.temp_file_path);
 
         // Create response object
         let result = Object::new(ctx.clone())?;
@@ -928,16 +1000,16 @@ impl NetworkJS {
         // If file_content is present, save it to a temp file and return temp_file_path
         // Do NOT expose file_content directly to JavaScript
         if let Some(file_content) = response.file_content {
-            tracing::debug!("NetworkJS::download: file_content has {} bytes, temp_dir={:?}",
-                file_content.len(), self.temp_file_manager.get_temp_dir());
+            //tracing::debug!("NetworkJS::download: file_content has {} bytes, temp_dir={:?}",
+            //    file_content.len(), self.temp_file_manager.get_temp_dir());
             match self.temp_file_manager.create_temp_file(&file_content, file_name_for_temp.as_deref()) {
                 Ok(temp_path) => {
                     let path_str = temp_path.to_string_lossy().to_string();
-                    tracing::debug!("NetworkJS::download: created temp file at {}", path_str);
+                    //tracing::debug!("NetworkJS::download: created temp file at {}", path_str);
                     result.set("temp_file_path", path_str)?;
                 }
                 Err(e) => {
-                    tracing::error!("Failed to create temp file for download: {}", e);
+                    //tracing::error!("Failed to create temp file for download: {}", e);
                     result.set("temp_file_path", rquickjs::Null)?;
                 }
             }
