@@ -153,6 +153,8 @@ pub struct ModInfo {
     pub bootstrapped: bool,
     /// Whether this mod has been loaded into the runtime
     pub loaded: bool,
+    /// Whether this mod exists locally (at the required version)
+    pub exists: bool,
     /// Download URL for this mod (stam:// URI from server)
     pub download_url: Option<String>,
 }
@@ -392,7 +394,7 @@ impl SystemApi {
         let manifest: InstalledModManifest = serde_json::from_str(&manifest_content)
             .map_err(|e| format!("Failed to parse manifest for mod '{}': {}", mod_id, e))?;
 
-        // Register the mod with loaded=false
+        // Register the mod with loaded=false, exists=true (just installed)
         let mod_info = ModInfo {
             id: mod_id.to_string(),
             version: manifest.version,
@@ -402,6 +404,7 @@ impl SystemApi {
             priority: manifest.priority,
             bootstrapped: false,
             loaded: false,
+            exists: true,  // Just installed, so it exists locally
             download_url: None,
         };
 

@@ -783,9 +783,11 @@ async fn connect_to_game_server(
 
                 // Register ALL mods in SystemApi (including missing ones)
                 // Available mods get their info from manifest, missing ones get minimal info
+                // All mods get download_url from server (for re-download if needed)
+                // exists=true for mods found locally, exists=false for missing mods
                 for mod_info in &mods {
                     if let Some(mod_data) = mod_data_map.get(&mod_info.mod_id) {
-                        // Available mod - use manifest info
+                        // Available mod - use manifest info, exists=true
                         js_adapter.register_mod_info(ModInfo {
                             id: mod_info.mod_id.clone(),
                             version: mod_data.manifest.version.clone(),
@@ -795,10 +797,11 @@ async fn connect_to_game_server(
                             priority: mod_data.manifest.priority,
                             bootstrapped: false,
                             loaded: false,  // Will be set to true when actually loaded
-                            download_url: Some(mod_info.download_url.clone()),
+                            exists: true,   // Available locally
+                            download_url: Some(mod_info.download_url.clone()),  // Keep URL for potential re-download
                         });
                     } else {
-                        // Missing mod - use info from server with placeholder values
+                        // Missing mod - use info from server with placeholder values, exists=false
                         js_adapter.register_mod_info(ModInfo {
                             id: mod_info.mod_id.clone(),
                             version: "?".to_string(),
@@ -808,7 +811,8 @@ async fn connect_to_game_server(
                             priority: 999,  // Low priority for missing mods
                             bootstrapped: false,
                             loaded: false,  // Will remain false as it's missing
-                            download_url: Some(mod_info.download_url.clone()),
+                            exists: false,  // Not available locally - needs download
+                            download_url: Some(mod_info.download_url.clone()),  // Needs download
                         });
                     }
                 }
@@ -912,8 +916,10 @@ async fn connect_to_game_server(
                     info!("  (including {} missing locally: {:?})", missing_mods.len(), missing_mods);
                 }
 
-                // Load only the selected mods (bootstrap + dependencies)
-                info!("Attaching {} mods...", mods_to_load.len());
+                // Load ONLY bootstrap mods + their dependencies
+                // Non-bootstrap mods will be loaded by mods-manager when needed
+                // mods_to_load already contains bootstrap + dependencies in correct order
+                info!("Attaching {} mods (bootstrap + dependencies)...", mods_to_load.len());
                 for mod_id in &mods_to_load {
                     let mod_data = mod_data_map.get(mod_id).unwrap();
                     runtime_manager.load_mod(mod_id, &mod_data.entry_point_path)?;
@@ -933,8 +939,10 @@ async fn connect_to_game_server(
                     }
                 }
 
-                info!("Mod system initialized successfully ({} loaded, {} deferred)",
-                    mods_to_load.len(), mods_not_loaded.len());
+                // Count deferred mods (available but not loaded yet)
+                let deferred_count = mod_data_map.len() - mods_to_load.len();
+                info!("Mod system initialized successfully ({} loaded, {} deferred, {} missing)",
+                    mods_to_load.len(), deferred_count, missing_mods.len());
                 js_runtime_handle = Some(js_runtime);
 
                 // Save for dynamic mod loading in main loop

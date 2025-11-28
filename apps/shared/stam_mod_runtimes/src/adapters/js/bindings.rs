@@ -507,19 +507,19 @@ impl SystemJS {
     /// - bootstrapped: boolean
     #[qjs(rename = "get_mods")]
     pub fn get_mods<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Array<'js>> {
-        tracing::debug!("SystemJS::get_mods called");
+        //tracing::debug!("SystemJS::get_mods called");
 
         let mods = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.system_api.get_mods()
         })) {
             Ok(mods) => mods,
             Err(e) => {
-                tracing::error!("Panic in get_mods: {:?}", e);
+                //tracing::error!("Panic in get_mods: {:?}", e);
                 return Err(rquickjs::Error::Exception);
             }
         };
 
-        tracing::debug!("SystemJS::get_mods got {} mods", mods.len());
+        //tracing::debug!("SystemJS::get_mods got {} mods", mods.len());
 
         let array = Array::new(ctx.clone())?;
 
@@ -533,6 +533,7 @@ impl SystemJS {
             obj.set("priority", mod_info.priority)?;
             obj.set("bootstrapped", mod_info.bootstrapped)?;
             obj.set("loaded", mod_info.loaded)?;
+            obj.set("exists", mod_info.exists)?;
             obj.set("download_url", mod_info.download_url.as_deref())?;
             array.set(idx, obj)?;
         }

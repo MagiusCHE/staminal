@@ -17,6 +17,7 @@ export class Manager {
     async ensure_mods() {
         console.log("Ensuring mods...");
         const mods = system.get_mods();
+        // Filter mods that are not loaded yet
         const toload = mods.filter(mod => !mod.loaded);
 
         if (toload.length === 0) {
@@ -24,15 +25,32 @@ export class Manager {
             return;
         }
 
-        console.log(`${toload.length} mod(s) need to be downloaded:`, toload.map(m => m.id).join(", "));
+        // Separate mods that need download vs just attach
+        const toDownload = toload.filter(mod => !mod.exists);
+        const toAttach = toload.filter(mod => mod.exists);
+
+        if (toDownload.length > 0) {
+            console.log(`${toDownload.length} mod(s) need to be downloaded:`, toDownload.map(m => m.id).join(", "));
+        }
+        if (toAttach.length > 0) {
+            console.log(`${toAttach.length} mod(s) need to be attached:`, toAttach.map(m => m.id).join(", "));
+        }
 
         let error_occurred = undefined;
         for (const mod of toload) {
-            console.log(`Downloading mod: ${mod.id}...`);
-            this.download_install_mod(mod).then(() => toload.splice(toload.indexOf(mod), 1)).catch((e) => {
-                console.error(`Failed to download mod "${mod.id}":`, e);
-                error_occurred = locale.get_with_args("mod-download-failed", { mod_id: mod.id });
-            });
+            if (!mod.exists) {
+                console.log(`Downloading mod: ${mod.id}...`);
+                this.download_install_mod(mod).then(() => toload.splice(toload.indexOf(mod), 1)).catch((e) => {
+                    console.error(`Failed to download mod "${mod.id}":`, e);
+                    error_occurred = locale.get_with_args("mod-download-failed", { mod_id: mod.id });
+                });
+            } else {
+                console.log(`Attaching mod: ${mod.id}...`);
+                system.attach_mod(mod.id).then(() => toload.splice(toload.indexOf(mod), 1)).catch((e) => {
+                    console.error(`Failed to attach mod "${mod.id}":`, e);
+                    error_occurred = locale.get_with_args("mod-attach-failed", { mod_id: mod.id });
+                });
+            }
             if (error_occurred) {
                 break;
             }
@@ -42,7 +60,7 @@ export class Manager {
         }
 
         if (error_occurred) {
-            // TOOD: Show error in UI
+            // TODO: Show error in UI
             await this.exit_with_error(error_occurred);
         }
     }
