@@ -34,7 +34,7 @@ use crate::api::{AppApi, ConsoleApi, LocaleApi, NetworkApi, RequestUriProtocol, 
 /// JavaScript glue code - embedded at compile time from src/adapters/js/glue/*.js
 /// This code sets up console, error handlers, and other runtime utilities.
 const JS_GLUE_CODE: &str = include_str!("glue/main.js");
-use rquickjs::{Array, Ctx, Function, JsLifetime, Object, class::Trace};
+use rquickjs::{Array, Ctx, Function, JsLifetime, Object, Value, class::Trace, function::{Opt, Rest}};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -542,14 +542,14 @@ impl SystemJS {
         Ok(array)
     }
 
-    /// Register an event handler
+    /// Register an event handler for a system event (number) or custom event (string)
     ///
     /// # Arguments
-    /// * `event` - The event type (SystemEvents enum value)
+    /// * `event` - Either a SystemEvents enum value (number) or a custom event name (string)
     /// * `handler` - The callback function to invoke
     /// * `priority` - Handler priority (lower numbers execute first)
-    /// * `protocol` - Protocol filter string for RequestUri ("stam://", "http://", or "" for all)
-    /// * `route` - Route prefix filter for RequestUri
+    /// * `protocol` - (Optional) Protocol filter string for RequestUri ("stam://", "http://", or "" for all)
+    /// * `route` - (Optional) Route prefix filter for RequestUri
     ///
     /// # Returns
     /// Unique handler ID for later removal
@@ -557,11 +557,11 @@ impl SystemJS {
     pub fn register_event<'js>(
         &self,
         ctx: Ctx<'js>,
-        event: u32,
+        event: rquickjs::Value<'js>,
         handler: Function<'js>,
         priority: i32,
-        protocol_str: Option<String>,
-        route: Option<String>,
+        protocol_str: Opt<String>,
+        route: Opt<String>,
     ) -> rquickjs::Result<u64> {
         // Get the current mod_id from context globals
         let mod_id: String = ctx
@@ -569,56 +569,137 @@ impl SystemJS {
             .get("__MOD_ID__")
             .unwrap_or_else(|_| "unknown".to_string());
 
-        tracing::debug!(
-            "SystemJS::register_event called: mod={}, event={}, priority={}, protocol={:?}, route={:?}",
-            mod_id,
-            event,
-            priority,
-            protocol_str,
-            route
-        );
+        // Extract optional values
+        let protocol_str = protocol_str.0;
+        let route = route.0;
 
-        // Validate event type
-        let event_type = match SystemEvents::from_u32(event) {
-            Some(e) => e,
-            None => {
-                tracing::error!("Invalid event type: {}", event);
-                return Err(rquickjs::Error::Exception);
+        // Determine if this is a system event (number) or custom event (string)
+        if let Some(event_num) = event.as_int() {
+            // System event (number)
+            let event_u32 = event_num as u32;
+
+            tracing::debug!(
+                "SystemJS::register_event called: mod={}, event={}, priority={}, protocol={:?}, route={:?}",
+                mod_id,
+                event_u32,
+                priority,
+                protocol_str,
+                route
+            );
+
+            // Validate event type
+            let event_type = match SystemEvents::from_u32(event_u32) {
+                Some(e) => e,
+                None => {
+                    tracing::error!("Invalid event type: {}", event_u32);
+                    return Err(rquickjs::Error::Exception);
+                }
+            };
+
+            // Parse protocol filter
+            let protocol = match protocol_str.as_deref() {
+                Some("stam://") | Some("stam") => RequestUriProtocol::Stam,
+                Some("http://") | Some("https://") | Some("http") => RequestUriProtocol::Http,
+                Some("") | None => RequestUriProtocol::All,
+                Some(other) => {
+                    tracing::warn!("Unknown protocol filter '{}', using All", other);
+                    RequestUriProtocol::All
+                }
+            };
+
+            // Register the handler with the event dispatcher
+            let handler_id = self.system_api.event_dispatcher().register_handler(
+                event_type,
+                &mod_id,
+                priority,
+                protocol,
+                route.unwrap_or_default(),
+            );
+
+            // Store the handler function in the context's handler map
+            store_js_handler(&ctx, handler_id, handler)?;
+
+            tracing::info!(
+                "Registered event handler: mod={}, event={:?}, handler_id={}, priority={}",
+                mod_id,
+                event_type,
+                handler_id,
+                priority
+            );
+
+            Ok(handler_id)
+        } else if let Some(event_name) = event.as_string() {
+            // Custom event (string)
+            let event_name_str = event_name.to_string()?;
+
+            tracing::debug!(
+                "SystemJS::register_event (custom) called: mod={}, event_name={}, priority={}",
+                mod_id,
+                event_name_str,
+                priority
+            );
+
+            // Register the handler with the event dispatcher
+            let handler_id = self.system_api.event_dispatcher().register_custom_handler(
+                &event_name_str,
+                &mod_id,
+                priority,
+            );
+
+            // Store the handler function in the context's handler map
+            store_js_handler(&ctx, handler_id, handler)?;
+
+            tracing::info!(
+                "Registered custom event handler: mod={}, event_name={}, handler_id={}, priority={}",
+                mod_id,
+                event_name_str,
+                handler_id,
+                priority
+            );
+
+            Ok(handler_id)
+        } else {
+            tracing::error!("register_event: first argument must be a number (SystemEvents) or string (custom event name)");
+            Err(rquickjs::Error::Exception)
+        }
+    }
+
+    /// Send/dispatch a custom event to all registered handlers (async)
+    ///
+    /// This function triggers all handlers registered for the given event name,
+    /// passing the provided arguments to each handler.
+    ///
+    /// # Arguments
+    /// * `event_name` - The custom event name to dispatch
+    /// * `args` - Variadic arguments to pass to handlers (will be JSON-serialized)
+    ///
+    /// # Returns
+    /// Promise that resolves when all handlers have completed
+    #[qjs(rename = "send_event")]
+    pub async fn send_event<'js>(&self, ctx: Ctx<'js>, event_name: String, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
+        // Convert each JS value to JSON string
+        let json_args: Vec<String> = args.0.iter()
+            .map(|v| ctx.json_stringify(v.clone())
+                .ok()
+                .flatten()
+                .map(|s| s.to_string().unwrap_or_default())
+                .unwrap_or_else(|| "null".to_string()))
+            .collect();
+
+        tracing::debug!("SystemJS::send_event called: event_name={}, args_count={}", event_name, json_args.len());
+
+        let result = self.system_api.event_dispatcher().request_send_event(event_name.clone(), json_args).await;
+
+        match result {
+            Ok(()) => {
+                tracing::debug!("Event '{}' dispatched successfully", event_name);
+                Ok(())
             }
-        };
-
-        // Parse protocol filter
-        let protocol = match protocol_str.as_deref() {
-            Some("stam://") | Some("stam") => RequestUriProtocol::Stam,
-            Some("http://") | Some("https://") | Some("http") => RequestUriProtocol::Http,
-            Some("") | None => RequestUriProtocol::All,
-            Some(other) => {
-                tracing::warn!("Unknown protocol filter '{}', using All", other);
-                RequestUriProtocol::All
+            Err(e) => {
+                tracing::error!("Failed to dispatch event '{}': {}", event_name, e);
+                Err(rquickjs::Error::Exception)
             }
-        };
-
-        // Register the handler with the event dispatcher
-        let handler_id = self.system_api.event_dispatcher().register_handler(
-            event_type,
-            &mod_id,
-            priority,
-            protocol,
-            route.unwrap_or_default(),
-        );
-
-        // Store the handler function in the context's handler map
-        store_js_handler(&ctx, handler_id, handler)?;
-
-        tracing::info!(
-            "Registered event handler: mod={}, event={:?}, handler_id={}, priority={}",
-            mod_id,
-            event_type,
-            handler_id,
-            priority
-        );
-
-        Ok(handler_id)
+        }
     }
 
     /// Unregister an event handler

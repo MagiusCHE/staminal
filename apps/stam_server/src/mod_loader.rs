@@ -206,6 +206,7 @@ fn initialize_game_mods(
             // Register mod info with the system API
             // Server loads all mods immediately, so loaded: true
             // download_url is None on server (mods are already local)
+            // exists: true on server (all mods are local)
             js_adapter.register_mod_info(ModInfo {
                 id: mod_id.clone(),
                 version: manifest.version.clone(),
@@ -215,6 +216,7 @@ fn initialize_game_mods(
                 priority: manifest.priority,
                 bootstrapped: false,
                 loaded: true,
+                exists: true,
                 download_url: None,
             });
 

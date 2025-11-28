@@ -63,6 +63,9 @@ export class Manager {
             // TODO: Show error in UI
             await this.exit_with_error(error_occurred);
         }
+
+        // Now start the game!
+        system.send_event("AppStart");
     }
 
     async exit_with_error(message) {

@@ -72,6 +72,25 @@ pub trait RuntimeAdapter {
         mod_id: &str,
         function_name: &str,
     ) -> Result<ModReturnValue, Box<dyn std::error::Error>>;
+
+    /// Call an event handler by its handler ID
+    ///
+    /// This is used to invoke handlers registered via `system.register_custom_event`.
+    /// The handler function was stored in the runtime's context with the handler_id as key.
+    ///
+    /// # Arguments
+    /// * `handler_id` - The unique handler ID returned from registration
+    /// * `event_name` - The name of the event being dispatched
+    /// * `args` - JSON-serialized arguments to pass to the handler
+    ///
+    /// # Returns
+    /// Ok(()) if the handler was called successfully, Err otherwise
+    fn call_event_handler(
+        &mut self,
+        handler_id: u64,
+        event_name: &str,
+        args: &[String],
+    ) -> Result<(), Box<dyn std::error::Error>>;
 }
 
 /// Manager for all mod runtimes
@@ -187,6 +206,29 @@ impl RuntimeManager {
     /// Get list of all loaded mods
     pub fn loaded_mods(&self) -> Vec<&str> {
         self.mod_to_runtime.keys().map(|s| s.as_str()).collect()
+    }
+
+    /// Call an event handler by its handler ID
+    ///
+    /// This delegates to the appropriate runtime adapter. Currently assumes JavaScript
+    /// runtime since that's where event handlers are registered.
+    ///
+    /// # Arguments
+    /// * `handler_id` - The unique handler ID returned from registration
+    /// * `event_name` - The name of the event being dispatched
+    /// * `args` - JSON-serialized arguments to pass to the handler
+    pub fn call_event_handler(
+        &mut self,
+        handler_id: u64,
+        event_name: &str,
+        args: &[String],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Event handlers are currently only supported in JavaScript runtime
+        // Get the JavaScript runtime adapter
+        let runtime = self.runtimes.get_mut(&RuntimeType::JavaScript)
+            .ok_or_else(|| "JavaScript runtime not available for event handlers")?;
+
+        runtime.call_event_handler(handler_id, event_name, args)
     }
 }
 

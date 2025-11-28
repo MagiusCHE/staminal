@@ -8,9 +8,18 @@
 //! - **Registration**: Mods register handlers during `onAttach()`.
 //! - **Persistence**: Registrations persist until application close or `onDetach()`.
 //! - **Dispatch**: Handlers are executed sequentially, respecting priority (lower first).
+//!
+//! # Event Types
+//!
+//! Events can be either:
+//! - **System events**: Predefined events like `RequestUri` (represented as enum)
+//! - **Custom events**: User-defined events like `"AppStart"` (represented as strings)
+//!
+//! Both use the same registration and dispatch mechanism through `EventKey`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use tokio::sync::{mpsc, oneshot};
 
 /// System events that mods can register handlers for
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -34,6 +43,90 @@ impl SystemEvents {
     pub fn to_u32(self) -> u32 {
         self as u32
     }
+
+    /// Convert to string key for unified event handling
+    pub fn to_key(&self) -> String {
+        match self {
+            SystemEvents::RequestUri => "system:RequestUri".to_string(),
+        }
+    }
+
+    /// Try to parse from a string key
+    pub fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "system:RequestUri" => Some(SystemEvents::RequestUri),
+            _ => None,
+        }
+    }
+}
+
+/// Unified event key that can be either a system event or a custom event name
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum EventKey {
+    /// System event (predefined)
+    System(SystemEvents),
+    /// Custom event (user-defined string)
+    Custom(String),
+}
+
+impl EventKey {
+    /// Create a key from a system event
+    pub fn system(event: SystemEvents) -> Self {
+        EventKey::System(event)
+    }
+
+    /// Create a key from a custom event name
+    pub fn custom(name: impl Into<String>) -> Self {
+        EventKey::Custom(name.into())
+    }
+
+    /// Convert to a string representation for internal storage
+    pub fn to_string_key(&self) -> String {
+        match self {
+            EventKey::System(event) => event.to_key(),
+            EventKey::Custom(name) => format!("custom:{}", name),
+        }
+    }
+
+    /// Parse from JavaScript: either a u32 (system event) or a string (custom event)
+    pub fn from_js_value(value: u32, string_value: Option<&str>) -> Option<Self> {
+        // If value is 0 and we have a string, it's a custom event
+        if value == 0 {
+            if let Some(name) = string_value {
+                return Some(EventKey::Custom(name.to_string()));
+            }
+            return None;
+        }
+        // Otherwise try to parse as system event
+        SystemEvents::from_u32(value).map(EventKey::System)
+    }
+
+    /// Check if this is a custom event
+    pub fn is_custom(&self) -> bool {
+        matches!(self, EventKey::Custom(_))
+    }
+
+    /// Get the custom event name if this is a custom event
+    pub fn custom_name(&self) -> Option<&str> {
+        match self {
+            EventKey::Custom(name) => Some(name),
+            EventKey::System(_) => None,
+        }
+    }
+}
+
+/// Request to send/dispatch an event from JavaScript
+///
+/// This is used by `system.send_event(event_name, ...args)` to trigger
+/// handlers registered for custom events.
+#[derive(Debug)]
+pub struct SendEventRequest {
+    /// The event name to dispatch
+    pub event_name: String,
+    /// Arguments to pass to handlers (JSON-serialized)
+    pub args: Vec<String>,
+    /// Channel to send the result back to the caller
+    pub response_tx: oneshot::Sender<Result<(), String>>,
 }
 
 /// Protocol filter for RequestUri events
@@ -189,25 +282,35 @@ pub struct EventHandler {
 /// Event dispatcher that manages handler registration and execution
 #[derive(Clone)]
 pub struct EventDispatcher {
-    /// Handlers organized by event type
-    handlers: Arc<RwLock<HashMap<SystemEvents, Vec<EventHandler>>>>,
+    /// Handlers organized by event key (string representation)
+    /// Uses string keys to support both SystemEvents and custom events
+    handlers: Arc<RwLock<HashMap<String, Vec<EventHandler>>>>,
     /// Counter for generating unique handler IDs
     next_handler_id: Arc<RwLock<u64>>,
+    /// Channel sender for send_event requests (JS -> main loop)
+    send_event_tx: Arc<RwLock<Option<mpsc::Sender<SendEventRequest>>>>,
+    /// Channel receiver for send_event requests (main loop)
+    send_event_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<SendEventRequest>>>>,
 }
 
 impl EventDispatcher {
     /// Create a new EventDispatcher
     pub fn new() -> Self {
+        // Create mpsc channel for send_event requests (buffered with capacity 16)
+        let (tx, rx) = mpsc::channel::<SendEventRequest>(16);
+
         Self {
             handlers: Arc::new(RwLock::new(HashMap::new())),
             next_handler_id: Arc::new(RwLock::new(1)),
+            send_event_tx: Arc::new(RwLock::new(Some(tx))),
+            send_event_rx: Arc::new(tokio::sync::Mutex::new(Some(rx))),
         }
     }
 
-    /// Register an event handler
+    /// Register an event handler for a system event
     ///
     /// # Arguments
-    /// * `event` - The event type to handle
+    /// * `event` - The system event type to handle
     /// * `mod_id` - ID of the registering mod
     /// * `priority` - Handler priority (lower executes first)
     /// * `protocol` - Protocol filter (for RequestUri)
@@ -218,6 +321,48 @@ impl EventDispatcher {
     pub fn register_handler(
         &self,
         event: SystemEvents,
+        mod_id: impl Into<String>,
+        priority: i32,
+        protocol: RequestUriProtocol,
+        route: impl Into<String>,
+    ) -> u64 {
+        self.register_handler_for_key(
+            EventKey::System(event),
+            mod_id,
+            priority,
+            protocol,
+            route,
+        )
+    }
+
+    /// Register an event handler for a custom event
+    ///
+    /// # Arguments
+    /// * `event_name` - The custom event name
+    /// * `mod_id` - ID of the registering mod
+    /// * `priority` - Handler priority (lower executes first)
+    ///
+    /// # Returns
+    /// Unique handler ID for later removal
+    pub fn register_custom_handler(
+        &self,
+        event_name: impl Into<String>,
+        mod_id: impl Into<String>,
+        priority: i32,
+    ) -> u64 {
+        self.register_handler_for_key(
+            EventKey::Custom(event_name.into()),
+            mod_id,
+            priority,
+            RequestUriProtocol::All,
+            "",
+        )
+    }
+
+    /// Register an event handler for any event key
+    fn register_handler_for_key(
+        &self,
+        event_key: EventKey,
         mod_id: impl Into<String>,
         priority: i32,
         protocol: RequestUriProtocol,
@@ -238,8 +383,9 @@ impl EventDispatcher {
             handler_id,
         };
 
+        let key = event_key.to_string_key();
         let mut handlers = self.handlers.write().unwrap();
-        let event_handlers = handlers.entry(event).or_insert_with(Vec::new);
+        let event_handlers = handlers.entry(key).or_insert_with(Vec::new);
         event_handlers.push(handler);
 
         // Sort by priority (lower first)
@@ -277,9 +423,10 @@ impl EventDispatcher {
     pub fn get_handlers_for_uri_request(&self, uri: &str) -> Vec<EventHandler> {
         let handlers = self.handlers.read().unwrap();
         let path = extract_uri_path(uri);
+        let key = EventKey::System(SystemEvents::RequestUri).to_string_key();
 
         handlers
-            .get(&SystemEvents::RequestUri)
+            .get(&key)
             .map(|event_handlers| {
                 event_handlers
                     .iter()
@@ -300,10 +447,68 @@ impl EventDispatcher {
             .unwrap_or_default()
     }
 
-    /// Get the number of registered handlers for an event type
+    /// Get handlers for a custom event by name
+    ///
+    /// Returns all handlers registered for the given custom event name,
+    /// sorted by priority.
+    pub fn get_handlers_for_custom_event(&self, event_name: &str) -> Vec<EventHandler> {
+        let handlers = self.handlers.read().unwrap();
+        let key = EventKey::Custom(event_name.to_string()).to_string_key();
+
+        handlers
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Get the number of registered handlers for a system event type
     pub fn handler_count(&self, event: SystemEvents) -> usize {
         let handlers = self.handlers.read().unwrap();
-        handlers.get(&event).map(|h| h.len()).unwrap_or(0)
+        let key = EventKey::System(event).to_string_key();
+        handlers.get(&key).map(|h| h.len()).unwrap_or(0)
+    }
+
+    /// Get the number of registered handlers for a custom event
+    pub fn custom_handler_count(&self, event_name: &str) -> usize {
+        let handlers = self.handlers.read().unwrap();
+        let key = EventKey::Custom(event_name.to_string()).to_string_key();
+        handlers.get(&key).map(|h| h.len()).unwrap_or(0)
+    }
+
+    /// Send a request to dispatch a custom event and wait for completion
+    ///
+    /// This is called by the JS binding `system.send_event(event_name, ...args)`.
+    /// The request is sent to the main loop which will process it and respond.
+    pub async fn request_send_event(&self, event_name: String, args: Vec<String>) -> Result<(), String> {
+        let (response_tx, response_rx) = oneshot::channel();
+
+        let request = SendEventRequest {
+            event_name,
+            args,
+            response_tx,
+        };
+
+        // Get the sender
+        let tx = {
+            let guard = self.send_event_tx.read().unwrap();
+            guard.clone()
+        };
+
+        let tx = tx.ok_or_else(|| "Send event channel not available".to_string())?;
+
+        // Send the request
+        tx.send(request).await.map_err(|_| "Failed to send event request".to_string())?;
+
+        // Wait for the response
+        response_rx.await.map_err(|_| "Send event request was cancelled".to_string())?
+    }
+
+    /// Take the send_event request receiver (can only be called once)
+    ///
+    /// This is used by the main loop to receive and process send_event requests.
+    pub async fn take_send_event_receiver(&self) -> Option<mpsc::Receiver<SendEventRequest>> {
+        let mut guard = self.send_event_rx.lock().await;
+        guard.take()
     }
 }
 

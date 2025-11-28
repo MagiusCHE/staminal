@@ -12,7 +12,7 @@ pub mod process;
 pub mod system;
 
 pub use console::ConsoleApi;
-pub use events::{EventDispatcher, EventHandler, SystemEvents, RequestUriProtocol, RequestUri, UriResponse};
+pub use events::{EventDispatcher, EventHandler, EventKey, SystemEvents, RequestUriProtocol, RequestUri, UriResponse, SendEventRequest};
 pub use locale::LocaleApi;
 pub use network::{NetworkApi, NetworkConfig, DownloadResponse, parse_stam_uri, sanitize_uri};
 pub use process::{ProcessApi, AppApi};

@@ -1145,6 +1145,109 @@ impl JsRuntimeAdapter {
         result.map_err(|e| -> Box<dyn std::error::Error> { e.into() })
     }
 
+    /// Call an event handler asynchronously
+    ///
+    /// This method finds the handler by its ID and calls it with the event name and arguments.
+    /// The handler function was stored in the context's handler map during registration.
+    ///
+    /// # Arguments
+    /// * `handler_id` - The unique handler ID returned from registration
+    /// * `event_name` - The name of the event being dispatched
+    /// * `args` - JSON-serialized arguments to pass to the handler
+    pub async fn call_event_handler_async(
+        &self,
+        handler_id: u64,
+        event_name: &str,
+        args: &[String],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        debug!("Calling event handler {} for event '{}'", handler_id, event_name);
+
+        // We need to find which mod context has this handler
+        // For now, iterate through all loaded mods (could be optimized with a handler->mod map)
+        for (mod_id, loaded_mod) in &self.loaded_mods {
+            let event_name_owned = event_name.to_string();
+            let args_owned: Vec<String> = args.to_vec();
+
+            let result: Result<bool, String> = loaded_mod
+                .context
+                .with(|ctx| {
+                    // Try to get the handler function from this context
+                    match bindings::get_js_handler(&ctx, handler_id) {
+                        Ok(Some(func)) => {
+                            // Found the handler! Call it with event_name and args
+
+                            // Convert args to JavaScript values (parse JSON strings)
+                            let js_args = rquickjs::Array::new(ctx.clone())
+                                .map_err(|e| format!("Failed to create args array: {:?}", e))?;
+
+                            for (i, arg) in args_owned.iter().enumerate() {
+                                // Try to parse as JSON, otherwise use as string
+                                let js_value: Value = ctx.json_parse(arg.clone())
+                                    .unwrap_or_else(|_| {
+                                        // If JSON parse fails, use as plain string
+                                        rquickjs::String::from_str(ctx.clone(), arg)
+                                            .map(|s| s.into())
+                                            .unwrap_or(Value::new_undefined(ctx.clone()))
+                                    });
+                                js_args.set(i, js_value)
+                                    .map_err(|e| format!("Failed to set arg {}: {:?}", i, e))?;
+                            }
+
+                            // Call the handler function with event_name and args array
+                            let call_result = func.call::<(String, rquickjs::Array), Value>((event_name_owned.clone(), js_args));
+
+                            match call_result {
+                                Ok(result) => {
+                                    // If result is a Promise, resolve it
+                                    if let Some(promise) = result.into_promise() {
+                                        if let Err(e) = promise.finish::<()>() {
+                                            let error_msg = Self::format_js_error(&ctx, &e);
+                                            error!("Event handler error: {}", error_msg);
+                                            return Err(format!("Event handler error: {}", error_msg));
+                                        }
+                                    }
+                                    Ok(true) // Found and called successfully
+                                }
+                                Err(e) => {
+                                    let error_msg = Self::format_js_error(&ctx, &e);
+                                    error!("Event handler call error: {}", error_msg);
+                                    Err(format!("Event handler call error: {}", error_msg))
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            // Handler not found in this context, try next mod
+                            Ok(false)
+                        }
+                        Err(e) => {
+                            // Error getting handler, try next mod
+                            debug!("Error getting handler {} from mod '{}': {:?}", handler_id, mod_id, e);
+                            Ok(false)
+                        }
+                    }
+                })
+                .await;
+
+            match result {
+                Ok(true) => {
+                    // Handler was found and called successfully
+                    return Ok(());
+                }
+                Ok(false) => {
+                    // Handler not in this mod, continue searching
+                    continue;
+                }
+                Err(e) => {
+                    // Handler found but execution failed
+                    return Err(e.into());
+                }
+            }
+        }
+
+        // Handler not found in any mod
+        Err(format!("Event handler {} not found in any loaded mod", handler_id).into())
+    }
+
     /// Cleanup temp files created during script execution
     ///
     /// This should be called when the runtime is shutting down to ensure
@@ -1196,6 +1299,18 @@ impl RuntimeAdapter for JsRuntimeAdapter {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
                 .block_on(self.call_mod_function_with_return_async(mod_id, function_name))
+        })
+    }
+
+    fn call_event_handler(
+        &mut self,
+        handler_id: u64,
+        event_name: &str,
+        args: &[String],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.call_event_handler_async(handler_id, event_name, args))
         })
     }
 }

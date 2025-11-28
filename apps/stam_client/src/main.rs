@@ -990,7 +990,14 @@ async fn connect_to_game_server(
             None
         };
 
-        // Main event loop - handles JS events, attach requests, and connection
+        // Take the send_event request receiver from EventDispatcher
+        let mut send_event_rx = if let Some(ref system_api) = system_api_opt {
+            system_api.event_dispatcher().take_send_event_receiver().await
+        } else {
+            None
+        };
+
+        // Main event loop - handles JS events, attach requests, send_event, and connection
         loop {
             tokio::select! {
                 biased;
@@ -1016,6 +1023,27 @@ async fn connect_to_game_server(
                             &mut runtime_manager_opt,
                             &system_api_opt,
                             &game_root_opt,
+                        ).await;
+                        // Send response back to JS
+                        let _ = request.response_tx.send(result);
+                    }
+                }
+
+                // Handle send_event requests from JavaScript
+                request = async {
+                    if let Some(ref mut rx) = send_event_rx {
+                        rx.recv().await
+                    } else {
+                        // No receiver, wait forever
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Some(request) = request {
+                        let result = handle_send_event_request(
+                            &request.event_name,
+                            &request.args,
+                            &mut runtime_manager_opt,
+                            &system_api_opt,
                         ).await;
                         // Send response back to JS
                         let _ = request.response_tx.send(result);
@@ -1127,6 +1155,58 @@ async fn handle_attach_mod_request(
     system_api.set_loaded(mod_id, true);
 
     info!("Mod '{}' attached successfully", mod_id);
+    Ok(())
+}
+
+/// Handle a request to dispatch a custom event to all registered handlers
+///
+/// This is called when JavaScript code calls `system.send_event(event_name, ...args)`.
+/// It finds all handlers registered for the event and calls them in priority order.
+async fn handle_send_event_request(
+    event_name: &str,
+    args: &[String],
+    runtime_manager_opt: &mut Option<ModRuntimeManager>,
+    system_api_opt: &Option<stam_mod_runtimes::api::SystemApi>,
+) -> Result<(), String> {
+    info!("Dispatching event '{}' with {} args", event_name, args.len());
+
+    let runtime_manager = runtime_manager_opt.as_mut()
+        .ok_or_else(|| "Runtime manager not available".to_string())?;
+
+    let system_api = system_api_opt.as_ref()
+        .ok_or_else(|| "System API not available".to_string())?;
+
+    // Get all handlers for this event
+    let handlers = system_api.event_dispatcher().get_handlers_for_custom_event(event_name);
+
+    if handlers.is_empty() {
+        debug!("No handlers registered for event '{}'", event_name);
+        return Ok(());
+    }
+
+    info!("Found {} handler(s) for event '{}'", handlers.len(), event_name);
+
+    // Call each handler in priority order
+    for handler in &handlers {
+        debug!("Calling handler {} (mod={}, priority={})",
+            handler.handler_id, handler.mod_id, handler.priority);
+
+        // Call the handler function with event name and args
+        // The handler was stored in the JS context with the handler_id as key
+        let call_result = runtime_manager.call_event_handler(
+            handler.handler_id,
+            event_name,
+            args,
+        );
+
+        if let Err(e) = call_result {
+            warn!("Handler {} (mod={}) failed for event '{}': {}",
+                handler.handler_id, handler.mod_id, event_name, e);
+            // Continue to next handler - don't fail the whole event dispatch
+        }
+    }
+
+    info!("Event '{}' dispatched to {} handler(s)", event_name, handlers.len());
     Ok(())
 }
 
