@@ -3,13 +3,14 @@
  * Sync Client Mods Script
  *
  * This script synchronizes client mods from a source directory to a destination directory.
- * It reads mod manifests and only copies mods that have "execute_on" set to "client" or
- * an array containing "client".
+ * It recursively searches for manifest.json files and copies mods that have "execute_on"
+ * set to "client" or an array containing "client".
  *
  * Usage: node sync-client-mods.mjs <input-dir> <output-dir>
  *
+ * - Searches recursively for all manifest.json files in input-dir
+ * - For each client mod found, copies the manifest's directory to output-dir/<mod-id>/
  * - Mods in output that don't exist in input (client mods only) will be deleted
- * - Only client mods are processed (based on manifest.json execute_on field)
  */
 
 import fs from 'fs';
@@ -36,35 +37,40 @@ function isClientMod(manifest) {
 }
 
 /**
- * Find and read manifest.json from a mod directory
- * Checks both root and client/ subdirectory
- * @param {string} modDir - Path to the mod directory
- * @returns {object|null} - Parsed manifest or null if not found
+ * Recursively find all manifest.json files in a directory
+ * @param {string} dir - Directory to search
+ * @param {Array} results - Array to accumulate results
+ * @returns {Array<{manifestPath: string, manifest: object, modDir: string}>}
  */
-function readModManifest(modDir) {
-    // Check client/ subdirectory first
-    const clientManifestPath = path.join(modDir, 'client', 'manifest.json');
-    if (fs.existsSync(clientManifestPath)) {
-        try {
-            return JSON.parse(fs.readFileSync(clientManifestPath, 'utf8'));
-        } catch (e) {
-            console.error(`  Error reading ${clientManifestPath}: ${e.message}`);
-            return null;
+function findManifests(dir, results = []) {
+    if (!fs.existsSync(dir)) {
+        return results;
+    }
+
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+
+    for (const entry of entries) {
+        const fullPath = path.join(dir, entry.name);
+
+        if (entry.isDirectory()) {
+            // Recurse into subdirectories
+            findManifests(fullPath, results);
+        } else if (entry.name === 'manifest.json') {
+            // Found a manifest.json
+            try {
+                const manifest = JSON.parse(fs.readFileSync(fullPath, 'utf8'));
+                results.push({
+                    manifestPath: fullPath,
+                    manifest,
+                    modDir: dir // The directory containing the manifest
+                });
+            } catch (e) {
+                console.error(`  Error reading ${fullPath}: ${e.message}`);
+            }
         }
     }
 
-    // Check root manifest
-    const rootManifestPath = path.join(modDir, 'manifest.json');
-    if (fs.existsSync(rootManifestPath)) {
-        try {
-            return JSON.parse(fs.readFileSync(rootManifestPath, 'utf8'));
-        } catch (e) {
-            console.error(`  Error reading ${rootManifestPath}: ${e.message}`);
-            return null;
-        }
-    }
-
-    return null;
+    return results;
 }
 
 /**
@@ -100,31 +106,26 @@ function deleteDirRecursive(dirPath) {
 }
 
 /**
- * Get list of client mod IDs from a directory
+ * Get list of existing mod directories in output
  * @param {string} modsDir - Directory containing mods
- * @returns {Set<string>} - Set of client mod IDs
+ * @returns {Set<string>} - Set of mod directory names
  */
-function getClientModIds(modsDir) {
-    const clientMods = new Set();
+function getExistingModIds(modsDir) {
+    const modIds = new Set();
 
     if (!fs.existsSync(modsDir)) {
-        return clientMods;
+        return modIds;
     }
 
     const entries = fs.readdirSync(modsDir, { withFileTypes: true });
 
     for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-
-        const modDir = path.join(modsDir, entry.name);
-        const manifest = readModManifest(modDir);
-
-        if (manifest && isClientMod(manifest)) {
-            clientMods.add(entry.name);
+        if (entry.isDirectory()) {
+            modIds.add(entry.name);
         }
     }
 
-    return clientMods;
+    return modIds;
 }
 
 /**
@@ -144,24 +145,50 @@ function syncClientMods(inputDir, outputDir) {
         process.exit(1);
     }
 
-    // Create output directory if it doesn't exist
-    fs.mkdirSync(outputDir, { recursive: true });
-
-    // Get client mods from input
-    const inputClientMods = getClientModIds(inputDir);
-    console.log(`Found ${inputClientMods.size} client mod(s) in input:`);
-    for (const modId of inputClientMods) {
+    // Get existing mods in output directory FIRST
+    const existingModIds = getExistingModIds(outputDir);
+    if (existingModIds.size === 0) {
+        console.log(`No existing mods in output directory. Nothing to sync.`);
+        return;
+    }
+    console.log(`Found ${existingModIds.size} existing mod(s) in output:`);
+    for (const modId of existingModIds) {
         console.log(`  - ${modId}`);
     }
     console.log();
 
-    // Get client mods from output (to know which ones to delete)
-    const outputClientMods = getClientModIds(outputDir);
+    // Find all manifest.json files recursively in input
+    console.log(`Searching for manifest.json files in input...`);
+    const allManifests = findManifests(inputDir);
 
-    // Delete client mods from output that are not in input
-    const modsToDelete = [...outputClientMods].filter(modId => !inputClientMods.has(modId));
+    // Filter to only client mods and build map
+    const clientModsMap = new Map();
+    for (const mod of allManifests) {
+        if (!isClientMod(mod.manifest)) continue;
+
+        const modId = mod.manifest.name;
+        if (!modId) continue;
+
+        clientModsMap.set(modId, mod);
+    }
+    console.log(`Found ${clientModsMap.size} client mod(s) in input`);
+    console.log();
+
+    // Process existing mods in output
+    const modsToUpdate = [];
+    const modsToDelete = [];
+
+    for (const modId of existingModIds) {
+        if (clientModsMap.has(modId)) {
+            modsToUpdate.push(modId);
+        } else {
+            modsToDelete.push(modId);
+        }
+    }
+
+    // Delete mods from output that are not in input anymore
     if (modsToDelete.length > 0) {
-        console.log(`Deleting ${modsToDelete.length} mod(s) not present in input:`);
+        console.log(`Deleting ${modsToDelete.length} mod(s) no longer in input:`);
         for (const modId of modsToDelete) {
             const modPath = path.join(outputDir, modId);
             console.log(`  - Deleting: ${modId}`);
@@ -170,20 +197,20 @@ function syncClientMods(inputDir, outputDir) {
         console.log();
     }
 
-    // Copy/update client mods from input to output
-    if (inputClientMods.size > 0) {
-        console.log(`Copying ${inputClientMods.size} client mod(s):`);
-        for (const modId of inputClientMods) {
-            const srcPath = path.join(inputDir, modId);
+    // Update existing mods from input
+    if (modsToUpdate.length > 0) {
+        console.log(`Updating ${modsToUpdate.length} mod(s):`);
+        for (const modId of modsToUpdate) {
+            const mod = clientModsMap.get(modId);
             const destPath = path.join(outputDir, modId);
 
-            console.log(`  - Copying: ${modId}`);
+            console.log(`  - Updating: ${modId} (from ${path.relative(inputDir, mod.modDir)})`);
 
             // Delete existing mod directory first (to ensure clean copy)
             deleteDirRecursive(destPath);
 
-            // Copy the mod
-            copyDirRecursive(srcPath, destPath);
+            // Copy the mod directory (the one containing manifest.json)
+            copyDirRecursive(mod.modDir, destPath);
         }
         console.log();
     }
@@ -198,7 +225,7 @@ if (args.length !== 2) {
     console.error('Usage: node sync-client-mods.mjs <input-dir> <output-dir>');
     console.error();
     console.error('Arguments:');
-    console.error('  input-dir   Source directory containing mods');
+    console.error('  input-dir   Source directory to search for mods (recursive)');
     console.error('  output-dir  Destination directory for client mods');
     process.exit(1);
 }

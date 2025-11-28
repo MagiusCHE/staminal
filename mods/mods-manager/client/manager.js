@@ -30,7 +30,7 @@ export class Manager {
         for (const mod of toload) {
             console.log(`Downloading mod: ${mod.id}...`);
             this.download_mod(mod).then(() => toload.splice(toload.indexOf(mod), 1)).catch((e) => {
-                console.error(`Failed to download mod ${mod.id}: ${e}`);
+                console.error(`Failed to download mod "${mod.id}":`,e);
                 error_occurred = locale.get_with_args("mod-download-failed", { mod_id: mod.id });
             });
             if (error_occurred) {
@@ -59,28 +59,21 @@ export class Manager {
         console.log(mod_info)
         console.log(`Downloading: ${uri}`);
 
-        try {
-            const response = await network.download(uri);
+        const response = await network.download(uri);
 
-            if (response.status !== 200) {
-                throw new Error(`Status ${response.status}`);
-            }
-
-            if (!response.buffer && !response.file_content) {
-                throw new Error("No data received");
-            }
-
-            // Use file_content if available (from response body), otherwise use buffer
-            const data = response.file_content || response.buffer;
-            console.log(`Downloaded ${mod_info.id}: ${data.length} bytes`);
-            console.log("Response is:", response);
-
-            // TODO: Save to disk and extract
-            // For now, just verify we got data
-            return data;
-        } catch (error) {
-            throw new Error(`Download failed: ${error.message || error}`);
+        if (response.status !== 200) {
+            throw new Error(`Status ${response.status}`);
         }
+
+        if (!response.temp_file_path) {
+            throw new Error("No data received");
+        }
+
+        console.log(`Downloaded ${mod_info.id} into %o`, response.temp_file_path);
+
+        // TODO: Save to disk and extract
+        // For now, just verify we got data
+        return;
     }
 
 

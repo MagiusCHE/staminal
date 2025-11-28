@@ -131,9 +131,11 @@ When developing features for the mod system (`stam_mod_runtimes`):
 5. **Lifecycle hooks**: `onAttach()` and `onBootstrap()` must be implementable in any language
 6. **Cross-mod communication**: Design inter-mod APIs that can work across different language runtimes
 7. **Avoid busy-loops in event loops**: When implementing event loops for any runtime, NEVER use patterns that poll continuously without yielding (e.g., `loop { check(); }` or `loop { runtime.idle().await; }`). Always use proper async primitives like `tokio::select!` with notification mechanisms (`tokio::sync::Notify`) to wait for events without consuming 100% CPU. This is critical for both client and server applications.
+8. **Glue code in external files**: All scripting glue code (JavaScript, Lua, C#, etc.) must be placed in separate files in a `glue/` subdirectory within each runtime adapter folder (e.g., `apps/shared/stam_mod_runtimes/src/adapters/js/glue/`). NEVER embed large blocks of script code as string literals in Rust files. The build.rs script concatenates these files at compile time for embedding.
 
 ### Logging Hygiene
 - Ensure ANSI color codes are disabled when logs are redirected to files or piped (respect TTY detection and `NO_COLOR`), so log files stay plain and readable with correct mod identifiers.
+- **Always check for TTY before using colors**: When implementing any logging or console output that uses colors (including in scripting runtimes), always verify that stdout/stderr is connected to a TTY. Never output ANSI escape codes to files or pipes.
 
 ### Script Files (CRITICAL)
 **NEVER modify script files (JavaScript, Lua, etc.) unless the user EXPLICITLY requests it.**

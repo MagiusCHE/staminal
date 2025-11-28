@@ -38,6 +38,10 @@ fn sha512_hash(input: &str) -> String {
 /// This function creates a new TCP connection to the server, performs
 /// the RequestUri protocol exchange, and returns the response.
 ///
+/// If `tmp_dir` is provided and the response contains file content, the content
+/// will be saved to a temp file and `temp_file_path` will be set in the response.
+/// The `file_content` field will be cleared to avoid memory duplication.
+///
 /// # Arguments
 /// * `uri` - The stam:// URI to request
 /// * `username` - Default username if not in URI
@@ -45,6 +49,7 @@ fn sha512_hash(input: &str) -> String {
 /// * `game_id` - The game ID for the request
 /// * `client_version` - Client version string
 /// * `default_server` - Default server address (host:port) to use if URI has no host
+/// * `tmp_dir` - Optional temp directory for saving file downloads
 async fn perform_stam_request(
     uri: &str,
     username: &str,
@@ -52,6 +57,7 @@ async fn perform_stam_request(
     game_id: &str,
     client_version: &str,
     default_server: &str,
+    tmp_dir: Option<&std::path::Path>,
 ) -> DownloadResponse {
     // Parse the URI to extract host:port
     let (mut host_port, path, uri_username, uri_password) = match parse_stam_uri(uri) {
@@ -63,6 +69,7 @@ async fn perform_stam_request(
                 buffer: None,
                 file_name: None,
                 file_content: None,
+                temp_file_path: None,
             };
         }
     };
@@ -95,6 +102,7 @@ async fn perform_stam_request(
                 buffer: None,
                 file_name: None,
                 file_content: None,
+                temp_file_path: None,
             };
         }
     };
@@ -111,6 +119,7 @@ async fn perform_stam_request(
                 buffer: None,
                 file_name: None,
                 file_content: None,
+                temp_file_path: None,
             };
         }
         Err(e) => {
@@ -120,6 +129,7 @@ async fn perform_stam_request(
                 buffer: None,
                 file_name: None,
                 file_content: None,
+                temp_file_path: None,
             };
         }
     }
@@ -141,21 +151,84 @@ async fn perform_stam_request(
             buffer: None,
             file_name: None,
             file_content: None,
+            temp_file_path: None,
         };
     }
 
     // Wait for UriResponse
     match stream.read_primal_message().await {
         Ok(PrimalMessage::UriResponse { status, buffer, file_name, file_size: _ }) => {
-            debug!("Received UriResponse: status={}, file_name={:?}", status, file_name);
+            debug!("Received UriResponse: status={}, file_name={:?}, buffer_len={:?}", status, file_name, buffer.as_ref().map(|b| b.len()));
             // If file_name is present, this is a file download -> put data in file_content only
             // Otherwise, it's a simple response -> put data in buffer only
             if file_name.is_some() {
-                DownloadResponse {
-                    status,
-                    buffer: None,
-                    file_name,
-                    file_content: buffer,
+                // If tmp_dir is provided, save file content to temp file
+                if let (Some(tmp_dir), Some(content)) = (tmp_dir, &buffer) {
+                    // Generate unique temp file name
+                    let timestamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis())
+                        .unwrap_or(0);
+                    let unique_id = std::process::id();
+
+                    let temp_file_name = if let Some(ref name) = file_name {
+                        // Preserve original extension
+                        let ext = std::path::Path::new(name)
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("tmp");
+                        format!("download_{}_{}.{}", timestamp, unique_id, ext)
+                    } else {
+                        format!("download_{}_{}.tmp", timestamp, unique_id)
+                    };
+
+                    let temp_path = tmp_dir.join(&temp_file_name);
+
+                    // Ensure tmp directory exists
+                    if !tmp_dir.exists() {
+                        if let Err(e) = std::fs::create_dir_all(tmp_dir) {
+                            error!("Failed to create temp directory: {}", e);
+                            return DownloadResponse {
+                                status,
+                                buffer: None,
+                                file_name,
+                                file_content: buffer,
+                                temp_file_path: None,
+                            };
+                        }
+                    }
+
+                    // Write to temp file
+                    match std::fs::write(&temp_path, content) {
+                        Ok(_) => {
+                            DownloadResponse {
+                                status,
+                                buffer: None,
+                                file_name,
+                                file_content: None, // Don't keep in memory
+                                temp_file_path: Some(temp_path.to_string_lossy().to_string()),
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to write temp file: {}", e);
+                            DownloadResponse {
+                                status,
+                                buffer: None,
+                                file_name,
+                                file_content: buffer,
+                                temp_file_path: None,
+                            }
+                        }
+                    }
+                } else {
+                    // No tmp_dir provided, return file_content as-is
+                    DownloadResponse {
+                        status,
+                        buffer: None,
+                        file_name,
+                        file_content: buffer,
+                        temp_file_path: None,
+                    }
                 }
             } else {
                 DownloadResponse {
@@ -163,6 +236,7 @@ async fn perform_stam_request(
                     buffer,
                     file_name: None,
                     file_content: None,
+                    temp_file_path: None,
                 }
             }
         }
@@ -173,6 +247,7 @@ async fn perform_stam_request(
                 buffer: None,
                 file_name: None,
                 file_content: None,
+                temp_file_path: None,
             }
         }
         Ok(msg) => {
@@ -182,6 +257,7 @@ async fn perform_stam_request(
                 buffer: None,
                 file_name: None,
                 file_content: None,
+                temp_file_path: None,
             }
         }
         Err(e) => {
@@ -191,6 +267,7 @@ async fn perform_stam_request(
                 buffer: None,
                 file_name: None,
                 file_content: None,
+                temp_file_path: None,
             }
         }
     }
@@ -406,7 +483,12 @@ async fn connect_to_game_server(
 
             if !required_bootstrap_mods.is_empty() {
                 // Get tmp directory for downloads (once, outside the loop)
-                let tmp_dir = app_paths.tmp_dir()?;
+                // Use game-specific tmp directory: data_dir/{game_id}/tmp
+                let tmp_dir = game_root.join("tmp");
+                if !tmp_dir.exists() {
+                    std::fs::create_dir_all(&tmp_dir)?;
+                    debug!("Created game tmp directory: {}", tmp_dir.display());
+                }
 
                 // Keep downloading until all dependencies are satisfied
                 let mut download_iteration = 0;
@@ -500,6 +582,7 @@ async fn connect_to_game_server(
                             game_id,
                             VERSION,
                             host_port,
+                            Some(&tmp_dir),
                         ).await;
 
                         if response.status != 200 {
@@ -511,16 +594,16 @@ async fn connect_to_game_server(
                             ).into());
                         }
 
-                        let file_content = response.file_content.ok_or_else(|| {
+                        // Get the temp file path (file was already saved by perform_stam_request)
+                        let zip_path = std::path::PathBuf::from(response.temp_file_path.ok_or_else(|| {
                             format!("Server returned empty content for mod '{}'", mod_info.mod_id)
-                        })?;
+                        })?);
 
-                        // Save ZIP to tmp directory
                         let zip_filename = response.file_name.unwrap_or_else(|| format!("{}.zip", mod_info.mod_id));
-                        let zip_path = tmp_dir.join(&zip_filename);
 
-                        std::fs::write(&zip_path, &file_content)?;
-                        info!("  Saved {} ({} bytes)", zip_filename, file_content.len());
+                        // Get file size for logging
+                        let file_size = std::fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0);
+                        info!("  Saved {} ({} bytes)", zip_filename, file_size);
 
                         // Extract ZIP to mods directory
                         let mod_target_dir = mods_dir.join(&mod_info.mod_id);
@@ -657,6 +740,8 @@ async fn connect_to_game_server(
                 let mut network_api = NetworkApi::new(network_config);
 
                 // Set the download callback that performs stam:// requests
+                // Note: We pass None for tmp_dir because the JS runtime's TempFileManager
+                // handles temp file creation after this callback returns
                 network_api.set_download_callback(Arc::new(move |uri: String| {
                     let username = network_username.clone();
                     let password_hash = network_password_hash.clone();
@@ -665,7 +750,7 @@ async fn connect_to_game_server(
                     let default_server = network_server.clone();
 
                     Box::pin(async move {
-                        perform_stam_request(&uri, &username, &password_hash, &game_id, &client_version, &default_server).await
+                        perform_stam_request(&uri, &username, &password_hash, &game_id, &client_version, &default_server, None).await
                     })
                 }));
                 js_adapter.set_network_api(network_api);

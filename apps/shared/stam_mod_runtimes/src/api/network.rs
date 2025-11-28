@@ -24,8 +24,10 @@ pub struct DownloadResponse {
     pub buffer: Option<Vec<u8>>,
     /// File name (if response is a file)
     pub file_name: Option<String>,
-    /// File content (if response is a file, may be chunked)
+    /// File content (internal use only - will be saved to temp file before exposing to JS)
     pub file_content: Option<Vec<u8>>,
+    /// Path to temp file containing the downloaded content (exposed to JS instead of file_content)
+    pub temp_file_path: Option<String>,
 }
 
 impl Default for DownloadResponse {
@@ -35,6 +37,7 @@ impl Default for DownloadResponse {
             buffer: None,
             file_name: None,
             file_content: None,
+            temp_file_path: None,
         }
     }
 }
@@ -117,6 +120,7 @@ impl NetworkApi {
                 buffer: None,
                 file_name: None,
                 file_content: None,
+                temp_file_path: None,
             }
         } else if uri.starts_with("http://") || uri.starts_with("https://") {
             // HTTP(S) not implemented yet
@@ -125,6 +129,7 @@ impl NetworkApi {
                 buffer: None,
                 file_name: None,
                 file_content: None,
+                temp_file_path: None,
             }
         } else {
             // Unknown protocol
@@ -133,6 +138,7 @@ impl NetworkApi {
                 buffer: None,
                 file_name: None,
                 file_content: None,
+                temp_file_path: None,
             }
         }
     }

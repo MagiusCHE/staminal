@@ -22,12 +22,24 @@
 //! but their entries remain in TIMER_ABORT_HANDLES until the task cleanup runs.
 //! This is acceptable because the Notify handles are small and will be cleaned up
 //! when the spawned task completes or is aborted.
+//!
+//! # JavaScript Glue Code
+//!
+//! The JavaScript glue code (console formatters, error handlers, etc.) is loaded from
+//! external .js files in the `glue/` directory. These files are concatenated at compile
+//! time by build.rs and embedded into the binary.
 
 use crate::api::{AppApi, ConsoleApi, LocaleApi, NetworkApi, RequestUriProtocol, SystemApi, SystemEvents, ModSide};
+
+/// JavaScript glue code - embedded at compile time from src/adapters/js/glue/*.js
+/// This code sets up console, error handlers, and other runtime utilities.
+const JS_GLUE_CODE: &str = include_str!("glue/main.js");
 use rquickjs::{Array, Ctx, Function, JsLifetime, Object, class::Trace};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::RwLock;
 use tokio::sync::Notify;
 
 /// Unique timer ID counter - globally atomic to ensure unique IDs across ALL runtimes
@@ -51,6 +63,119 @@ pub fn next_timer_id() -> u32 {
 /// from a different context than the one that created the timer.
 static TIMER_ABORT_HANDLES: std::sync::LazyLock<std::sync::Mutex<HashMap<u32, Arc<Notify>>>> =
     std::sync::LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Unique temp file ID counter for generating unique file names
+static NEXT_TEMP_FILE_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Temp file manager for tracking and cleaning up temporary files created during downloads
+///
+/// This manager tracks all temp files created by `network.download()` calls.
+/// Files are stored in `home_dir/tmp/` with unique names to avoid collisions.
+/// All tracked files are cleaned up when `cleanup()` is called.
+#[derive(Clone, Default)]
+pub struct TempFileManager {
+    /// List of temp file paths that need to be cleaned up
+    files: Arc<RwLock<Vec<PathBuf>>>,
+    /// Base temp directory path (home_dir/tmp)
+    temp_dir: Arc<RwLock<Option<PathBuf>>>,
+}
+
+impl TempFileManager {
+    /// Create a new TempFileManager
+    pub fn new() -> Self {
+        Self {
+            files: Arc::new(RwLock::new(Vec::new())),
+            temp_dir: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    /// Set the temp directory path (should be called with home_dir/tmp)
+    pub fn set_temp_dir(&self, path: PathBuf) {
+        let mut temp_dir = self.temp_dir.write().unwrap();
+        *temp_dir = Some(path);
+    }
+
+    /// Get the temp directory path
+    pub fn get_temp_dir(&self) -> Option<PathBuf> {
+        let temp_dir = self.temp_dir.read().unwrap();
+        temp_dir.clone()
+    }
+
+    /// Create a unique temp file and write data to it
+    ///
+    /// Returns the path to the created file, or an error message
+    pub fn create_temp_file(&self, data: &[u8], original_file_name: Option<&str>) -> Result<PathBuf, String> {
+        let temp_dir = self.get_temp_dir()
+            .ok_or_else(|| "Temp directory not configured".to_string())?;
+
+        // Ensure temp directory exists
+        if !temp_dir.exists() {
+            std::fs::create_dir_all(&temp_dir)
+                .map_err(|e| format!("Failed to create temp directory: {}", e))?;
+        }
+
+        // Generate unique file name
+        let unique_id = NEXT_TEMP_FILE_ID.fetch_add(1, Ordering::SeqCst);
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+
+        let file_name = if let Some(name) = original_file_name {
+            // Preserve original extension if possible
+            let ext = std::path::Path::new(name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("tmp");
+            format!("download_{}_{}.{}", timestamp, unique_id, ext)
+        } else {
+            format!("download_{}_{}.tmp", timestamp, unique_id)
+        };
+
+        let file_path = temp_dir.join(&file_name);
+
+        // Write data to file
+        std::fs::write(&file_path, data)
+            .map_err(|e| format!("Failed to write temp file: {}", e))?;
+
+        // Track the file for cleanup
+        let mut files = self.files.write().unwrap();
+        files.push(file_path.clone());
+
+        Ok(file_path)
+    }
+
+    /// Clean up all tracked temp files
+    ///
+    /// This removes all temp files that were created by this manager.
+    /// Errors are logged but don't stop the cleanup process.
+    pub fn cleanup(&self) {
+        let mut files = self.files.write().unwrap();
+
+        for file_path in files.drain(..) {
+            if file_path.exists() {
+                if let Err(e) = std::fs::remove_file(&file_path) {
+                    tracing::warn!("Failed to cleanup temp file {:?}: {}", file_path, e);
+                } else {
+                    tracing::debug!("Cleaned up temp file: {:?}", file_path);
+                }
+            }
+        }
+    }
+
+    /// Get the number of tracked temp files
+    pub fn file_count(&self) -> usize {
+        let files = self.files.read().unwrap();
+        files.len()
+    }
+}
+
+impl Drop for TempFileManager {
+    fn drop(&mut self) {
+        // Automatically cleanup when the manager is dropped
+        self.cleanup();
+    }
+}
 
 /// Name of the global JavaScript object used to store event handlers
 const JS_EVENT_HANDLERS_MAP: &str = "__eventHandlers";
@@ -171,57 +296,9 @@ pub fn setup_console_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
     // Register native console object
     globals.set("__console_native", console_native)?;
 
-    // Create wrapper console object in JavaScript that handles any value types
-    // The wrapper converts arguments to strings using JSON.stringify for objects
-    ctx.eval::<(), _>(
-        r#"
-        const __formatArg = (arg) => {
-            if (arg === undefined) return 'undefined';
-            if (arg === null) return 'null';
-            if (typeof arg === 'string') return arg;
-            if (typeof arg === 'number' || typeof arg === 'boolean') return String(arg);
-            if (typeof arg === 'function') return '[Function]';
-            try {
-                return JSON.stringify(arg,null,2);
-            } catch (e) {
-                return '[object]';
-            }
-        };
-        const __formatArgs = (...args) => args.map(__formatArg).join(' ');
-
-        globalThis.console = {
-            log: (...args) => __console_native._log(__formatArgs(...args)),
-            error: (...args) => __console_native._error(__formatArgs(...args)),
-            warn: (...args) => __console_native._warn(__formatArgs(...args)),
-            info: (...args) => __console_native._info(__formatArgs(...args)),
-            debug: (...args) => __console_native._debug(__formatArgs(...args)),
-        };
-
-        // Setup global error handlers for uncaught errors and unhandled promise rejections
-        globalThis.onerror = (message, source, lineno, colno, error) => {
-            const errorMsg = error ? (error.stack || error.message || String(error)) : message;
-            __console_native._error(`Uncaught Error: ${errorMsg}`);
-        };
-
-        // Handler for unhandled promise rejections
-        globalThis.onunhandledrejection = (event) => {
-            const reason = event && event.reason;
-            let errorMsg;
-            if (reason instanceof Error) {
-                errorMsg = reason.stack || reason.message || String(reason);
-            } else if (typeof reason === 'string') {
-                errorMsg = reason;
-            } else {
-                try {
-                    errorMsg = JSON.stringify(reason);
-                } catch {
-                    errorMsg = String(reason);
-                }
-            }
-            __console_native._error(`Unhandled Promise Rejection: ${errorMsg}`);
-        };
-    "#,
-    )?;
+    // Execute the JavaScript glue code (loaded from external .js files at compile time)
+    // This sets up console wrappers, error handlers, and other runtime utilities
+    ctx.eval::<(), _>(JS_GLUE_CODE)?;
 
     Ok(())
 }
@@ -797,6 +874,8 @@ pub fn setup_locale_api(ctx: Ctx, locale_api: LocaleApi) -> Result<(), rquickjs:
 pub struct NetworkJS {
     #[qjs(skip_trace)]
     network_api: NetworkApi,
+    #[qjs(skip_trace)]
+    temp_file_manager: TempFileManager,
 }
 
 #[rquickjs::methods]
@@ -811,13 +890,20 @@ impl NetworkJS {
     /// - status: HTTP status code (u16)
     /// - buffer: Uint8Array | null
     /// - file_name: string | null
-    /// - file_content: Uint8Array | null
+    /// - temp_file_path: string | null (path to temp file containing downloaded content)
     #[qjs(rename = "download")]
     pub async fn download<'js>(&self, ctx: Ctx<'js>, uri: String) -> rquickjs::Result<Object<'js>> {
         tracing::debug!("NetworkJS::download called: uri={}", uri);
 
         // Perform the download
         let response = self.network_api.download(&uri).await;
+
+        tracing::debug!("NetworkJS::download response: status={}, buffer_len={:?}, file_name={:?}, file_content_len={:?}, temp_file_path={:?}",
+            response.status,
+            response.buffer.as_ref().map(|b| b.len()),
+            response.file_name,
+            response.file_content.as_ref().map(|b| b.len()),
+            response.temp_file_path);
 
         // Create response object
         let result = Object::new(ctx.clone())?;
@@ -832,18 +918,31 @@ impl NetworkJS {
         }
 
         // Set file_name
+        let file_name_for_temp = response.file_name.clone();
         if let Some(file_name) = response.file_name {
             result.set("file_name", file_name)?;
         } else {
             result.set("file_name", rquickjs::Null)?;
         }
 
-        // Convert file_content to Uint8Array or null
+        // If file_content is present, save it to a temp file and return temp_file_path
+        // Do NOT expose file_content directly to JavaScript
         if let Some(file_content) = response.file_content {
-            let array = rquickjs::TypedArray::<u8>::new(ctx.clone(), file_content)?;
-            result.set("file_content", array)?;
+            tracing::debug!("NetworkJS::download: file_content has {} bytes, temp_dir={:?}",
+                file_content.len(), self.temp_file_manager.get_temp_dir());
+            match self.temp_file_manager.create_temp_file(&file_content, file_name_for_temp.as_deref()) {
+                Ok(temp_path) => {
+                    let path_str = temp_path.to_string_lossy().to_string();
+                    tracing::debug!("NetworkJS::download: created temp file at {}", path_str);
+                    result.set("temp_file_path", path_str)?;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to create temp file for download: {}", e);
+                    result.set("temp_file_path", rquickjs::Null)?;
+                }
+            }
         } else {
-            result.set("file_content", rquickjs::Null)?;
+            result.set("temp_file_path", rquickjs::Null)?;
         }
 
         Ok(result)
@@ -854,12 +953,15 @@ impl NetworkJS {
 ///
 /// Provides network.download(uri) function that returns a Promise
 /// for downloading resources via stam:// protocol.
-pub fn setup_network_api(ctx: Ctx, network_api: NetworkApi) -> Result<(), rquickjs::Error> {
+///
+/// The `temp_file_manager` is used to create temp files for downloaded content
+/// and should be cleaned up when the runtime/script finishes.
+pub fn setup_network_api(ctx: Ctx, network_api: NetworkApi, temp_file_manager: TempFileManager) -> Result<(), rquickjs::Error> {
     // First, define the class in the runtime (required before creating instances)
     rquickjs::Class::<NetworkJS>::define(&ctx.globals())?;
 
     // Create an instance of NetworkJS
-    let network_obj = rquickjs::Class::<NetworkJS>::instance(ctx.clone(), NetworkJS { network_api })?;
+    let network_obj = rquickjs::Class::<NetworkJS>::instance(ctx.clone(), NetworkJS { network_api, temp_file_manager })?;
 
     // Register it as global 'network' object
     ctx.globals().set("network", network_obj)?;

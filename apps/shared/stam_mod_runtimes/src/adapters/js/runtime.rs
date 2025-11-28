@@ -39,6 +39,7 @@ fn signal_fatal_error() {
 use super::{JsRuntimeConfig, bindings};
 use crate::api::{AppApi, LocaleApi, NetworkApi, SystemApi, ModInfo, UriResponse};
 use crate::{ModReturnValue, RuntimeAdapter};
+use bindings::TempFileManager;
 
 /// Format a Promise rejection reason into a readable error message
 ///
@@ -394,6 +395,8 @@ pub struct JsRuntimeAdapter {
     locale_api: Option<LocaleApi>,
     /// Network API for downloading resources (optional, client-side only)
     network_api: Option<NetworkApi>,
+    /// Temp file manager for downloaded content (tracks and cleans up temp files)
+    temp_file_manager: TempFileManager,
 }
 
 impl JsRuntimeAdapter {
@@ -457,6 +460,7 @@ impl JsRuntimeAdapter {
             system_api: SystemApi::new(),
             locale_api: None,
             network_api: None,
+            temp_file_manager: TempFileManager::new(),
         };
 
         info!("< JavaScript async runtime \"QuickJS\" initialized successfully");
@@ -515,6 +519,11 @@ impl JsRuntimeAdapter {
         let system_api = self.system_api.clone();
         let locale_api = self.locale_api.clone();
         let network_api = self.network_api.clone();
+        let temp_file_manager = self.temp_file_manager.clone();
+
+        // Configure temp directory for downloads (game_data_dir/tmp)
+        let temp_dir = game_data_dir.join("tmp");
+        temp_file_manager.set_temp_dir(temp_dir);
 
         // debug!(
         //     "setup_global_apis: game_data_dir={:?}, game_config_dir={:?}",
@@ -544,7 +553,7 @@ impl JsRuntimeAdapter {
 
                 // Register network API (network.download()) - client-side only
                 if let Some(network) = network_api {
-                    bindings::setup_network_api(ctx.clone(), network)?;
+                    bindings::setup_network_api(ctx.clone(), network, temp_file_manager)?;
                 }
 
                 // Register text API (Text.DecodeUTF8())
@@ -1134,6 +1143,25 @@ impl JsRuntimeAdapter {
             .await;
 
         result.map_err(|e| -> Box<dyn std::error::Error> { e.into() })
+    }
+
+    /// Cleanup temp files created during script execution
+    ///
+    /// This should be called when the runtime is shutting down to ensure
+    /// all temporary files created by `network.download()` are removed.
+    pub fn cleanup_temp_files(&self) {
+        let count = self.temp_file_manager.file_count();
+        if count > 0 {
+            tracing::debug!("Cleaning up {} temp file(s)", count);
+            self.temp_file_manager.cleanup();
+        }
+    }
+}
+
+impl Drop for JsRuntimeAdapter {
+    fn drop(&mut self) {
+        // Cleanup temp files when the runtime is dropped
+        self.cleanup_temp_files();
     }
 }
 
