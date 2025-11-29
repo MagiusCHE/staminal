@@ -24,9 +24,8 @@ export class Manager {
     }
 
     async prepare_ui() {
-        console.log("Preparing UI for game %o", this.#game_info.id);
-        
-        // await system.enable_graphic_engine(GraphicEngines.Bevy)
+        console.log("Preparing UI for game %o", this.#game_info.id);        
+        await system.enable_graphic_engine(GraphicEngines.Bevy)
         // this.#window = window.get_main_window();
         // //window.create("Staminal2: " + this.#game_info.id, 800, 600, true);
         // this.#window.set_position_mode(WindowPositionModes.Centered);
