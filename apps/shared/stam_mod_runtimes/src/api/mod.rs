@@ -12,11 +12,11 @@ pub mod process;
 pub mod system;
 
 pub use console::ConsoleApi;
-pub use events::{EventDispatcher, EventHandler, EventKey, SystemEvents, RequestUriProtocol, RequestUri, UriResponse, SendEventRequest};
+pub use events::{EventDispatcher, EventHandler, EventKey, SystemEvents, RequestUriProtocol, RequestUri, UriResponse, SendEventRequest, TerminalKeyRequest, TerminalKeyResponse};
 pub use locale::LocaleApi;
 pub use network::{NetworkApi, NetworkConfig, DownloadResponse, parse_stam_uri, sanitize_uri};
 pub use process::{ProcessApi, AppApi};
-pub use system::{SystemApi, ModInfo, ModSide, ModPackageInfo, ModPackageManifest, ModPackagesRegistry, extract_mod_zip, AttachModRequest};
+pub use system::{SystemApi, ModInfo, ModSide, ModPackageInfo, ModPackageManifest, ModPackagesRegistry, extract_mod_zip, AttachModRequest, ShutdownRequest};
 
 use std::collections::HashMap;
 use std::any::Any;

@@ -4,6 +4,7 @@
 //! - Formats thread IDs as #N instead of ThreadId(N)
 //! - Extracts `runtime_type` and `mod_id` fields to display as `js::mod-id`
 //! - Strips common prefixes from targets for cleaner output
+//! - Handles raw mode terminal output with proper `\r\n` line endings
 //!
 //! # Usage
 //!
@@ -20,15 +21,79 @@
 //! ```
 
 use std::fmt as std_fmt;
-use std::io::Write;
+use std::io::{self, Write};
 use tracing::field::Field;
 use tracing::Level;
 use tracing_subscriber::field::Visit;
 use tracing_subscriber::fmt::time::OffsetTime;
-use tracing_subscriber::fmt::{self, format::Writer, FmtContext, FormatEvent, FormatFields};
+use tracing_subscriber::fmt::{self, format::Writer, FmtContext, FormatEvent, FormatFields, MakeWriter};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
+
+use crate::terminal_input;
+
+/// A writer that converts `\n` to `\r\n` for raw mode terminal output.
+///
+/// In raw mode, the terminal doesn't automatically convert newlines,
+/// so we need to explicitly use carriage return + line feed.
+pub struct RawModeWriter<W> {
+    inner: W,
+}
+
+impl<W: Write> RawModeWriter<W> {
+    pub fn new(inner: W) -> Self {
+        Self { inner }
+    }
+}
+
+impl<W: Write> Write for RawModeWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Only convert if raw mode is active
+        #[cfg(unix)]
+        let raw_mode = terminal_input::is_raw_mode_active();
+        #[cfg(not(unix))]
+        let raw_mode = false;
+
+        if raw_mode {
+            // Convert \n to \r\n
+            let mut start = 0;
+            for (i, &byte) in buf.iter().enumerate() {
+                if byte == b'\n' {
+                    // Write everything before the \n
+                    if i > start {
+                        self.inner.write_all(&buf[start..i])?;
+                    }
+                    // Write \r\n instead of just \n
+                    self.inner.write_all(b"\r\n")?;
+                    start = i + 1;
+                }
+            }
+            // Write remaining bytes
+            if start < buf.len() {
+                self.inner.write_all(&buf[start..])?;
+            }
+            Ok(buf.len())
+        } else {
+            self.inner.write(buf)
+        }
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// A MakeWriter that wraps stdout with RawModeWriter
+pub struct RawModeStdoutWriter;
+
+impl<'a> MakeWriter<'a> for RawModeStdoutWriter {
+    type Writer = RawModeWriter<io::Stdout>;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        RawModeWriter::new(io::stdout())
+    }
+}
 
 /// Field extractor for game_id, runtime_type, mod_id, and message fields
 ///

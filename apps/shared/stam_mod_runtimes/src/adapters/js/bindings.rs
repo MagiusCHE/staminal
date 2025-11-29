@@ -619,7 +619,7 @@ impl SystemJS {
             // Store the handler function in the context's handler map
             store_js_handler(&ctx, handler_id, handler)?;
 
-            tracing::info!(
+            tracing::debug!(
                 "Registered event handler: mod={}, event={:?}, handler_id={}, priority={}",
                 mod_id,
                 event_type,
@@ -649,7 +649,7 @@ impl SystemJS {
             // Store the handler function in the context's handler map
             store_js_handler(&ctx, handler_id, handler)?;
 
-            tracing::info!(
+            tracing::debug!(
                 "Registered custom event handler: mod={}, event_name={}, handler_id={}, priority={}",
                 mod_id,
                 event_name_str,
@@ -725,7 +725,7 @@ impl SystemJS {
         // Remove the handler function from the context's map
         if removed {
             remove_js_handler(&ctx, handler_id)?;
-            tracing::info!("Unregistered event handler: handler_id={}", handler_id);
+            tracing::debug!("Unregistered event handler: handler_id={}", handler_id);
         }
 
         Ok(removed)
@@ -737,10 +737,30 @@ impl SystemJS {
     /// * `code` - The exit code (0 = success, non-zero = error)
     ///
     /// # Note
-    /// This function does not return - it terminates the process immediately
+    /// This function requests a graceful shutdown instead of terminating immediately.
+    /// The main loop will receive the shutdown request and perform cleanup before exiting.
     #[qjs(rename = "exit")]
     pub fn exit(&self, code: i32) {
-        tracing::info!("SystemJS::exit called with code {}", code);
+        tracing::debug!("SystemJS::exit called with code {} - requesting graceful shutdown", code);
+        if let Err(e) = self.system_api.request_shutdown(code) {
+            tracing::error!("Failed to request shutdown: {}", e);
+            // Fallback to immediate exit if channel is not available
+            std::process::exit(code);
+        }
+    }
+
+    /// Terminate the application immediately with the specified exit code
+    ///
+    /// # Arguments
+    /// * `code` - The exit code (0 = success, non-zero = error)
+    ///
+    /// # Note
+    /// This function terminates the process immediately without cleanup.
+    /// Use `exit()` for graceful shutdown. Only use `terminate()` when
+    /// immediate termination is required (e.g., fatal errors).
+    #[qjs(rename = "terminate")]
+    pub fn terminate(&self, code: i32) {
+        tracing::warn!("SystemJS::terminate called with code {} - immediate termination", code);
         std::process::exit(code);
     }
 
@@ -909,6 +929,7 @@ pub fn setup_system_api(ctx: Ctx, system_api: SystemApi) -> Result<(), rquickjs:
     // Create SystemEvents enum object
     let system_events = Object::new(ctx.clone())?;
     system_events.set("RequestUri", SystemEvents::RequestUri.to_u32())?;
+    system_events.set("TerminalKeyPressed", SystemEvents::TerminalKeyPressed.to_u32())?;
     ctx.globals().set("SystemEvents", system_events)?;
 
     // Create RequestUriProtocol enum object

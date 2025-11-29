@@ -9,7 +9,7 @@ use tokio::time::{Duration, interval};
 use tracing::{Level, debug, error, info, warn};
 
 use stam_mod_runtimes::adapters::js::run_js_event_loop;
-use stam_mod_runtimes::logging::{CustomFormatter, create_custom_timer};
+use stam_mod_runtimes::logging::{CustomFormatter, RawModeStdoutWriter, create_custom_timer};
 use stam_schema::Validatable;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -72,9 +72,36 @@ struct Args {
 async fn main() {
     let args = Args::parse();
 
-    // Initialize logging early with default INFO level
-    // This allows us to use tracing macros for all error messages
-    let initial_log_level = Level::INFO;
+    // Load configuration first to get log level
+    // We can't log errors yet, so we use eprintln! for early failures
+    let config = match Config::from_json_file(&args.config) {
+        Ok(mut cfg) => {
+            // Validate mod configuration and build mod lists
+            // Pass custom_home to resolve mods path correctly
+            if let Err(e) = cfg.validate_mods(args.home.as_deref()) {
+                eprintln!("Configuration validation error: {}", e);
+                std::process::exit(1);
+            }
+            cfg
+        }
+        Err(e) => {
+            eprintln!("Failed to load config from '{}': {}", args.config, e);
+            std::process::exit(1);
+        }
+    };
+
+    // Parse log level from config
+    let log_level = match config.log_level.to_lowercase().as_str() {
+        "trace" => Level::TRACE,
+        "debug" => Level::DEBUG,
+        "info" => Level::INFO,
+        "warn" => Level::WARN,
+        "error" => Level::ERROR,
+        _ => {
+            eprintln!("Warning: Invalid log level '{}', using INFO", config.log_level);
+            Level::INFO
+        }
+    };
 
     // Custom time format: YYYY/MM/DD hh:mm:ss.xxxx
     let timer = create_custom_timer();
@@ -84,7 +111,7 @@ async fn main() {
         && std::env::var("NO_COLOR").is_err()
         && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
 
-    // Setup initial logging (may be reconfigured after loading config)
+    // Setup logging with configured log level
     if args.log_file {
         // File logging: no ANSI colors, truncate previous run
         let file =
@@ -98,7 +125,7 @@ async fn main() {
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter_stdout)
                     .with_ansi(use_ansi)
-                    .with_writer(std::io::stdout),
+                    .with_writer(RawModeStdoutWriter),
             )
             .with(
                 tracing_subscriber::fmt::layer()
@@ -107,7 +134,7 @@ async fn main() {
                     .with_writer(file),
             )
             .with(tracing_subscriber::filter::LevelFilter::from_level(
-                initial_log_level,
+                log_level,
             ))
             .init();
     } else {
@@ -117,46 +144,16 @@ async fn main() {
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter)
                     .with_ansi(use_ansi)
-                    .with_writer(std::io::stdout),
+                    .with_writer(RawModeStdoutWriter),
             )
             .with(tracing_subscriber::filter::LevelFilter::from_level(
-                initial_log_level,
+                log_level,
             ))
             .init();
     }
 
     info!("Staminal Core Server v{}", VERSION);
     info!("Copyright (C) 2025 Magius(CHE)");
-    // Load and validate configuration
-    let config = match Config::from_json_file(&args.config) {
-        Ok(mut cfg) => {
-            // Validate mod configuration and build mod lists
-            // Pass custom_home to resolve mods path correctly
-            if let Err(e) = cfg.validate_mods(args.home.as_deref()) {
-                error!("Configuration validation error: {}", e);
-                std::process::exit(1);
-            }
-            cfg
-        }
-        Err(e) => {
-            error!("Failed to load config from '{}': {}", args.config, e);
-            std::process::exit(1);
-        }
-    };
-
-    // Parse log level from config (logging already initialized, this is just for reference)
-    let _log_level = match config.log_level.to_lowercase().as_str() {
-        "trace" => Level::TRACE,
-        "debug" => Level::DEBUG,
-        "info" => Level::INFO,
-        "warn" => Level::WARN,
-        "error" => Level::ERROR,
-        _ => {
-            warn!("Invalid log level '{}', using INFO", config.log_level);
-            Level::INFO
-        }
-    };
-
     info!("Configuration: {}", args.config);
 
     debug!("Settings:");
@@ -228,26 +225,59 @@ async fn main() {
         }
     };
 
-    info!("Entering Main Loop. Waiting for intents...(Use Ctrl+C to save & shutdown)");
+    // Check if any game has registered TerminalKeyPressed handlers
+    let mut total_terminal_handlers = 0;
+    for runtime in game_runtimes.values() {
+        total_terminal_handlers += runtime.terminal_key_handler_count().await;
+    }
+
+    // Show main loop message, with or without Ctrl+C hint depending on handler registration
+    if total_terminal_handlers > 0 {
+        info!("Entering Main Loop. Waiting for intents...");
+    } else {
+        info!("Entering Main Loop. Waiting for intents...(Use Ctrl+C to save & shutdown)");
+    }
 
     // Create client manager for tracking active connections
     let client_manager = ClientManager::new();
-    let shutdown_clone = shutdown.clone();
 
-    // Spawn signal handler task
-    tokio::spawn(async move {
-        match signal::ctrl_c().await {
-            Ok(()) => {
-                info!("Received shutdown signal (Ctrl+C)");
-                shutdown_clone.store(true, Ordering::Relaxed);
+    // Collect shutdown receivers from all game runtimes and aggregate them
+    // into a single channel for the main loop
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<i32>(1);
+    for (game_id, runtime) in game_runtimes.iter() {
+        if let Some(mut game_shutdown_rx) = runtime.take_shutdown_receiver().await {
+            let tx = shutdown_tx.clone();
+            let gid = game_id.clone();
+            tokio::spawn(async move {
+                if let Some(request) = game_shutdown_rx.recv().await {
+                    info!("Shutdown requested by mod in game '{}' with exit code {}", gid, request.exit_code);
+                    let _ = tx.send(request.exit_code).await;
+                }
+            });
+        }
+    }
+    // Drop the original sender so the channel closes when all game senders are done
+    drop(shutdown_tx);
+
+    // Start terminal input reader if running in a terminal
+    let (mut terminal_rx, mut terminal_handle) = if stam_mod_runtimes::terminal_input::is_terminal() {
+        match stam_mod_runtimes::terminal_input::spawn_terminal_event_reader() {
+            Ok((rx, handle)) => {
+                debug!("Terminal input reader started");
+                (Some(rx), Some(handle))
             }
-            Err(err) => {
-                warn!("Error listening for shutdown signal: {}", err);
+            Err(e) => {
+                debug!("Failed to start terminal input reader: {}", e);
+                (None, None)
             }
         }
-    });
+    } else {
+        debug!("Not running in terminal, terminal input disabled");
+        (None, None)
+    };
+    let terminal_input_active = terminal_rx.is_some();
 
-    // Setup SIGTERM handler (Linux/Unix only)
+    // Setup SIGTERM handler (Linux/Unix only) - this one remains separate since it's a different signal
     #[cfg(unix)]
     {
         let shutdown_clone = shutdown.clone();
@@ -265,15 +295,66 @@ async fn main() {
         });
     }
 
-    // 3. Main Loop (Game Loop + TCP Accept)
+    // 3. Main Loop (Game Loop + TCP Accept + Signal Handling)
     let tick_duration = Duration::from_millis(1000 / config.tick_rate);
     let mut tick_interval = interval(tick_duration);
 
     loop {
         tokio::select! {
+            biased;
+
+            // Handle shutdown requests from mods (system.exit)
+            exit_code = shutdown_rx.recv() => {
+                if let Some(code) = exit_code {
+                    info!("Graceful shutdown requested with exit code {}", code);
+                    // TODO: Could store exit_code and use it when process exits
+                    break;
+                }
+            }
+
+            // Handle terminal key events (raw mode input)
+            key_request = async {
+                if let Some(ref mut rx) = terminal_rx {
+                    rx.recv().await
+                } else {
+                    std::future::pending().await
+                }
+            } => {
+                if let Some(key_request) = key_request {
+                    // Dispatch to all game runtimes
+                    let mut handled = false;
+                    for (game_id, runtime) in game_runtimes.iter() {
+                        let response = runtime.dispatch_terminal_key(&key_request).await;
+                        if response.handled {
+                            debug!("Key '{}' handled by mod in game '{}'", key_request.combo, game_id);
+                            handled = true;
+                            break;
+                        }
+                    }
+
+                    // Check for Ctrl+C - default exit behavior
+                    if !handled && key_request.ctrl && key_request.key == "c" {
+                        info!("Received shutdown signal (Ctrl+C)");
+                        break;
+                    }
+                }
+            }
+
+            // Fallback Ctrl+C handler when terminal input is not available
+            _ = async {
+                if !terminal_input_active {
+                    signal::ctrl_c().await.ok();
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {
+                info!("Received shutdown signal (Ctrl+C)");
+                break;
+            }
+
             // Handle tick for game loop
             _ = tick_interval.tick() => {
-                // Check shutdown
+                // Check shutdown (from SIGTERM handler)
                 if shutdown.load(Ordering::Relaxed) {
                     break;
                 }
@@ -306,6 +387,12 @@ async fn main() {
                 }
             }
         }
+    }
+
+    // Stop terminal input reader and wait for cleanup to complete
+    // This ensures raw mode is properly disabled before the process exits
+    if let Some(ref mut handle) = terminal_handle {
+        handle.stop_async().await;
     }
 
     info!("Shutting down server gracefully...");

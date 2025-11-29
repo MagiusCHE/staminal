@@ -42,9 +42,46 @@ impl GameModRuntime {
         }
     }
 
+    /// Dispatch a TerminalKeyPressed event to registered handlers
+    ///
+    /// Returns a TerminalKeyResponse indicating whether the event was handled
+    pub async fn dispatch_terminal_key(&self, request: &stam_mod_runtimes::api::TerminalKeyRequest) -> stam_mod_runtimes::api::TerminalKeyResponse {
+        if let Some(ref adapter) = self.js_adapter {
+            let adapter = adapter.read().await;
+            adapter.dispatch_terminal_key(request).await
+        } else {
+            // No JS adapter, return default unhandled response
+            stam_mod_runtimes::api::TerminalKeyResponse::default()
+        }
+    }
+
     /// Get the home directory path from the system API
     pub fn get_home_dir(&self) -> Option<PathBuf> {
         self.system_api.as_ref().and_then(|api| api.get_home_dir())
+    }
+
+    /// Take the shutdown request receiver from SystemApi (if available)
+    ///
+    /// This is used by the main loop to receive shutdown requests from mods.
+    pub async fn take_shutdown_receiver(&self) -> Option<tokio::sync::mpsc::Receiver<stam_mod_runtimes::api::ShutdownRequest>> {
+        if let Some(ref system_api) = self.system_api {
+            system_api.take_shutdown_receiver().await
+        } else {
+            None
+        }
+    }
+
+    /// Get the number of handlers registered for TerminalKeyPressed event
+    ///
+    /// This is used to determine if any mod has registered to handle terminal input,
+    /// which affects whether the default "Ctrl+C to exit" message should be shown.
+    pub async fn terminal_key_handler_count(&self) -> usize {
+        if let Some(ref adapter) = self.js_adapter {
+            let adapter = adapter.read().await;
+            adapter.terminal_key_handler_count()
+        } else {
+            0
+        }
     }
 }
 

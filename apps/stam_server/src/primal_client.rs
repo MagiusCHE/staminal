@@ -267,7 +267,7 @@ impl PrimalClient {
             return;
         }
 
-        info!("User '{}' authenticated for RequestUri on game '{}': {}", username, game_id, uri);
+        debug!("User '{}' authenticated for RequestUri on game '{}': {}", username, game_id, uri);
 
         // Get the game runtime for event dispatch
         let response = if let Some(game_runtime) = self.game_runtimes.get(&game_id) {
@@ -325,7 +325,7 @@ impl PrimalClient {
                         let size = content.len() as u64;
                         // Log file transfers at INFO level, especially for mod downloads (ZIP files)
                         if path.to_string_lossy().ends_with(".zip") {
-                            info!("Sending ZIP file '{}' ({} bytes) to user '{}' for URI '{}'",
+                            debug!("Sending ZIP file '{}' ({} bytes) to user '{}' for URI '{}'",
                                 path.display(), size, username, uri);
                         } else {
                             debug!("Sending file '{}' ({} bytes) for URI '{}'", path.display(), size, uri);

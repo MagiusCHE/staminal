@@ -8,7 +8,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
 use stam_mod_runtimes::api::{DownloadResponse, LocaleApi, NetworkApi, NetworkConfig, parse_stam_uri, sanitize_uri, extract_mod_zip};
-use stam_mod_runtimes::logging::{create_custom_timer, CustomFormatter};
+use stam_mod_runtimes::logging::{create_custom_timer, CustomFormatter, RawModeStdoutWriter};
 use stam_protocol::{GameMessage, GameStream, IntentType, PrimalMessage, PrimalStream};
 use stam_schema::{ModManifest, Validatable, validate_mod_dependencies, validate_version_range};
 
@@ -283,13 +283,13 @@ async fn connect_to_game_server(
     app_paths: &AppPaths,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize game-specific directory
-    info!("Initializing directories for game '{}'...", game_id);
+    debug!("Initializing directories for game '{}'...", game_id);
     let game_root = app_paths.game_root(game_id)?;
     let mods_dir = game_root.join("mods");
 
-    info!("Game directories:");
-    info!("  Root: {}", game_root.display());
-    info!("  Mods: {}", mods_dir.display());
+    debug!("Game directories:");
+    debug!("  Root: {}", game_root.display());
+    debug!("  Mods: {}", mods_dir.display());
 
     // Parse game server URI (stam://host:port)
     if !uri.starts_with("stam://") {
@@ -412,14 +412,14 @@ async fn connect_to_game_server(
 
             // Log mod list received
             if !mods.is_empty() {
-                info!("Received {} required mod(s):", mods.len());
+                debug!("Received {} required mod(s):", mods.len());
                 // Print mods as indented JSON for debugging
                 match serde_json::to_string_pretty(&mods) {
-                    Ok(json) => info!("Mods list:\n{}", json),
+                    Ok(json) => debug!("Mods list:\n{}", json),
                     Err(e) => warn!("Failed to serialize mods list: {}", e),
                 }
             } else {
-                info!("No mods required for this game");
+                debug!("No mods required for this game");
             }
 
             // Load manifests only for mods that are present locally
@@ -429,7 +429,7 @@ async fn connect_to_game_server(
             let mut missing_mods: Vec<String> = Vec::new();
 
             if !mods.is_empty() {
-                info!("Server requires {} mod(s), checking local availability...", mods.len());
+                debug!("Server requires {} mod(s), checking local availability...", mods.len());
 
                 // First pass: load manifests for available mods, track missing ones
                 for mod_info in &mods {
@@ -467,16 +467,16 @@ async fn connect_to_game_server(
                         }
                     };
 
-                    info!(" ✓ {} [{}:{}] found (from {})", mod_info.mod_id, mod_info.mod_type, manifest.version,
+                    debug!(" ✓ {} [{}:{}] found (from {})", mod_info.mod_id, mod_info.mod_type, manifest.version,
                         if actual_mod_dir != mod_dir { "client/" } else { "root" });
                     available_manifests.insert(mod_info.mod_id.clone(), (manifest, actual_mod_dir));
                 }
 
                 if !missing_mods.is_empty() {
-                    info!(" ? {} mod(s) not available locally: {:?}", missing_mods.len(), missing_mods);
+                    debug!(" ? {} mod(s) not available locally: {:?}", missing_mods.len(), missing_mods);
                 }
             } else {
-                info!("No mods required");
+                debug!("No mods required");
             }
 
             // CRITICAL: Check if any required bootstrap mod (or its dependencies) is missing
@@ -558,12 +558,12 @@ async fn connect_to_game_server(
                     // If nothing to download, we're done!
                     if mods_to_download.is_empty() {
                         if download_iteration > 1 {
-                            info!("All bootstrap mods and dependencies downloaded after {} iteration(s)", download_iteration - 1);
+                            debug!("All bootstrap mods and dependencies downloaded after {} iteration(s)", download_iteration - 1);
                         }
                         break;
                     }
 
-                    info!("[Iteration {}] Need to download {} mod(s) for bootstrap: {:?}",
+                    debug!("[Iteration {}] Need to download {} mod(s) for bootstrap: {:?}",
                         download_iteration,
                         mods_to_download.len(),
                         mods_to_download.iter().map(|m| &m.mod_id).collect::<Vec<_>>());
@@ -578,7 +578,7 @@ async fn connect_to_game_server(
                             ).into());
                         }
 
-                        info!("Downloading mod '{}' from {}...", mod_info.mod_id, mod_info.download_url);
+                        debug!("Downloading mod '{}' from {}...", mod_info.mod_id, mod_info.download_url);
 
                         let response = perform_stam_request(
                             &mod_info.download_url,
@@ -608,16 +608,16 @@ async fn connect_to_game_server(
 
                         // Get file size for logging
                         let file_size = std::fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0);
-                        info!("  Saved {} ({} bytes)", zip_filename, file_size);
+                        debug!("  Saved {} ({} bytes)", zip_filename, file_size);
 
                         // Extract ZIP to mods directory
                         let mod_target_dir = mods_dir.join(&mod_info.mod_id);
-                        info!("  Extracting to {}...", mod_target_dir.display());
+                        debug!("  Extracting to {}...", mod_target_dir.display());
 
                         extract_mod_zip(&zip_path, &mod_target_dir)
                             .map_err(|e| format!("Failed to extract mod '{}': {}", mod_info.mod_id, e))?;
 
-                        info!("  ✓ Mod '{}' installed successfully", mod_info.mod_id);
+                        debug!("  ✓ Mod '{}' installed successfully", mod_info.mod_id);
 
                         // Clean up ZIP file
                         std::fs::remove_file(&zip_path)?;
@@ -639,7 +639,7 @@ async fn connect_to_game_server(
 
                         match ModManifest::from_json_file(manifest_path.to_str().unwrap()) {
                             Ok(manifest) => {
-                                info!("  Loaded manifest: {} v{} (dependencies: {:?})",
+                                debug!("  Loaded manifest: {} v{} (dependencies: {:?})",
                                     manifest.name, manifest.version,
                                     manifest.requires.keys().filter(|k| !k.starts_with('@')).collect::<Vec<_>>());
                                 available_manifests.insert(mod_info.mod_id.clone(), (manifest, actual_mod_dir));
@@ -672,7 +672,7 @@ async fn connect_to_game_server(
 
             // Initialize mod runtime manager and load ONLY bootstrap mods + their dependencies
             if !available_manifests.is_empty() {
-                info!("Initializing mod runtime system...");
+                debug!("Initializing mod runtime system...");
 
                 // Create mod runtime manager
                 let mut runtime_manager = ModRuntimeManager::new();
@@ -754,7 +754,7 @@ async fn connect_to_game_server(
 
                 // First pass: Register mod aliases and collect mod data for AVAILABLE mods only
                 // This must happen BEFORE loading any mod, so that import "@mod-id" works
-                info!("Registering mod aliases for available mods...");
+                debug!("Registering mod aliases for available mods...");
 
                 for (mod_id, (manifest, actual_mod_dir)) in &available_manifests {
                     // Use actual_mod_dir (could be root or client/ subdirectory)
@@ -908,18 +908,18 @@ async fn connect_to_game_server(
                 // Add missing mods to the not loaded list
                 mods_not_loaded.extend(missing_mods.clone());
 
-                info!("Mods to load (bootstrap + dependencies): {:?}", mods_to_load);
+                debug!("Mods to load (bootstrap + dependencies): {:?}", mods_to_load);
                 if !mods_not_loaded.is_empty() {
-                    info!("Mods deferred for later loading: {:?}", mods_not_loaded);
+                    debug!("Mods deferred for later loading: {:?}", mods_not_loaded);
                 }
                 if !missing_mods.is_empty() {
-                    info!("  (including {} missing locally: {:?})", missing_mods.len(), missing_mods);
+                    debug!("  (including {} missing locally: {:?})", missing_mods.len(), missing_mods);
                 }
 
                 // Load ONLY bootstrap mods + their dependencies
                 // Non-bootstrap mods will be loaded by mods-manager when needed
                 // mods_to_load already contains bootstrap + dependencies in correct order
-                info!("Attaching {} mods (bootstrap + dependencies)...", mods_to_load.len());
+                debug!("Attaching {} mods (bootstrap + dependencies)...", mods_to_load.len());
                 for mod_id in &mods_to_load {
                     let mod_data = mod_data_map.get(mod_id).unwrap();
                     runtime_manager.load_mod(mod_id, &mod_data.entry_point_path)?;
@@ -931,7 +931,7 @@ async fn connect_to_game_server(
                 // Call onBootstrap ONLY for bootstrap mods (not for dependencies)
                 // Note: Missing bootstrap mods check is done earlier, before runtime initialization
                 if !bootstrap_mod_ids.is_empty() {
-                    info!("Bootstrapping {} mod(s)...", bootstrap_mod_ids.len());
+                    debug!("Bootstrapping {} mod(s)...", bootstrap_mod_ids.len());
                     for mod_id in &bootstrap_mod_ids {
                         runtime_manager.call_mod_function(mod_id, "onBootstrap")?;
                         // Mark mod as bootstrapped
@@ -941,7 +941,7 @@ async fn connect_to_game_server(
 
                 // Count deferred mods (available but not loaded yet)
                 let deferred_count = mod_data_map.len() - mods_to_load.len();
-                info!("Mod system initialized successfully ({} loaded, {} deferred, {} missing)",
+                debug!("Mod system initialized successfully ({} loaded, {} deferred, {} missing)",
                     mods_to_load.len(), deferred_count, missing_mods.len());
                 js_runtime_handle = Some(js_runtime);
 
@@ -976,7 +976,16 @@ async fn connect_to_game_server(
     }
 
     // Maintain connection - wait for messages or Ctrl+C
-    info!("{}", locale.get("game-client-ready"));
+    // Show appropriate message based on whether any mod registered for TerminalKeyPressed
+    let has_terminal_handlers = runtime_manager_opt
+        .as_ref()
+        .map(|rm| rm.terminal_key_handler_count() > 0)
+        .unwrap_or(false);
+    if has_terminal_handlers {
+        info!("{}", locale.get("game-client-ready-no-hint"));
+    } else {
+        info!("{}", locale.get("game-client-ready"));
+    }
 
     // Run the JS event loop if we have JS mods loaded
     // This is necessary for setTimeout/setInterval to work properly
@@ -997,13 +1006,83 @@ async fn connect_to_game_server(
             None
         };
 
-        // Main event loop - handles JS events, attach requests, send_event, and connection
+        // Take the shutdown request receiver from SystemApi
+        let mut shutdown_rx = if let Some(ref system_api) = system_api_opt {
+            system_api.take_shutdown_receiver().await
+        } else {
+            None
+        };
+
+        // Start terminal input reader if running in a terminal
+        let terminal_input_enabled = stam_mod_runtimes::terminal_input::is_terminal();
+        let (mut terminal_rx, mut terminal_handle) = if terminal_input_enabled {
+            match stam_mod_runtimes::terminal_input::spawn_terminal_event_reader() {
+                Ok((rx, handle)) => (Some(rx), Some(handle)),
+                Err(e) => {
+                    debug!("Failed to start terminal input reader: {}", e);
+                    (None, None)
+                }
+            }
+        } else {
+            debug!("Not running in terminal, terminal input disabled");
+            (None, None)
+        };
+        let terminal_input_active = terminal_rx.is_some();
+
+        // Main event loop - handles JS events, attach requests, send_event, shutdown, terminal input, and connection
         loop {
             tokio::select! {
                 biased;
 
-                // Handle Ctrl+C first
-                _ = tokio::signal::ctrl_c() => {
+                // Handle shutdown requests from JavaScript (system.exit)
+                request = async {
+                    if let Some(ref mut rx) = shutdown_rx {
+                        rx.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Some(request) = request {
+                        info!("Shutdown requested by mod with exit code {}", request.exit_code);
+                        break;
+                    }
+                }
+
+                // Handle terminal key events (raw mode input)
+                key_request = async {
+                    if let Some(ref mut rx) = terminal_rx {
+                        rx.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Some(key_request) = key_request {
+                        // Dispatch to mods
+                        let mut handled = false;
+                        if let Some(ref runtime_manager) = runtime_manager_opt {
+                            let response = runtime_manager.dispatch_terminal_key(&key_request);
+                            handled = response.handled;
+                        }
+
+                        // Check for Ctrl+C - default exit behavior
+                        if !handled && key_request.ctrl && key_request.key == "c" {
+                            info!("{}", locale.get("ctrl-c-received"));
+                            break;
+                        }
+
+                        // If not handled, the key press is "swallowed" (not echoed)
+                        // This is the expected behavior in raw mode
+                    }
+                }
+
+                // Fallback Ctrl+C handler when terminal input is not available
+                _ = async {
+                    if !terminal_input_active {
+                        tokio::signal::ctrl_c().await.ok();
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
                     info!("{}", locale.get("ctrl-c-received"));
                     break;
                 }
@@ -1067,15 +1146,102 @@ async fn connect_to_game_server(
                 }
             }
         }
+
+        // Stop terminal input reader and wait for cleanup to complete
+        if let Some(ref mut handle) = terminal_handle {
+            handle.stop_async().await;
+        }
     } else {
         // No JS runtime, just wait for connection or Ctrl+C
-        tokio::select! {
-            _ = maintain_game_connection(&mut stream, locale.clone()) => {
-                info!("{}", locale.get("connection-closed"));
+        // Still dispatch TerminalKeyPressed to allow other runtimes to handle it
+
+        // Take the shutdown request receiver from SystemApi (if available)
+        let mut shutdown_rx = if let Some(ref system_api) = system_api_opt {
+            system_api.take_shutdown_receiver().await
+        } else {
+            None
+        };
+
+        // Start terminal input reader if running in a terminal
+        let (mut terminal_rx, mut terminal_handle) = if stam_mod_runtimes::terminal_input::is_terminal() {
+            match stam_mod_runtimes::terminal_input::spawn_terminal_event_reader() {
+                Ok((rx, handle)) => (Some(rx), Some(handle)),
+                Err(e) => {
+                    debug!("Failed to start terminal input reader: {}", e);
+                    (None, None)
+                }
             }
-            _ = tokio::signal::ctrl_c() => {
-                info!("{}", locale.get("ctrl-c-received"));
+        } else {
+            debug!("Not running in terminal, terminal input disabled");
+            (None, None)
+        };
+        let terminal_input_active = terminal_rx.is_some();
+
+        loop {
+            tokio::select! {
+                biased;
+
+                // Handle shutdown requests from mods (system.exit)
+                request = async {
+                    if let Some(ref mut rx) = shutdown_rx {
+                        rx.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Some(request) = request {
+                        info!("Shutdown requested by mod with exit code {}", request.exit_code);
+                        break;
+                    }
+                }
+
+                // Handle terminal key events (raw mode input)
+                key_request = async {
+                    if let Some(ref mut rx) = terminal_rx {
+                        rx.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Some(key_request) = key_request {
+                        // Dispatch to mods
+                        let mut handled = false;
+                        if let Some(ref runtime_manager) = runtime_manager_opt {
+                            let response = runtime_manager.dispatch_terminal_key(&key_request);
+                            handled = response.handled;
+                        }
+
+                        // Check for Ctrl+C - default exit behavior
+                        if !handled && key_request.ctrl && key_request.key == "c" {
+                            info!("{}", locale.get("ctrl-c-received"));
+                            break;
+                        }
+                    }
+                }
+
+                // Fallback Ctrl+C handler when terminal input is not available
+                _ = async {
+                    if !terminal_input_active {
+                        tokio::signal::ctrl_c().await.ok();
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                } => {
+                    info!("{}", locale.get("ctrl-c-received"));
+                    break;
+                }
+
+                // Maintain game connection
+                _ = maintain_game_connection(&mut stream, locale.clone()) => {
+                    info!("{}", locale.get("connection-closed"));
+                    break;
+                }
             }
+        }
+
+        // Stop terminal input reader and wait for cleanup to complete
+        if let Some(ref mut handle) = terminal_handle {
+            handle.stop_async().await;
         }
     }
 
@@ -1093,7 +1259,7 @@ async fn handle_attach_mod_request(
     system_api_opt: &Option<stam_mod_runtimes::api::SystemApi>,
     game_root_opt: &Option<std::path::PathBuf>,
 ) -> Result<(), String> {
-    info!("Attaching mod '{}' at runtime...", mod_id);
+    debug!("Attaching mod '{}' at runtime...", mod_id);
 
     let runtime_manager = runtime_manager_opt.as_mut()
         .ok_or_else(|| "Runtime manager not available".to_string())?;
@@ -1154,7 +1320,7 @@ async fn handle_attach_mod_request(
     // Mark mod as loaded in SystemApi
     system_api.set_loaded(mod_id, true);
 
-    info!("Mod '{}' attached successfully", mod_id);
+    debug!("Mod '{}' attached successfully", mod_id);
     Ok(())
 }
 
@@ -1168,7 +1334,7 @@ async fn handle_send_event_request(
     runtime_manager_opt: &mut Option<ModRuntimeManager>,
     system_api_opt: &Option<stam_mod_runtimes::api::SystemApi>,
 ) -> Result<(), String> {
-    info!("Dispatching event '{}' with {} args", event_name, args.len());
+    debug!("Dispatching event '{}' with {} args", event_name, args.len());
 
     let runtime_manager = runtime_manager_opt.as_mut()
         .ok_or_else(|| "Runtime manager not available".to_string())?;
@@ -1184,7 +1350,7 @@ async fn handle_send_event_request(
         return Ok(());
     }
 
-    info!("Found {} handler(s) for event '{}'", handlers.len(), event_name);
+    debug!("Found {} handler(s) for event '{}'", handlers.len(), event_name);
 
     // Call each handler in priority order
     for handler in &handlers {
@@ -1206,7 +1372,7 @@ async fn handle_send_event_request(
         }
     }
 
-    info!("Event '{}' dispatched to {} handler(s)", event_name, handlers.len());
+    debug!("Event '{}' dispatched to {} handler(s)", event_name, handlers.len());
     Ok(())
 }
 
@@ -1305,11 +1471,13 @@ async fn main() {
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter_stdout)
-                    .with_writer(std::io::stdout),
+                    .with_ansi(use_ansi)
+                    .with_writer(RawModeStdoutWriter),
             )
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter_file)
+                    .with_ansi(false)
                     .with_writer(file_appender),
             )
             .with(tracing_subscriber::filter::LevelFilter::from_level(
@@ -1323,7 +1491,8 @@ async fn main() {
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter)
-                    .with_writer(std::io::stdout),
+                    .with_ansi(use_ansi)
+                    .with_writer(RawModeStdoutWriter),
             )
             .with(tracing_subscriber::filter::LevelFilter::from_level(
                 Level::DEBUG,
@@ -1338,7 +1507,7 @@ async fn main() {
     // Check if custom home is specified
     let custom_home = args.home.as_deref();
     if let Some(home) = custom_home {
-        info!("Using custom home directory: {}", home);
+        debug!("Using custom home directory: {}", home);
     }
 
     // Initialize application paths (once at startup)
@@ -1560,7 +1729,7 @@ async fn main() {
             }
 
             for (i, server) in servers.iter().enumerate() {
-                info!(
+                debug!(
                     "  [{}] {} (game_id: {}) - {}",
                     i + 1,
                     server.name,
@@ -1571,7 +1740,7 @@ async fn main() {
 
             // Connect to first server in list
             let first_server = &servers[0];
-            info!(
+            debug!(
                 "Attempting to connect to game server: {} (game_id: {}, uri: {})",
                 first_server.name, first_server.game_id, first_server.uri
             );

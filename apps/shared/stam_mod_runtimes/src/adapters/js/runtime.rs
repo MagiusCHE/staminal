@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use tracing::{debug, error, info};
+use tracing::{debug, error};
 
 /// Registry to track already-logged promise rejections to avoid duplicates
 /// QuickJS calls the rejection tracker multiple times for the same rejection
@@ -405,7 +405,7 @@ impl JsRuntimeAdapter {
     /// # Arguments
     /// * `config` - Runtime configuration containing game directories
     pub fn new(config: JsRuntimeConfig) -> Result<Self, Box<dyn std::error::Error>> {
-        info!("> Initializing javascript async runtime \"QuickJS\" for mods");
+        debug!("> Initializing javascript async runtime \"QuickJS\" for mods");
 
         let runtime = AsyncRuntime::new()?;
 
@@ -463,7 +463,7 @@ impl JsRuntimeAdapter {
             temp_file_manager: TempFileManager::new(),
         };
 
-        info!("< JavaScript async runtime \"QuickJS\" initialized successfully");
+        debug!("< JavaScript async runtime \"QuickJS\" initialized successfully");
         Ok(js_runtime)
     }
 
@@ -1075,6 +1075,138 @@ impl JsRuntimeAdapter {
         response
     }
 
+    /// Dispatch a TerminalKeyPressed event to all registered handlers
+    ///
+    /// This method finds all handlers registered for TerminalKeyPressed, calls them
+    /// in priority order (lowest first), and returns whether the event was handled.
+    ///
+    /// # Arguments
+    /// * `request` - The terminal key request containing key and modifier information
+    ///
+    /// # Returns
+    /// A `TerminalKeyResponse` containing whether the event was handled
+    pub async fn dispatch_terminal_key(
+        &self,
+        request: &crate::api::TerminalKeyRequest,
+    ) -> crate::api::TerminalKeyResponse {
+        let handlers = self.system_api.event_dispatcher().get_handlers_for_terminal_key();
+
+        if handlers.is_empty() {
+            return crate::api::TerminalKeyResponse::default();
+        }
+
+        debug!("Dispatching TerminalKeyPressed to {} handlers for key: {}", handlers.len(), request.combo);
+
+        let mut response = crate::api::TerminalKeyResponse::default();
+
+        for handler in handlers {
+            // Get the mod's context
+            let loaded_mod = match self.loaded_mods.get(&handler.mod_id) {
+                Some(m) => m,
+                None => {
+                    error!("Handler mod '{}' not loaded", handler.mod_id);
+                    continue;
+                }
+            };
+
+            let handler_id = handler.handler_id;
+            let mod_id = handler.mod_id.clone();
+            let key = request.key.clone();
+            let ctrl = request.ctrl;
+            let alt = request.alt;
+            let shift = request.shift;
+            let meta = request.meta;
+            let combo = request.combo.clone();
+
+            // Call the handler function with request and response objects
+            let result: Result<bool, String> = loaded_mod
+                .context
+                .with(|ctx| {
+                    // Get the handler function from the context's handler map
+                    match bindings::get_js_handler(&ctx, handler_id) {
+                        Ok(Some(func)) => {
+                            // Create request object
+                            let request_obj = Object::new(ctx.clone()).map_err(|e| format!("Failed to create request object: {:?}", e))?;
+                            request_obj.set("key", key.as_str()).map_err(|e| format!("Failed to set key: {:?}", e))?;
+                            request_obj.set("ctrl", ctrl).map_err(|e| format!("Failed to set ctrl: {:?}", e))?;
+                            request_obj.set("alt", alt).map_err(|e| format!("Failed to set alt: {:?}", e))?;
+                            request_obj.set("shift", shift).map_err(|e| format!("Failed to set shift: {:?}", e))?;
+                            request_obj.set("meta", meta).map_err(|e| format!("Failed to set meta: {:?}", e))?;
+                            request_obj.set("combo", combo.as_str()).map_err(|e| format!("Failed to set combo: {:?}", e))?;
+
+                            // Create response object
+                            let response_obj = Object::new(ctx.clone()).map_err(|e| format!("Failed to create response object: {:?}", e))?;
+                            response_obj.set("handled", false).map_err(|e| format!("Failed to set handled: {:?}", e))?;
+
+                            // Add setHandled method
+                            let set_handled = Function::new(ctx.clone(), |ctx: Ctx, handled: bool| -> rquickjs::Result<()> {
+                                let this: Object = ctx.globals().get("__currentTerminalKeyResponse")?;
+                                this.set("handled", handled)?;
+                                Ok(())
+                            }).map_err(|e| format!("Failed to create setHandled: {:?}", e))?;
+                            response_obj.set("setHandled", set_handled).map_err(|e| format!("Failed to set setHandled: {:?}", e))?;
+
+                            // Store response object as global for method access
+                            ctx.globals().set("__currentTerminalKeyResponse", response_obj.clone()).map_err(|e| format!("Failed to set __currentTerminalKeyResponse: {:?}", e))?;
+
+                            // Call the handler function
+                            let call_result = func.call::<(Object, Object), Value>((request_obj, response_obj.clone()));
+
+                            match call_result {
+                                Ok(result) => {
+                                    // If result is a Promise, resolve it
+                                    if let Some(promise) = result.into_promise() {
+                                        if let Err(e) = promise.finish::<()>() {
+                                            let error_msg = Self::format_js_error(&ctx, &e);
+                                            error!("Handler error in mod '{}': {}", mod_id, error_msg);
+                                            return Err(format!("Handler error: {}", error_msg));
+                                        }
+                                    }
+
+                                    // Read back the response values
+                                    let handled: bool = response_obj.get("handled").unwrap_or(false);
+                                    Ok(handled)
+                                }
+                                Err(e) => {
+                                    let error_msg = Self::format_js_error(&ctx, &e);
+                                    error!("Handler call error in mod '{}': {}", mod_id, error_msg);
+                                    Err(format!("Handler call error: {}", error_msg))
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            error!("Handler {} not found in mod '{}'", handler_id, mod_id);
+                            Err(format!("Handler {} not found", handler_id))
+                        }
+                        Err(e) => {
+                            error!("Failed to get handler {} from mod '{}': {:?}", handler_id, mod_id, e);
+                            Err(format!("Failed to get handler: {:?}", e))
+                        }
+                    }
+                })
+                .await;
+
+            // Update response based on handler result
+            match result {
+                Ok(handled) => {
+                    response.handled = handled;
+
+                    // If handler set handled=true, stop processing more handlers
+                    if handled {
+                        debug!("Handler in mod '{}' marked TerminalKeyPressed as handled", handler.mod_id);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("Handler execution failed: {}", e);
+                    // Continue to next handler on error
+                }
+            }
+        }
+
+        response
+    }
+
     /// Call a mod function asynchronously with return value
     pub async fn call_mod_function_with_return_async(
         &mut self,
@@ -1312,6 +1444,22 @@ impl RuntimeAdapter for JsRuntimeAdapter {
             tokio::runtime::Handle::current()
                 .block_on(self.call_event_handler_async(handler_id, event_name, args))
         })
+    }
+
+    fn dispatch_terminal_key(
+        &self,
+        request: &crate::api::TerminalKeyRequest,
+    ) -> crate::api::TerminalKeyResponse {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.dispatch_terminal_key(request))
+        })
+    }
+
+    fn terminal_key_handler_count(&self) -> usize {
+        self.system_api
+            .event_dispatcher()
+            .handler_count(crate::api::SystemEvents::TerminalKeyPressed)
     }
 }
 

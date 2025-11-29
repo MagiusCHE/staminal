@@ -28,6 +28,9 @@ pub enum SystemEvents {
     /// URI request event - triggered when a stam:// or http:// request is made
     /// Additional args: protocol filter, route filter
     RequestUri = 1,
+    /// Terminal key pressed event - triggered when a key is pressed in the terminal
+    /// Allows mods to intercept key combinations like Ctrl+C before default behavior
+    TerminalKeyPressed = 2,
 }
 
 impl SystemEvents {
@@ -35,6 +38,7 @@ impl SystemEvents {
     pub fn from_u32(value: u32) -> Option<Self> {
         match value {
             1 => Some(SystemEvents::RequestUri),
+            2 => Some(SystemEvents::TerminalKeyPressed),
             _ => None,
         }
     }
@@ -48,6 +52,7 @@ impl SystemEvents {
     pub fn to_key(&self) -> String {
         match self {
             SystemEvents::RequestUri => "system:RequestUri".to_string(),
+            SystemEvents::TerminalKeyPressed => "system:TerminalKeyPressed".to_string(),
         }
     }
 
@@ -55,6 +60,7 @@ impl SystemEvents {
     pub fn from_key(key: &str) -> Option<Self> {
         match key {
             "system:RequestUri" => Some(SystemEvents::RequestUri),
+            "system:TerminalKeyPressed" => Some(SystemEvents::TerminalKeyPressed),
             _ => None,
         }
     }
@@ -264,6 +270,90 @@ impl UriResponse {
     }
 }
 
+/// Request object passed to TerminalKeyPressed handlers
+///
+/// Contains information about the key that was pressed, including
+/// modifier keys (Ctrl, Alt, Shift, Meta).
+#[derive(Debug, Clone)]
+pub struct TerminalKeyRequest {
+    /// The main key pressed (e.g., "c", "z", "Enter", "Escape", "F1")
+    pub key: String,
+    /// Whether Ctrl key is pressed
+    pub ctrl: bool,
+    /// Whether Alt key is pressed
+    pub alt: bool,
+    /// Whether Shift key is pressed
+    pub shift: bool,
+    /// Whether Meta/Super/Cmd key is pressed
+    pub meta: bool,
+    /// Human-readable combo string (e.g., "Ctrl+C", "Ctrl+Shift+Z", "F1")
+    pub combo: String,
+}
+
+impl TerminalKeyRequest {
+    /// Create a new TerminalKeyRequest
+    pub fn new(key: impl Into<String>, ctrl: bool, alt: bool, shift: bool, meta: bool) -> Self {
+        let key = key.into();
+        let combo = Self::build_combo(&key, ctrl, alt, shift, meta);
+        Self {
+            key,
+            ctrl,
+            alt,
+            shift,
+            meta,
+            combo,
+        }
+    }
+
+    /// Build a human-readable combo string from key and modifiers
+    fn build_combo(key: &str, ctrl: bool, alt: bool, shift: bool, meta: bool) -> String {
+        let mut parts = Vec::new();
+        if ctrl {
+            parts.push("Ctrl");
+        }
+        if alt {
+            parts.push("Alt");
+        }
+        if shift {
+            parts.push("Shift");
+        }
+        if meta {
+            parts.push("Meta");
+        }
+        parts.push(key);
+        parts.join("+")
+    }
+}
+
+/// Response object for TerminalKeyPressed handlers
+///
+/// This object is allocated by the Core and passed to handlers.
+/// Handlers set `handled = true` to prevent default behavior (e.g., SIGINT for Ctrl+C).
+#[derive(Debug, Clone)]
+pub struct TerminalKeyResponse {
+    /// Whether the key press has been handled (default: false)
+    /// If true after all handlers run, the default terminal behavior is suppressed
+    pub handled: bool,
+}
+
+impl Default for TerminalKeyResponse {
+    fn default() -> Self {
+        Self { handled: false }
+    }
+}
+
+impl TerminalKeyResponse {
+    /// Create a new TerminalKeyResponse
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set whether the key press has been handled
+    pub fn set_handled(&mut self, handled: bool) {
+        self.handled = handled;
+    }
+}
+
 /// Handler registration information
 #[derive(Clone)]
 pub struct EventHandler {
@@ -454,6 +544,20 @@ impl EventDispatcher {
     pub fn get_handlers_for_custom_event(&self, event_name: &str) -> Vec<EventHandler> {
         let handlers = self.handlers.read().unwrap();
         let key = EventKey::Custom(event_name.to_string()).to_string_key();
+
+        handlers
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Get handlers for TerminalKeyPressed event
+    ///
+    /// Returns all handlers registered for the TerminalKeyPressed event,
+    /// sorted by priority (lower first).
+    pub fn get_handlers_for_terminal_key(&self) -> Vec<EventHandler> {
+        let handlers = self.handlers.read().unwrap();
+        let key = EventKey::System(SystemEvents::TerminalKeyPressed).to_string_key();
 
         handlers
             .get(&key)

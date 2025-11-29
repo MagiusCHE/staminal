@@ -16,6 +16,7 @@ use std::path::Path;
 pub mod api;
 pub mod logging;
 pub mod runtime_type;
+pub mod terminal_input;
 
 // Conditional module imports based on features
 #[cfg(feature = "js")]
@@ -91,6 +92,24 @@ pub trait RuntimeAdapter {
         event_name: &str,
         args: &[String],
     ) -> Result<(), Box<dyn std::error::Error>>;
+
+    /// Dispatch a TerminalKeyPressed event to all registered handlers
+    ///
+    /// This method finds all handlers registered for TerminalKeyPressed, calls them
+    /// in priority order (lowest first), and returns whether the event was handled.
+    ///
+    /// # Arguments
+    /// * `request` - The terminal key request containing key and modifier information
+    ///
+    /// # Returns
+    /// A `TerminalKeyResponse` containing whether the event was handled
+    fn dispatch_terminal_key(&self, request: &api::TerminalKeyRequest) -> api::TerminalKeyResponse;
+
+    /// Get the number of handlers registered for TerminalKeyPressed event
+    ///
+    /// This is used to determine if any mod has registered to handle terminal input,
+    /// which affects whether the default "Ctrl+C to exit" message should be shown.
+    fn terminal_key_handler_count(&self) -> usize;
 }
 
 /// Manager for all mod runtimes
@@ -229,6 +248,38 @@ impl RuntimeManager {
             .ok_or_else(|| "JavaScript runtime not available for event handlers")?;
 
         runtime.call_event_handler(handler_id, event_name, args)
+    }
+
+    /// Dispatch a TerminalKeyPressed event to all registered handlers
+    ///
+    /// This method iterates through all runtime adapters and dispatches the
+    /// TerminalKeyPressed event. If any handler marks the event as handled,
+    /// the loop stops and returns immediately.
+    ///
+    /// # Arguments
+    /// * `request` - The terminal key request containing key and modifier information
+    ///
+    /// # Returns
+    /// A `TerminalKeyResponse` containing whether the event was handled by any runtime
+    pub fn dispatch_terminal_key(&self, request: &api::TerminalKeyRequest) -> api::TerminalKeyResponse {
+        // Dispatch to all runtimes (currently only JavaScript)
+        // If any runtime handles the event, stop and return
+        for runtime in self.runtimes.values() {
+            let response = runtime.dispatch_terminal_key(request);
+            if response.handled {
+                return response;
+            }
+        }
+        // No runtime handled the event
+        api::TerminalKeyResponse::default()
+    }
+
+    /// Get the total number of handlers registered for TerminalKeyPressed across all runtimes
+    ///
+    /// This is used to determine if any mod has registered to handle terminal input,
+    /// which affects whether the default "Ctrl+C to exit" message should be shown.
+    pub fn terminal_key_handler_count(&self) -> usize {
+        self.runtimes.values().map(|r| r.terminal_key_handler_count()).sum()
     }
 }
 

@@ -1,6 +1,6 @@
 export class Manager {
     constructor() {
-        console.log("Initialized.");
+        console.debug("Initialized.");
     }
 
     async register() {
@@ -8,6 +8,7 @@ export class Manager {
         // Route prefix: /mods-manager/ - will match /mods-manager/{mod_id}/download
         system.register_event(SystemEvents.RequestUri, this.handle_mod_request.bind(this), 100, "stam://", "/mods-manager/");
     }
+
 
     async run() {
     }

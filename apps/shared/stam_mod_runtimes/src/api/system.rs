@@ -22,6 +22,16 @@ pub struct AttachModRequest {
     pub response_tx: oneshot::Sender<Result<(), String>>,
 }
 
+/// Request for graceful shutdown
+///
+/// This is used by `system.exit(code)` to request a graceful shutdown
+/// instead of terminating the process immediately.
+#[derive(Debug)]
+pub struct ShutdownRequest {
+    /// The exit code (0 = success, non-zero = error)
+    pub exit_code: i32,
+}
+
 /// Filter for mod packages (client or server side)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
@@ -97,7 +107,7 @@ impl ModPackagesRegistry {
         let registry: ModPackagesRegistry = serde_json::from_str(&content)
             .map_err(|e| format!("Failed to parse mod-packages.json: {}", e))?;
 
-        tracing::info!(
+        tracing::debug!(
             "Loaded mod-packages.json: {} client packages, {} server packages",
             registry.client.len(),
             registry.server.len()
@@ -178,21 +188,29 @@ pub struct SystemApi {
     attach_request_tx: Arc<RwLock<Option<mpsc::Sender<AttachModRequest>>>>,
     /// Channel receiver for attach mod requests (main loop)
     attach_request_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<AttachModRequest>>>>,
+    /// Channel sender for shutdown requests (JS -> main loop)
+    shutdown_request_tx: Arc<RwLock<Option<mpsc::Sender<ShutdownRequest>>>>,
+    /// Channel receiver for shutdown requests (main loop)
+    shutdown_request_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<ShutdownRequest>>>>,
 }
 
 impl SystemApi {
     /// Create a new SystemApi with an empty mod list
     pub fn new() -> Self {
         // Create mpsc channel for attach requests (buffered with capacity 16)
-        let (tx, rx) = mpsc::channel::<AttachModRequest>(16);
+        let (attach_tx, attach_rx) = mpsc::channel::<AttachModRequest>(16);
+        // Create mpsc channel for shutdown requests (capacity 1 is enough)
+        let (shutdown_tx, shutdown_rx) = mpsc::channel::<ShutdownRequest>(1);
 
         Self {
             mods: Arc::new(RwLock::new(Vec::new())),
             event_dispatcher: EventDispatcher::new(),
             mod_packages: Arc::new(RwLock::new(None)),
             home_dir: Arc::new(RwLock::new(None)),
-            attach_request_tx: Arc::new(RwLock::new(Some(tx))),
-            attach_request_rx: Arc::new(tokio::sync::Mutex::new(Some(rx))),
+            attach_request_tx: Arc::new(RwLock::new(Some(attach_tx))),
+            attach_request_rx: Arc::new(tokio::sync::Mutex::new(Some(attach_rx))),
+            shutdown_request_tx: Arc::new(RwLock::new(Some(shutdown_tx))),
+            shutdown_request_rx: Arc::new(tokio::sync::Mutex::new(Some(shutdown_rx))),
         }
     }
 
@@ -228,6 +246,31 @@ impl SystemApi {
     /// This is used by the main loop to receive and process attach requests.
     pub async fn take_attach_receiver(&self) -> Option<mpsc::Receiver<AttachModRequest>> {
         let mut guard = self.attach_request_rx.lock().await;
+        guard.take()
+    }
+
+    /// Send a shutdown request
+    ///
+    /// This is called by `system.exit(code)` to request a graceful shutdown
+    /// instead of terminating the process immediately.
+    pub fn request_shutdown(&self, exit_code: i32) -> Result<(), String> {
+        let tx = {
+            let guard = self.shutdown_request_tx.read().unwrap();
+            guard.clone()
+        };
+
+        let tx = tx.ok_or_else(|| "Shutdown request channel not available".to_string())?;
+
+        // Use try_send since we don't want to block
+        tx.try_send(ShutdownRequest { exit_code })
+            .map_err(|e| format!("Failed to send shutdown request: {}", e))
+    }
+
+    /// Take the shutdown request receiver (can only be called once)
+    ///
+    /// This is used by the main loop to receive and process shutdown requests.
+    pub async fn take_shutdown_receiver(&self) -> Option<mpsc::Receiver<ShutdownRequest>> {
+        let mut guard = self.shutdown_request_rx.lock().await;
         guard.take()
     }
 
@@ -367,7 +410,7 @@ impl SystemApi {
 
         let mod_target_dir = mods_dir.join(mod_id);
 
-        tracing::info!("Installing mod '{}' from {} to {}",
+        tracing::debug!("Installing mod '{}' from {} to {}",
             mod_id,
             zip_path.display(),
             mod_target_dir.display());
@@ -409,7 +452,7 @@ impl SystemApi {
         };
 
         self.register_mod(mod_info);
-        tracing::info!("Mod '{}' installed and registered (loaded=false)", mod_id);
+        tracing::debug!("Mod '{}' installed and registered (loaded=false)", mod_id);
 
         Ok(mod_target_dir)
     }
@@ -434,7 +477,7 @@ impl Default for SystemApi {
 /// # Returns
 /// Ok(()) on success, or Err(String) on failure
 pub fn extract_mod_zip(zip_path: &std::path::Path, target_dir: &std::path::Path) -> Result<(), String> {
-    tracing::info!("Extracting ZIP {} to {}",
+    tracing::debug!("Extracting ZIP {} to {}",
         zip_path.display(),
         target_dir.display());
 
@@ -483,6 +526,6 @@ pub fn extract_mod_zip(zip_path: &std::path::Path, target_dir: &std::path::Path)
         }
     }
 
-    tracing::info!("ZIP extracted successfully to {}", target_dir.display());
+    tracing::debug!("ZIP extracted successfully to {}", target_dir.display());
     Ok(())
 }
