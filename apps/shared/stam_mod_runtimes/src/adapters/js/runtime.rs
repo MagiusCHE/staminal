@@ -37,7 +37,7 @@ fn signal_fatal_error() {
 }
 
 use super::{JsRuntimeConfig, bindings};
-use crate::api::{AppApi, LocaleApi, NetworkApi, SystemApi, ModInfo, UriResponse};
+use crate::api::{AppApi, LocaleApi, NetworkApi, SystemApi, ModInfo, UriResponse, UiApi, WindowApi};
 use crate::{ModReturnValue, RuntimeAdapter};
 use bindings::TempFileManager;
 
@@ -395,6 +395,10 @@ pub struct JsRuntimeAdapter {
     locale_api: Option<LocaleApi>,
     /// Network API for downloading resources (optional, client-side only)
     network_api: Option<NetworkApi>,
+    /// UI API for rendering UI from scripts (optional, client-side only)
+    ui_api: Option<UiApi>,
+    /// Window API for controlling the application window (optional, client-side only)
+    window_api: Option<WindowApi>,
     /// Temp file manager for downloaded content (tracks and cleans up temp files)
     temp_file_manager: TempFileManager,
 }
@@ -460,6 +464,8 @@ impl JsRuntimeAdapter {
             system_api: SystemApi::new(),
             locale_api: None,
             network_api: None,
+            ui_api: None,
+            window_api: None,
             temp_file_manager: TempFileManager::new(),
         };
 
@@ -482,6 +488,24 @@ impl JsRuntimeAdapter {
     /// Typically only used on the client side.
     pub fn set_network_api(&mut self, network_api: NetworkApi) {
         self.network_api = Some(network_api);
+    }
+
+    /// Set the UI API for rendering UI from scripts
+    ///
+    /// This should be called before loading any mods to ensure
+    /// the `ui` global object is available in all mod contexts.
+    /// Only used on the client side with a graphics context.
+    pub fn set_ui_api(&mut self, ui_api: UiApi) {
+        self.ui_api = Some(ui_api);
+    }
+
+    /// Set the Window API for controlling the application window
+    ///
+    /// This should be called before loading any mods to ensure
+    /// the `window_api` global object is available in all mod contexts.
+    /// Only used on the client side with a graphics context.
+    pub fn set_window_api(&mut self, window_api: WindowApi) {
+        self.window_api = Some(window_api);
     }
 
     /// Get a clone of the async runtime for the event loop
@@ -519,6 +543,8 @@ impl JsRuntimeAdapter {
         let system_api = self.system_api.clone();
         let locale_api = self.locale_api.clone();
         let network_api = self.network_api.clone();
+        let ui_api = self.ui_api.clone();
+        let window_api = self.window_api.clone();
         let temp_file_manager = self.temp_file_manager.clone();
 
         // Configure temp directory for downloads (game_data_dir/tmp)
@@ -554,6 +580,16 @@ impl JsRuntimeAdapter {
                 // Register network API (network.download()) - client-side only
                 if let Some(network) = network_api {
                     bindings::setup_network_api(ctx.clone(), network, temp_file_manager)?;
+                }
+
+                // Register UI API (ui.register_render(), ui.update_widget()) - client-side only
+                if let Some(ui) = ui_api {
+                    bindings::setup_ui_api(ctx.clone(), ui)?;
+                }
+
+                // Register Window API (window_api.set_title(), etc.) - client-side only
+                if let Some(window) = window_api {
+                    bindings::setup_window_api(ctx.clone(), window)?;
                 }
 
                 // Register text API (Text.DecodeUTF8())

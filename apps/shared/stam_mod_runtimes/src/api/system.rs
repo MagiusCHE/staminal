@@ -164,6 +164,13 @@ pub struct ModInfo {
 /// This API is shared across all mod contexts and provides read-only
 /// access to the list of loaded mods. The list is created once when
 /// mods are loaded, and each call to `get_mods()` returns a fresh copy.
+/// Information about the current game session
+#[derive(Debug, Clone, Default)]
+pub struct GameInfo {
+    /// The game ID (e.g., "demo")
+    pub id: String,
+}
+
 #[derive(Clone)]
 pub struct SystemApi {
     /// Shared registry of all loaded mods
@@ -178,6 +185,8 @@ pub struct SystemApi {
     attach_request_tx: Arc<RwLock<Option<mpsc::Sender<AttachModRequest>>>>,
     /// Channel receiver for attach mod requests (main loop)
     attach_request_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<AttachModRequest>>>>,
+    /// Information about the current game session
+    game_info: Arc<RwLock<GameInfo>>,
 }
 
 impl SystemApi {
@@ -193,7 +202,20 @@ impl SystemApi {
             home_dir: Arc::new(RwLock::new(None)),
             attach_request_tx: Arc::new(RwLock::new(Some(tx))),
             attach_request_rx: Arc::new(tokio::sync::Mutex::new(Some(rx))),
+            game_info: Arc::new(RwLock::new(GameInfo::default())),
         }
+    }
+
+    /// Set the game ID for the current session
+    pub fn set_game_id(&self, game_id: &str) {
+        if let Ok(mut info) = self.game_info.write() {
+            info.id = game_id.to_string();
+        }
+    }
+
+    /// Get information about the current game session
+    pub fn get_game_info(&self) -> GameInfo {
+        self.game_info.read().map(|info| info.clone()).unwrap_or_default()
     }
 
     /// Send a request to attach a mod and wait for the result

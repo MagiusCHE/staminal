@@ -30,6 +30,8 @@
 //! time by build.rs and embedded into the binary.
 
 use crate::api::{AppApi, ConsoleApi, LocaleApi, NetworkApi, RequestUriProtocol, SystemApi, SystemEvents, ModSide};
+use crate::api::{UiApi, UiCommand, UiEvent, UiLayout, Widget, WidgetState, UiTheme, Anchor};
+use crate::api::{WindowApi, WindowCommand};
 
 /// JavaScript glue code - embedded at compile time from src/adapters/js/glue/*.js
 /// This code sets up console, error handlers, and other runtime utilities.
@@ -540,6 +542,20 @@ impl SystemJS {
 
         tracing::debug!("SystemJS::get_mods returning array");
         Ok(array)
+    }
+
+    /// Get information about the current game session
+    ///
+    /// Returns an object with properties:
+    /// - id: string (the game_id)
+    #[qjs(rename = "get_game_info")]
+    pub fn get_game_info<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+        let game_info = self.system_api.get_game_info();
+
+        let obj = Object::new(ctx)?;
+        obj.set("id", game_info.id.as_str())?;
+
+        Ok(obj)
     }
 
     /// Register an event handler for a system event (number) or custom event (string)
@@ -1166,6 +1182,369 @@ pub fn setup_text_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
 
     // Register Text object globally
     globals.set("Text", text_obj)?;
+
+    Ok(())
+}
+
+/// JavaScript UI API class
+///
+/// This class is exposed to JavaScript as the `ui` global object.
+/// It provides methods for creating and managing UI elements.
+#[rquickjs::class]
+#[derive(Clone, Trace, JsLifetime)]
+pub struct UiJS {
+    #[qjs(skip_trace)]
+    ui_api: UiApi,
+}
+
+#[rquickjs::methods]
+impl UiJS {
+    /// Register a UI layout for rendering
+    ///
+    /// # Arguments
+    /// * `id` - Unique identifier for this UI layout
+    /// * `layout_json` - JSON string describing the UI layout
+    ///
+    /// # Returns
+    /// Promise that resolves on success
+    #[qjs(rename = "register_render")]
+    pub fn register_render(&self, id: String, layout_json: String) -> rquickjs::Result<()> {
+        // Parse the layout JSON
+        let layout: UiLayout = serde_json::from_str(&layout_json)
+            .map_err(|e| {
+                tracing::error!("Failed to parse UI layout JSON: {}", e);
+                rquickjs::Error::Exception
+            })?;
+
+        self.ui_api.register_render(&id, layout)
+            .map_err(|e| {
+                tracing::error!("Failed to register UI render '{}': {}", id, e);
+                rquickjs::Error::Exception
+            })
+    }
+
+    /// Unregister a UI layout
+    ///
+    /// # Arguments
+    /// * `id` - The layout identifier to unregister
+    #[qjs(rename = "unregister_render")]
+    pub fn unregister_render(&self, id: String) -> rquickjs::Result<()> {
+        self.ui_api.unregister_render(&id)
+            .map_err(|e| {
+                tracing::error!("Failed to unregister UI render '{}': {}", id, e);
+                rquickjs::Error::Exception
+            })
+    }
+
+    /// Update the state of a widget
+    ///
+    /// # Arguments
+    /// * `id` - The widget identifier
+    /// * `state_json` - JSON string describing the new widget state
+    #[qjs(rename = "update_widget")]
+    pub fn update_widget(&self, id: String, state_json: String) -> rquickjs::Result<()> {
+        let state: WidgetState = serde_json::from_str(&state_json)
+            .map_err(|e| {
+                tracing::error!("Failed to parse widget state JSON: {}", e);
+                rquickjs::Error::Exception
+            })?;
+
+        self.ui_api.update_widget(&id, state)
+            .map_err(|e| {
+                tracing::error!("Failed to update widget '{}': {}", id, e);
+                rquickjs::Error::Exception
+            })
+    }
+
+    /// Poll for UI events (non-blocking)
+    ///
+    /// # Returns
+    /// Array of UI event objects
+    #[qjs(rename = "poll_events")]
+    pub fn poll_events<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Array<'js>> {
+        let events = self.ui_api.poll_events();
+        let array = Array::new(ctx.clone())?;
+
+        for (idx, event) in events.iter().enumerate() {
+            let obj = Object::new(ctx.clone())?;
+
+            match event {
+                UiEvent::ButtonClicked { id } => {
+                    obj.set("type", "button_clicked")?;
+                    obj.set("id", id.as_str())?;
+                }
+                UiEvent::TextChanged { id, value } => {
+                    obj.set("type", "text_changed")?;
+                    obj.set("id", id.as_str())?;
+                    obj.set("value", value.as_str())?;
+                }
+                UiEvent::CheckboxToggled { id, checked } => {
+                    obj.set("type", "checkbox_toggled")?;
+                    obj.set("id", id.as_str())?;
+                    obj.set("checked", *checked)?;
+                }
+                UiEvent::DropdownChanged { id, index } => {
+                    obj.set("type", "dropdown_changed")?;
+                    obj.set("id", id.as_str())?;
+                    obj.set("index", *index as u32)?;
+                }
+                UiEvent::SliderChanged { id, value } => {
+                    obj.set("type", "slider_changed")?;
+                    obj.set("id", id.as_str())?;
+                    obj.set("value", *value as f64)?;
+                }
+            }
+
+            array.set(idx, obj)?;
+        }
+
+        Ok(array)
+    }
+
+    /// Set the UI theme
+    ///
+    /// # Arguments
+    /// * `theme_json` - JSON string describing the theme
+    #[qjs(rename = "set_theme")]
+    pub fn set_theme(&self, theme_json: String) -> rquickjs::Result<()> {
+        let theme: UiTheme = serde_json::from_str(&theme_json)
+            .map_err(|e| {
+                tracing::error!("Failed to parse theme JSON: {}", e);
+                rquickjs::Error::Exception
+            })?;
+
+        self.ui_api.set_theme(theme)
+            .map_err(|e| {
+                tracing::error!("Failed to set theme: {}", e);
+                rquickjs::Error::Exception
+            })
+    }
+}
+
+/// Setup UI API in the JavaScript context
+///
+/// Provides ui.register_render(), ui.unregister_render(), ui.update_widget(),
+/// ui.poll_events(), and ui.set_theme() functions for UI control.
+pub fn setup_ui_api(ctx: Ctx, ui_api: UiApi) -> Result<(), rquickjs::Error> {
+    // Define the class in the runtime
+    rquickjs::Class::<UiJS>::define(&ctx.globals())?;
+
+    // Create an instance of UiJS
+    let ui_obj = rquickjs::Class::<UiJS>::instance(ctx.clone(), UiJS { ui_api })?;
+
+    // Register it as global 'ui' object
+    ctx.globals().set("ui", ui_obj)?;
+
+    // Create Anchor enum for positioning
+    let anchor = Object::new(ctx.clone())?;
+    anchor.set("TopLeft", "top_left")?;
+    anchor.set("TopCenter", "top_center")?;
+    anchor.set("TopRight", "top_right")?;
+    anchor.set("CenterLeft", "center_left")?;
+    anchor.set("Center", "center")?;
+    anchor.set("CenterRight", "center_right")?;
+    anchor.set("BottomLeft", "bottom_left")?;
+    anchor.set("BottomCenter", "bottom_center")?;
+    anchor.set("BottomRight", "bottom_right")?;
+    ctx.globals().set("Anchor", anchor)?;
+
+    Ok(())
+}
+
+/// JavaScript Window Handle class
+///
+/// This class represents a window handle with integrated methods.
+/// Returned by `window.get_main_window()` and `window.create()`.
+///
+/// Usage:
+/// ```javascript
+/// const win = window.get_main_window();
+/// win.set_title("My Game");
+/// win.set_size(1920, 1080);
+/// win.show();
+/// ```
+#[rquickjs::class]
+#[derive(Clone, Trace, JsLifetime)]
+pub struct WindowHandleJS {
+    #[qjs(skip_trace)]
+    window_api: WindowApi,
+    #[qjs(skip_trace)]
+    handle: crate::api::WindowHandle,
+}
+
+#[rquickjs::methods]
+impl WindowHandleJS {
+    /// Get the window ID
+    #[qjs(get, rename = "id")]
+    pub fn id(&self) -> u32 {
+        self.handle.id
+    }
+
+    /// Set the window title
+    #[qjs(rename = "set_title")]
+    pub fn set_title(&self, title: String) -> rquickjs::Result<()> {
+        self.window_api.set_title(self.handle, &title)
+            .map_err(|e| {
+                tracing::error!("Failed to set window title: {}", e);
+                rquickjs::Error::Exception
+            })
+    }
+
+    /// Set the window size
+    #[qjs(rename = "set_size")]
+    pub fn set_size(&self, width: u32, height: u32) -> rquickjs::Result<()> {
+        self.window_api.set_size(self.handle, width, height)
+            .map_err(|e| {
+                tracing::error!("Failed to set window size: {}", e);
+                rquickjs::Error::Exception
+            })
+    }
+
+    /// Get the window size (only accurate for main window)
+    #[qjs(rename = "get_size")]
+    pub fn get_size<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+        let (width, height) = self.window_api.get_size();
+        let obj = Object::new(ctx)?;
+        obj.set("width", width)?;
+        obj.set("height", height)?;
+        Ok(obj)
+    }
+
+    /// Set fullscreen mode
+    #[qjs(rename = "set_fullscreen")]
+    pub fn set_fullscreen(&self, fullscreen: bool) -> rquickjs::Result<()> {
+        self.window_api.set_fullscreen(self.handle, fullscreen)
+            .map_err(|e| {
+                tracing::error!("Failed to set fullscreen: {}", e);
+                rquickjs::Error::Exception
+            })
+    }
+
+    /// Set whether the window is resizable
+    #[qjs(rename = "set_resizable")]
+    pub fn set_resizable(&self, resizable: bool) -> rquickjs::Result<()> {
+        self.window_api.set_resizable(self.handle, resizable)
+            .map_err(|e| {
+                tracing::error!("Failed to set resizable: {}", e);
+                rquickjs::Error::Exception
+            })
+    }
+
+    /// Show the window
+    #[qjs(rename = "show")]
+    pub fn show(&self) -> rquickjs::Result<()> {
+        self.window_api.show(self.handle, true)
+            .map_err(|e| {
+                tracing::error!("Failed to show window: {}", e);
+                rquickjs::Error::Exception
+            })
+    }
+
+    /// Hide the window
+    #[qjs(rename = "hide")]
+    pub fn hide(&self) -> rquickjs::Result<()> {
+        self.window_api.show(self.handle, false)
+            .map_err(|e| {
+                tracing::error!("Failed to hide window: {}", e);
+                rquickjs::Error::Exception
+            })
+    }
+
+    /// Request window close
+    #[qjs(rename = "close")]
+    pub fn close(&self) -> rquickjs::Result<()> {
+        self.window_api.request_close(self.handle)
+            .map_err(|e| {
+                tracing::error!("Failed to request window close: {}", e);
+                rquickjs::Error::Exception
+            })
+    }
+}
+
+/// JavaScript Window API class
+///
+/// This class is exposed to JavaScript as the `window` global object.
+/// It provides factory methods for creating and getting window handles.
+///
+/// Usage:
+/// ```javascript
+/// // Get the main window (created hidden at startup)
+/// const main = window.get_main_window();
+/// main.set_title("My Game");
+/// main.set_size(1920, 1080);
+/// main.show();
+///
+/// // Create additional windows
+/// const popup = window.create("Settings", 400, 300, true);
+/// popup.set_title("New Title");
+/// popup.hide();
+/// ```
+#[rquickjs::class]
+#[derive(Clone, Trace, JsLifetime)]
+pub struct WindowJS {
+    #[qjs(skip_trace)]
+    window_api: WindowApi,
+}
+
+#[rquickjs::methods]
+impl WindowJS {
+    /// Get the main window handle
+    ///
+    /// The main window is created hidden at startup.
+    /// Use `.show()` to make it visible.
+    ///
+    /// # Returns
+    /// A WindowHandleJS object with methods to control the window
+    #[qjs(rename = "get_main_window")]
+    pub fn get_main_window<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        let handle = self.window_api.get_main_window();
+        let instance = rquickjs::Class::<WindowHandleJS>::instance(ctx, WindowHandleJS {
+            window_api: self.window_api.clone(),
+            handle,
+        })?;
+        Ok(instance.into_value())
+    }
+
+    /// Create a new additional window
+    ///
+    /// # Arguments
+    /// * `title` - Window title
+    /// * `width` - Window width in pixels
+    /// * `height` - Window height in pixels
+    /// * `resizable` - Whether the window is resizable (optional, defaults to true)
+    ///
+    /// # Returns
+    /// A WindowHandleJS object with methods to control the window
+    #[qjs(rename = "create")]
+    pub fn create<'js>(&self, ctx: Ctx<'js>, title: String, width: u32, height: u32, resizable: Option<bool>) -> rquickjs::Result<Value<'js>> {
+        let handle = self.window_api.create(&title, width, height, resizable.unwrap_or(true))
+            .map_err(|e| {
+                tracing::error!("Failed to create window: {}", e);
+                rquickjs::Error::Exception
+            })?;
+
+        let instance = rquickjs::Class::<WindowHandleJS>::instance(ctx, WindowHandleJS {
+            window_api: self.window_api.clone(),
+            handle,
+        })?;
+        Ok(instance.into_value())
+    }
+}
+
+/// Setup Window API in the JavaScript context
+///
+/// Provides window.get_main_window() and window.create() factory methods
+/// that return WindowHandleJS objects with integrated control methods.
+pub fn setup_window_api(ctx: Ctx, window_api: WindowApi) -> Result<(), rquickjs::Error> {
+    // Define both classes in the runtime
+    rquickjs::Class::<WindowHandleJS>::define(&ctx.globals())?;
+    rquickjs::Class::<WindowJS>::define(&ctx.globals())?;
+
+    // Create an instance of WindowJS
+    let window_obj = rquickjs::Class::<WindowJS>::instance(ctx.clone(), WindowJS { window_api })?;
+
+    // Register it as global 'window' object
+    ctx.globals().set("window", window_obj)?;
 
     Ok(())
 }

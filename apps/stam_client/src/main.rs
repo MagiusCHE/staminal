@@ -7,7 +7,7 @@ use tracing::{Level, debug, error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use stam_mod_runtimes::api::{DownloadResponse, LocaleApi, NetworkApi, NetworkConfig, parse_stam_uri, sanitize_uri, extract_mod_zip};
+use stam_mod_runtimes::api::{DownloadResponse, LocaleApi, NetworkApi, NetworkConfig, parse_stam_uri, sanitize_uri, extract_mod_zip, UiApi, WindowApi};
 use stam_mod_runtimes::logging::{create_custom_timer, CustomFormatter};
 use stam_protocol::{GameMessage, GameStream, IntentType, PrimalMessage, PrimalStream};
 use stam_schema::{ModManifest, Validatable, validate_mod_dependencies, validate_version_range};
@@ -17,6 +17,7 @@ mod locale;
 use locale::LocaleManager;
 
 mod app_paths;
+mod bevy;
 mod mod_runtime;
 
 use app_paths::AppPaths;
@@ -281,6 +282,9 @@ async fn connect_to_game_server(
     game_id: &str,
     locale: Arc<LocaleManager>,
     app_paths: &AppPaths,
+    ui_api: UiApi,
+    window_api: WindowApi,
+    mut shutdown_rx: bevy::ShutdownReceiver,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize game-specific directory
     info!("Initializing directories for game '{}'...", game_id);
@@ -684,6 +688,9 @@ async fn connect_to_game_server(
                 // Set home directory for mod installation (used by system.install_mod_from_path)
                 js_adapter.system_api().set_home_dir(game_root.clone());
 
+                // Set game ID for scripts to access via system.get_game_info()
+                js_adapter.system_api().set_game_id(&game_id);
+
                 // Setup locale API for internationalization in JavaScript mods
                 // LocaleApi now supports hierarchical lookup: mod locale -> global locale
                 // We wrap Arc<LocaleManager> in a Mutex to make it Send+Sync for use in closures
@@ -739,8 +746,17 @@ async fn connect_to_game_server(
                 }));
                 js_adapter.set_network_api(network_api);
 
+                // Setup UI and Window APIs for Bevy integration (client-side only)
+                // These APIs are passed from main() where UiBridge was created
+                // They connect the mod runtimes to the Bevy render loop
+                info!("Setting up UI and Window APIs...");
+                js_adapter.set_ui_api(ui_api.clone());
+                js_adapter.set_window_api(window_api.clone());
+                info!("UI and Window APIs configured");
+
                 // Get runtime handle BEFORE moving the adapter to the manager
                 let js_runtime = js_adapter.get_runtime();
+                info!("Got JS runtime handle");
 
                 // Build mod info map for easier lookup (only for available mods)
                 struct ModData {
@@ -1002,7 +1018,13 @@ async fn connect_to_game_server(
             tokio::select! {
                 biased;
 
-                // Handle Ctrl+C first
+                // Handle shutdown signal from Bevy (window closed)
+                _ = shutdown_rx.wait() => {
+                    info!("Window closed, shutting down...");
+                    break;
+                }
+
+                // Handle Ctrl+C
                 _ = tokio::signal::ctrl_c() => {
                     info!("{}", locale.get("ctrl-c-received"));
                     break;
@@ -1068,8 +1090,11 @@ async fn connect_to_game_server(
             }
         }
     } else {
-        // No JS runtime, just wait for connection or Ctrl+C
+        // No JS runtime, just wait for connection, Ctrl+C, or window close
         tokio::select! {
+            _ = shutdown_rx.wait() => {
+                info!("Window closed, shutting down...");
+            }
             _ = maintain_game_connection(&mut stream, locale.clone()) => {
                 info!("{}", locale.get("connection-closed"));
             }
@@ -1273,14 +1298,72 @@ struct Args {
     /// Enable logging to file (stam_client.log in current directory)
     #[arg(long, env = "STAM_LOG_FILE")]
     log_file: bool,
+
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // Parse args first to check if log file is requested
     let args = Args::parse();
 
-    // Setup logging
+    // Setup logging BEFORE anything else (sync, must happen on main thread first)
+    setup_logging(args.log_file);
+
+    info!("========================================");
+    info!("   STAMINAL CLIENT v{}", VERSION);
+    info!("========================================");
+
+    // Create UiBridge BEFORE spawning async tasks
+    // This connects the mod runtimes (JS) to the Bevy renderer
+    let (ui_bridge, ui_api, window_api, shutdown_handle, shutdown_receiver) = bevy::UiBridge::new();
+
+    // Clone shutdown_handle so we can use it from both threads
+    let shutdown_handle_for_bevy = shutdown_handle.clone();
+
+    // Spawn the client logic in a dedicated thread with its own tokio runtime
+    // This is necessary because:
+    // 1. Bevy MUST run on the main thread (windowing system requirement)
+    // 2. The JS runtime (rquickjs) is not Send, so we need a dedicated thread
+    // 3. We use multi_thread runtime because JsRuntimeAdapter uses block_in_place
+    let client_thread = std::thread::Builder::new()
+        .name("staminal-client".to_string())
+        .spawn(move || {
+            // Create tokio runtime in this dedicated thread
+            // NOTE: Must be multi_thread because JsRuntimeAdapter::new() uses
+            // tokio::task::block_in_place which requires a multi-threaded runtime
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("Failed to create tokio runtime");
+
+            // Run the async client logic
+            runtime.block_on(async_main(args, ui_api, window_api, shutdown_receiver));
+
+            // Signal Bevy to shutdown when client exits
+            shutdown_handle.shutdown();
+        })
+        .expect("Failed to spawn client thread");
+
+    // Create Bevy app configuration
+    let bevy_config = bevy::StaminalApp::default();
+
+    // Run Bevy on the main thread - this blocks until the window is closed
+    // Bevy MUST run on main thread due to windowing system requirements
+    bevy::run_bevy_app(bevy_config, ui_bridge);
+
+    // When Bevy exits (window closed), signal the client thread to shutdown
+    info!("Bevy window closed, signaling client to shutdown...");
+    shutdown_handle_for_bevy.shutdown();
+
+    // Wait for client thread to finish
+    let _ = client_thread.join();
+
+    info!("Client shutdown complete");
+}
+
+/// Setup tracing/logging subsystem
+fn setup_logging(log_to_file: bool) {
+    use tracing_subscriber::EnvFilter;
+
     let timer = create_custom_timer();
 
     // Disable ANSI colors if:
@@ -1291,8 +1374,36 @@ async fn main() {
         && std::env::var("NO_COLOR").is_err()
         && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
 
-    // Setup logging based on whether file logging is enabled
-    if args.log_file {
+    // Create filter: DEBUG for our code, ERROR for noisy libraries
+    // Can be overridden with RUST_LOG env var
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new("debug")
+            // Bevy modules - only show errors
+            .add_directive("bevy_app=error".parse().unwrap())
+            .add_directive("bevy_ecs=error".parse().unwrap())
+            .add_directive("bevy_render=error".parse().unwrap())
+            .add_directive("bevy_winit=info".parse().unwrap())
+            .add_directive("bevy_core=error".parse().unwrap())
+            .add_directive("bevy_input=error".parse().unwrap())
+            .add_directive("bevy_window=error".parse().unwrap())
+            .add_directive("bevy_asset=error".parse().unwrap())
+            .add_directive("bevy_egui=error".parse().unwrap())
+            .add_directive("bevy_shader=error".parse().unwrap())
+            .add_directive("bevy_image=error".parse().unwrap())
+            // GPU/graphics libraries
+            .add_directive("wgpu=error".parse().unwrap())
+            .add_directive("wgpu_core=error".parse().unwrap())
+            .add_directive("wgpu_hal=error".parse().unwrap())
+            .add_directive("naga=error".parse().unwrap())
+            // Wayland/X11 logging
+            .add_directive("log=error".parse().unwrap())
+            .add_directive("sctk=error".parse().unwrap())
+            .add_directive("calloop=error".parse().unwrap())
+            // Input/gamepad
+            .add_directive("gilrs=error".parse().unwrap())
+    });
+
+    if log_to_file {
         // File logging: no ANSI colors
         let file_appender = std::fs::File::create("stam_client.log")
             .expect("Unable to create stam_client.log");
@@ -1312,9 +1423,7 @@ async fn main() {
                     .event_format(formatter_file)
                     .with_writer(file_appender),
             )
-            .with(tracing_subscriber::filter::LevelFilter::from_level(
-                Level::DEBUG,
-            ))
+            .with(filter)
             .init();
     } else {
         let formatter = CustomFormatter::new(timer, use_ansi)
@@ -1325,16 +1434,23 @@ async fn main() {
                     .event_format(formatter)
                     .with_writer(std::io::stdout),
             )
-            .with(tracing_subscriber::filter::LevelFilter::from_level(
-                Level::DEBUG,
-            ))
+            .with(filter)
             .init();
     }
+}
 
-    info!("========================================");
-    info!("   STAMINAL CLIENT v{}", VERSION);
-    info!("========================================");
-
+/// Async client logic - runs in tokio background task
+///
+/// This function handles all async operations:
+/// - Server connection and authentication
+/// - Mod loading and runtime management
+/// - Game event loop
+///
+/// # Arguments
+/// * `args` - Command line arguments
+/// * `ui_api` - UI API for mod runtimes to send UI commands
+/// * `window_api` - Window API for mod runtimes to control the window
+async fn async_main(args: Args, ui_api: UiApi, window_api: WindowApi, mut shutdown_rx: bevy::ShutdownReceiver) {
     // Check if custom home is specified
     let custom_home = args.home.as_deref();
     if let Some(home) = custom_home {
@@ -1584,6 +1700,9 @@ async fn main() {
                 &first_server.game_id,
                 locale.clone(),
                 &app_paths,
+                ui_api,
+                window_api,
+                shutdown_rx,
             )
             .await
             {

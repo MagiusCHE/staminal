@@ -10,13 +10,17 @@ pub mod locale;
 pub mod network;
 pub mod process;
 pub mod system;
+pub mod ui;
+pub mod window;
 
 pub use console::ConsoleApi;
 pub use events::{EventDispatcher, EventHandler, EventKey, SystemEvents, RequestUriProtocol, RequestUri, UriResponse, SendEventRequest};
 pub use locale::LocaleApi;
 pub use network::{NetworkApi, NetworkConfig, DownloadResponse, parse_stam_uri, sanitize_uri};
 pub use process::{ProcessApi, AppApi};
-pub use system::{SystemApi, ModInfo, ModSide, ModPackageInfo, ModPackageManifest, ModPackagesRegistry, extract_mod_zip, AttachModRequest};
+pub use system::{SystemApi, ModInfo, ModSide, ModPackageInfo, ModPackageManifest, ModPackagesRegistry, extract_mod_zip, AttachModRequest, GameInfo};
+pub use ui::{UiApi, UiCommand, UiEvent, UiLayout, Widget, WidgetState, UiTheme, Anchor};
+pub use window::{WindowApi, WindowCommand, WindowEvent, WindowHandle, MAIN_WINDOW_ID};
 
 use std::collections::HashMap;
 use std::any::Any;

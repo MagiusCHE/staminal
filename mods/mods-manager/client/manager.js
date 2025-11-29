@@ -1,17 +1,26 @@
 import { wait } from "@js-helper";
 export class Manager {
+    #window = undefined;
+    #game_info = undefined;
     constructor() {
         console.log("Initialized.");
     }
 
     async run() {
+        this.#game_info = system.get_game_info();
         await this.prepare_ui();
         await this.ensure_mods();
     }
 
     async prepare_ui() {
         console.log("Preparing UI...");
-        console.warn("TODO: implement User Interface to show mods loading/startup progress...");
+        this.#window = window.get_main_window();
+        window.create("Staminal2: " + this.#game_info.id, 800, 600, true);
+        this.#window.set_size(1280, 720);
+        this.#window.set_title("Staminal: " + this.#game_info.name);
+        this.#window.set_resizable(true);
+        this.#window.show(true);
+        console.log("UI: created window:", this.#window);
     }
 
     async ensure_mods() {

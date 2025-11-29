@@ -20,6 +20,9 @@ unic-langid = "0.9"
 # ZIP file extraction
 zip = "2.2"
 
+# Cross-thread communication
+crossbeam-channel = "0.5"
+
 # Optional runtime-specific dependencies
 rquickjs = { version = "0.10", features = ["classes", "properties", "loader", "futures", "parallel", "macro"], optional = true }
 

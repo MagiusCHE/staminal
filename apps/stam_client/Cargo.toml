@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = ["time", "local-time"] }
+tracing-subscriber = { version = "0.3.20", features = ["time", "local-time", "env-filter"] }
 tracing-appender = "0.2"
 time = { version = "0.3", features = ["macros", "formatting", "local-offset"] }
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -24,6 +24,20 @@ dirs = "5.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 semver = "1.0"
+
+# Game engine and UI
+bevy = { version = "0.17", default-features = false, features = [
+    "bevy_winit",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_window",
+    "x11",
+    "wayland",
+] }
+bevy_egui = "0.38"
+
+# Cross-thread communication for mod APIs
+crossbeam-channel = "0.5"
 
 [[bin]]
 name = "stam_client"
