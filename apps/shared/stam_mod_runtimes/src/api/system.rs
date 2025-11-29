@@ -169,6 +169,13 @@ pub struct ModInfo {
     pub download_url: Option<String>,
 }
 
+/// Information about the current game context (client-side only)
+#[derive(Clone, Debug, Default)]
+pub struct GameInfo {
+    /// The game identifier
+    pub id: String,
+}
+
 /// System API providing access to mod registry and system state
 ///
 /// This API is shared across all mod contexts and provides read-only
@@ -192,6 +199,8 @@ pub struct SystemApi {
     shutdown_request_tx: Arc<RwLock<Option<mpsc::Sender<ShutdownRequest>>>>,
     /// Channel receiver for shutdown requests (main loop)
     shutdown_request_rx: Arc<tokio::sync::Mutex<Option<mpsc::Receiver<ShutdownRequest>>>>,
+    /// Game information (client-side only, None on server)
+    game_info: Arc<RwLock<Option<GameInfo>>>,
 }
 
 impl SystemApi {
@@ -211,7 +220,25 @@ impl SystemApi {
             attach_request_rx: Arc::new(tokio::sync::Mutex::new(Some(attach_rx))),
             shutdown_request_tx: Arc::new(RwLock::new(Some(shutdown_tx))),
             shutdown_request_rx: Arc::new(tokio::sync::Mutex::new(Some(shutdown_rx))),
+            game_info: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set the game information (client-side only)
+    ///
+    /// This should be called on the client after connecting to a game server.
+    /// On the server, this should NOT be called - leave game_info as None.
+    pub fn set_game_info(&self, game_id: impl Into<String>) {
+        let mut info = self.game_info.write().unwrap();
+        *info = Some(GameInfo { id: game_id.into() });
+    }
+
+    /// Get the game information (client-side only)
+    ///
+    /// Returns None on server (game_info not set) or if not yet connected to a game.
+    pub fn get_game_info(&self) -> Option<GameInfo> {
+        let info = self.game_info.read().unwrap();
+        info.clone()
     }
 
     /// Send a request to attach a mod and wait for the result

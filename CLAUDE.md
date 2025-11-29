@@ -140,6 +140,25 @@ When developing features for the mod system (`stam_mod_runtimes`):
 - Ensure ANSI color codes are disabled when logs are redirected to files or piped (respect TTY detection and `NO_COLOR`), so log files stay plain and readable with correct mod identifiers.
 - **Always check for TTY before using colors**: When implementing any logging or console output that uses colors (including in scripting runtimes), always verify that stdout/stderr is connected to a TTY. Never output ANSI escape codes to files or pipes.
 
+### Client-Only vs Server-Only APIs
+When implementing new APIs or methods that are only available on one side (client or server):
+1. **Always provide descriptive error messages**: Never let the user see a generic `TypeError: undefined is not a function` or `ReferenceError`. Instead, throw a clear error explaining the limitation.
+2. **Pattern for client-only methods**: Check if the required context is available (e.g., `game_info` for client). If not, throw an error with the message: `"<method_name>() is not available on the server. This method is client-only."`
+3. **Pattern for server-only methods**: Similarly, throw: `"<method_name>() is not available on the client. This method is server-only."`
+4. **Document the limitation**: In the Rust doc comments, clearly mark the method as client-only or server-only.
+5. **Example implementation** (see `system.get_game_info()`):
+   ```rust
+   match self.system_api.get_game_info() {
+       Some(info) => { /* return data */ },
+       None => {
+           Err(ctx.throw(rquickjs::String::from_str(
+               ctx.clone(),
+               "system.get_game_info() is not available on the server. This method is client-only.",
+           )?.into()))
+       }
+   }
+   ```
+
 ### Script Files (CRITICAL)
 **NEVER modify script files (JavaScript, Lua, etc.) unless the user EXPLICITLY requests it.**
 

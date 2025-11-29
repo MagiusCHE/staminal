@@ -1,7 +1,9 @@
 import { wait } from "@js-helper";
 export class Manager {
+    #game_info;
     constructor() {
         console.log("Initialized.");
+        this.#game_info = system.get_game_info();
     }
 
     register() {
@@ -22,7 +24,16 @@ export class Manager {
     }
 
     async prepare_ui() {
-        console.log("Preparing UI...");
+        console.log("Preparing UI for game %o", this.#game_info.id);
+        
+        // await system.enable_graphic_engine(GraphicEngines.Bevy)
+        // this.#window = window.get_main_window();
+        // //window.create("Staminal2: " + this.#game_info.id, 800, 600, true);
+        // this.#window.set_position_mode(WindowPositionModes.Centered);
+        // this.#window.set_size(1280, 720);
+        // this.#window.set_title("Staminal: " + this.#game_info.name);
+        // this.#window.set_resizable(true);
+
         console.warn("TODO: implement User Interface to show mods loading/startup progress...");
     }
 

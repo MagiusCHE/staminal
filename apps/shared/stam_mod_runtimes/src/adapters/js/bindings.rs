@@ -907,6 +907,33 @@ impl SystemJS {
             }
         }
     }
+
+    /// Get information about the current game context (client-side only)
+    ///
+    /// # Returns
+    /// An object with:
+    /// - id: string - The game identifier
+    ///
+    /// # Throws
+    /// Error if called on the server (game info not available on server)
+    #[qjs(rename = "get_game_info")]
+    pub fn get_game_info<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+        match self.system_api.get_game_info() {
+            Some(game_info) => {
+                let obj = Object::new(ctx)?;
+                obj.set("id", game_info.id.as_str())?;
+                Ok(obj)
+            }
+            None => {
+                // Throw a descriptive error for server-side calls
+                Err(ctx.throw(rquickjs::String::from_str(
+                    ctx.clone(),
+                    "system.get_game_info() is not available on the server. This method is client-only.",
+                )?
+                .into()))
+            }
+        }
+    }
 }
 
 /// Setup system API in the JavaScript context

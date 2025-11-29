@@ -684,6 +684,9 @@ async fn connect_to_game_server(
                 // Set home directory for mod installation (used by system.install_mod_from_path)
                 js_adapter.system_api().set_home_dir(game_root.clone());
 
+                // Set game info for system.get_game_info() (client-only API)
+                js_adapter.system_api().set_game_info(game_id.clone());
+
                 // Setup locale API for internationalization in JavaScript mods
                 // LocaleApi now supports hierarchical lookup: mod locale -> global locale
                 // We wrap Arc<LocaleManager> in a Mutex to make it Send+Sync for use in closures

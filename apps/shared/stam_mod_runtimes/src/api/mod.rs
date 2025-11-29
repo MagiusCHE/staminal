@@ -16,7 +16,7 @@ pub use events::{EventDispatcher, EventHandler, EventKey, SystemEvents, RequestU
 pub use locale::LocaleApi;
 pub use network::{NetworkApi, NetworkConfig, DownloadResponse, parse_stam_uri, sanitize_uri};
 pub use process::{ProcessApi, AppApi};
-pub use system::{SystemApi, ModInfo, ModSide, ModPackageInfo, ModPackageManifest, ModPackagesRegistry, extract_mod_zip, AttachModRequest, ShutdownRequest};
+pub use system::{SystemApi, ModInfo, ModSide, ModPackageInfo, ModPackageManifest, ModPackagesRegistry, extract_mod_zip, AttachModRequest, ShutdownRequest, GameInfo};
 
 use std::collections::HashMap;
 use std::any::Any;
