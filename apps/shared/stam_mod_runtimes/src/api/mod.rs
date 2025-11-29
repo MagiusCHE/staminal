@@ -20,7 +20,7 @@ pub use network::{NetworkApi, NetworkConfig, DownloadResponse, parse_stam_uri, s
 pub use process::{ProcessApi, AppApi};
 pub use system::{SystemApi, ModInfo, ModSide, ModPackageInfo, ModPackageManifest, ModPackagesRegistry, extract_mod_zip, AttachModRequest, GameInfo};
 pub use ui::{UiApi, UiCommand, UiEvent, UiLayout, Widget, WidgetState, UiTheme, Anchor};
-pub use window::{WindowApi, WindowCommand, WindowEvent, WindowHandle, MAIN_WINDOW_ID};
+pub use window::{WindowApi, WindowCommand, WindowEvent, WindowHandle, WindowPositionMode, MAIN_WINDOW_ID};
 
 use std::collections::HashMap;
 use std::any::Any;

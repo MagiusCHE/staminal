@@ -1459,6 +1459,28 @@ impl WindowHandleJS {
                 rquickjs::Error::Exception
             })
     }
+
+    /// Set window position mode
+    ///
+    /// # Arguments
+    /// * `mode` - Position mode (use WindowPositionModes.Automatic, .Centered, or .Manual)
+    #[qjs(rename = "set_position_mode")]
+    pub fn set_position_mode(&self, mode: u32) -> rquickjs::Result<()> {
+        let position_mode = match mode {
+            0 => crate::api::WindowPositionMode::Automatic,
+            1 => crate::api::WindowPositionMode::Centered,
+            2 => crate::api::WindowPositionMode::Manual,
+            _ => {
+                tracing::error!("Invalid position mode: {}", mode);
+                return Err(rquickjs::Error::Exception);
+            }
+        };
+        self.window_api.set_position_mode(self.handle, position_mode)
+            .map_err(|e| {
+                tracing::error!("Failed to set position mode: {}", e);
+                rquickjs::Error::Exception
+            })
+    }
 }
 
 /// JavaScript Window API class
@@ -1535,6 +1557,7 @@ impl WindowJS {
 ///
 /// Provides window.get_main_window() and window.create() factory methods
 /// that return WindowHandleJS objects with integrated control methods.
+/// Also exposes WindowPositionModes enum as a global constant.
 pub fn setup_window_api(ctx: Ctx, window_api: WindowApi) -> Result<(), rquickjs::Error> {
     // Define both classes in the runtime
     rquickjs::Class::<WindowHandleJS>::define(&ctx.globals())?;
@@ -1545,6 +1568,13 @@ pub fn setup_window_api(ctx: Ctx, window_api: WindowApi) -> Result<(), rquickjs:
 
     // Register it as global 'window' object
     ctx.globals().set("window", window_obj)?;
+
+    // Create WindowPositionModes enum object
+    let position_modes = Object::new(ctx.clone())?;
+    position_modes.set("Automatic", 0u32)?;
+    position_modes.set("Centered", 1u32)?;
+    position_modes.set("Manual", 2u32)?;
+    ctx.globals().set("WindowPositionModes", position_modes)?;
 
     Ok(())
 }

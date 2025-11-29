@@ -13,14 +13,16 @@ export class Manager {
     }
 
     async prepare_ui() {
-        console.log("Preparing UI...");
-        this.#window = window.get_main_window();
-        window.create("Staminal2: " + this.#game_info.id, 800, 600, true);
-        this.#window.set_size(1280, 720);
-        this.#window.set_title("Staminal: " + this.#game_info.name);
-        this.#window.set_resizable(true);
-        this.#window.show(true);
-        console.log("UI: created window:", this.#window);
+        // console.log("Preparing UI...");
+        // await system.enable_graphic_engine(GraphicEngines.Bevy)
+        // this.#window = window.get_main_window();
+        // //window.create("Staminal2: " + this.#game_info.id, 800, 600, true);
+        // this.#window.set_position_mode(WindowPositionModes.Centered);
+        // this.#window.set_size(1280, 720);
+        // this.#window.set_title("Staminal: " + this.#game_info.name);
+        // this.#window.set_resizable(true);
+        // //this.#window.show(true);
+        // console.log("UI: created window:", this.#window);
     }
 
     async ensure_mods() {

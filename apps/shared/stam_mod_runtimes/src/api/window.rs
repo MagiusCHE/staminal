@@ -13,6 +13,19 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// ID for the main window (always 0)
 pub const MAIN_WINDOW_ID: u32 = 0;
 
+/// Window position modes
+///
+/// Determines how the window position is calculated/managed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WindowPositionMode {
+    /// Position is set by the window manager (default on non-Wayland)
+    Automatic,
+    /// Window is centered on the current monitor
+    Centered,
+    /// Window position is set manually with coordinates
+    Manual,
+}
+
 /// Global window ID counter (starts at 1, 0 is reserved for main window)
 static NEXT_WINDOW_ID: AtomicU32 = AtomicU32::new(1);
 
@@ -54,6 +67,8 @@ pub enum WindowCommand {
     SetResizable { id: u32, resizable: bool },
     /// Set window visibility (show/hide)
     SetVisible { id: u32, visible: bool },
+    /// Set window position mode (Automatic, Centered, Manual)
+    SetPositionMode { id: u32, mode: WindowPositionMode },
     /// Request window close
     RequestClose { id: u32 },
 }
@@ -203,6 +218,20 @@ impl WindowApi {
     pub fn request_close(&self, handle: WindowHandle) -> Result<(), String> {
         self.command_tx
             .send(WindowCommand::RequestClose { id: handle.id })
+            .map_err(|e| e.to_string())
+    }
+
+    /// Set window position mode
+    ///
+    /// - `Automatic`: Position is decided by the window manager
+    /// - `Centered`: Window is centered on the current monitor
+    /// - `Manual`: Window position is set manually (use with set_position)
+    pub fn set_position_mode(&self, handle: WindowHandle, mode: WindowPositionMode) -> Result<(), String> {
+        self.command_tx
+            .send(WindowCommand::SetPositionMode {
+                id: handle.id,
+                mode,
+            })
             .map_err(|e| e.to_string())
     }
 

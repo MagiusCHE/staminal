@@ -6,6 +6,7 @@
 //! - Custom systems for mod runtime communication
 
 use bevy::prelude::*;
+use bevy::window::WindowPosition;
 use bevy_egui::EguiPlugin;
 
 use super::ui_bridge::UiBridge;
@@ -17,7 +18,10 @@ use super::systems::{
     sync_window_size,
     render_ui_layouts,
     check_shutdown,
+    apply_initial_hidden_state_system,
+    apply_new_windows_hidden_state,
 };
+use super::window_visibility::{WindowVisibilityStates, is_wayland};
 
 /// Staminal application state
 #[derive(Clone)]
@@ -63,11 +67,16 @@ impl Plugin for StaminalUiPlugin {
             .init_resource::<UiLayouts>()
             // Window registry for tracking script window IDs
             .init_resource::<WindowRegistry>()
+            // Window visibility states for Wayland workaround
+            .init_resource::<WindowVisibilityStates>()
+            // Apply initial hidden state at startup (Wayland workaround)
+            .add_systems(Startup, apply_initial_hidden_state_system)
             // Add systems - process commands first, then render
             .add_systems(Update, (
                 check_shutdown,
                 process_ui_commands,
                 process_window_commands,
+                apply_new_windows_hidden_state,
                 sync_window_size,
             ))
             .add_systems(Update, render_ui_layouts.after(process_ui_commands));
@@ -89,12 +98,33 @@ impl Plugin for StaminalUiPlugin {
 pub fn run_bevy_app(_config: StaminalApp, bridge: UiBridge) {
     tracing::info!("Starting Bevy application with hidden window (waiting for window.show() from script)");
 
+    // On Wayland, we NEVER set visible=false as it can cause the window to get stuck.
+    // Instead, we set visible=true and let apply_initial_hidden_state_system handle
+    // the workaround (minimize + move off-screen).
+    // On non-Wayland (X11, Windows, macOS), visible=false works correctly.
+    let initial_visible = if is_wayland() {
+        tracing::info!("Wayland detected: window will be created visible, then hidden via workaround");
+        true
+    } else {
+        false
+    };
+
+    // On Wayland, we create the window off-screen (1x1 pixel at position 99999,99999)
+    // until show() is called. We must use WindowPosition::At explicitly because
+    // ..default() uses WindowPosition::Centered which ignores subsequent position changes.
+    let (initial_width, initial_height, initial_position) = if is_wayland() {
+        (1, 1, WindowPosition::At(IVec2::new(99999, 99999)))
+    } else {
+        (1280, 720, WindowPosition::Automatic)
+    };
+
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 title: "Staminal".to_string(),
-                resolution: bevy::window::WindowResolution::new(1280, 720),
-                visible: false, // Start hidden, script will show it
+                resolution: bevy::window::WindowResolution::new(initial_width, initial_height),
+                visible: initial_visible,
+                position: initial_position,
                 ..default()
             }),
             ..default()

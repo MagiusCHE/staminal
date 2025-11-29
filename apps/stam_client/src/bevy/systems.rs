@@ -7,12 +7,13 @@
 //! - Manage window state
 
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
+use bevy::window::{PrimaryWindow, WindowPosition};
 use bevy_egui::{EguiContexts, egui};
 
-use stam_mod_runtimes::api::{Anchor, UiCommand, UiEvent, UiLayout, Widget, WidgetState, WindowCommand, MAIN_WINDOW_ID};
+use stam_mod_runtimes::api::{Anchor, UiCommand, UiEvent, UiLayout, Widget, WidgetState, WindowCommand, WindowPositionMode, MAIN_WINDOW_ID};
 
 use super::ui_bridge::UiBridge;
+use super::window_visibility::{WindowVisibilityStates, ensure_window_visibility, apply_initial_hidden_state, should_store_instead_of_apply, is_wayland};
 
 /// Resource that holds all registered UI layouts from scripts
 #[derive(Resource, Default)]
@@ -26,6 +27,10 @@ pub struct UiLayouts {
 /// Component to track script window ID on Bevy Window entities
 #[derive(Component)]
 pub struct ScriptWindowId(pub u32);
+
+/// Marker component for windows that need initial hidden state applied (Wayland workaround)
+#[derive(Component)]
+pub struct NeedsInitialHiddenState;
 
 /// Resource to map script window IDs to Bevy entities
 #[derive(Resource, Default)]
@@ -68,108 +73,188 @@ pub fn process_window_commands(
     mut other_windows_query: Query<(Entity, &mut Window, &ScriptWindowId), Without<PrimaryWindow>>,
     mut commands: Commands,
     mut registry: ResMut<WindowRegistry>,
+    mut visibility_states: ResMut<WindowVisibilityStates>,
 ) {
     for cmd in bridge.poll_window_commands() {
         match cmd {
             WindowCommand::Create { id, title, width, height, resizable } => {
-                // Create always creates a NEW window (id > 0)
-                tracing::info!("Creating new window #{}: {} ({}x{}, resizable={})", id, title, width, height, resizable);
+                // Create always creates a NEW window (id > 0), hidden by default
+                tracing::info!("Creating new window #{}: {} ({}x{}, resizable={}) - hidden by default", id, title, width, height, resizable);
                 let entity = commands.spawn((
                     Window {
                         title,
                         resolution: bevy::window::WindowResolution::new(width, height),
                         resizable,
-                        visible: true,
+                        visible: false, // Windows are created hidden, use .show() to make visible
                         ..default()
                     },
                     ScriptWindowId(id),
+                    // Mark for initial hidden state application (handled by apply_new_windows_hidden_state)
+                    NeedsInitialHiddenState,
                 )).id();
                 registry.windows.insert(id, entity);
             }
             WindowCommand::SetTitle { id, title } => {
                 if id == MAIN_WINDOW_ID {
-                    if let Ok((_, mut window)) = primary_window_query.single_mut() {
-                        tracing::debug!("Setting main window title: {}", title);
-                        window.title = title;
+                    if let Ok((entity, mut window)) = primary_window_query.single_mut() {
+                        if should_store_instead_of_apply(entity, &visibility_states) {
+                            tracing::debug!("Storing main window title (hidden on Wayland): {}", title);
+                            visibility_states.update_title(entity, title);
+                        } else {
+                            tracing::debug!("Setting main window title: {}", title);
+                            window.title = title;
+                        }
                     }
                 } else if let Some(&entity) = registry.windows.get(&id) {
-                    for (e, mut window, _) in other_windows_query.iter_mut() {
-                        if e == entity {
-                            tracing::debug!("Setting window #{} title: {}", id, title);
-                            window.title = title;
-                            break;
+                    if should_store_instead_of_apply(entity, &visibility_states) {
+                        tracing::debug!("Storing window #{} title (hidden on Wayland): {}", id, title);
+                        visibility_states.update_title(entity, title);
+                    } else {
+                        for (e, mut window, _) in other_windows_query.iter_mut() {
+                            if e == entity {
+                                tracing::debug!("Setting window #{} title: {}", id, title);
+                                window.title = title;
+                                break;
+                            }
                         }
                     }
                 }
             }
             WindowCommand::SetSize { id, width, height } => {
                 if id == MAIN_WINDOW_ID {
-                    if let Ok((_, mut window)) = primary_window_query.single_mut() {
-                        tracing::debug!("Setting main window size: {}x{}", width, height);
-                        window.resolution.set(width as f32, height as f32);
+                    if let Ok((entity, mut window)) = primary_window_query.single_mut() {
+                        if should_store_instead_of_apply(entity, &visibility_states) {
+                            tracing::debug!("Storing main window size (hidden on Wayland): {}x{}", width, height);
+                            visibility_states.update_resolution(entity, width as f32, height as f32);
+                        } else {
+                            tracing::debug!("Setting main window size: {}x{}", width, height);
+                            window.resolution.set(width as f32, height as f32);
+                        }
                     }
                 } else if let Some(&entity) = registry.windows.get(&id) {
-                    for (e, mut window, _) in other_windows_query.iter_mut() {
-                        if e == entity {
-                            tracing::debug!("Setting window #{} size: {}x{}", id, width, height);
-                            window.resolution.set(width as f32, height as f32);
-                            break;
+                    if should_store_instead_of_apply(entity, &visibility_states) {
+                        tracing::debug!("Storing window #{} size (hidden on Wayland): {}x{}", id, width, height);
+                        visibility_states.update_resolution(entity, width as f32, height as f32);
+                    } else {
+                        for (e, mut window, _) in other_windows_query.iter_mut() {
+                            if e == entity {
+                                tracing::debug!("Setting window #{} size: {}x{}", id, width, height);
+                                window.resolution.set(width as f32, height as f32);
+                                break;
+                            }
                         }
                     }
                 }
             }
             WindowCommand::SetFullscreen { id, fullscreen } => {
+                let mode = if fullscreen {
+                    bevy::window::WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+                } else {
+                    bevy::window::WindowMode::Windowed
+                };
                 if id == MAIN_WINDOW_ID {
-                    if let Ok((_, mut window)) = primary_window_query.single_mut() {
-                        tracing::debug!("Setting main window fullscreen: {}", fullscreen);
-                        window.mode = if fullscreen {
-                            bevy::window::WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+                    if let Ok((entity, mut window)) = primary_window_query.single_mut() {
+                        if should_store_instead_of_apply(entity, &visibility_states) {
+                            tracing::debug!("Storing main window fullscreen (hidden on Wayland): {}", fullscreen);
+                            visibility_states.update_mode(entity, mode);
                         } else {
-                            bevy::window::WindowMode::Windowed
-                        };
+                            tracing::debug!("Setting main window fullscreen: {}", fullscreen);
+                            window.mode = mode;
+                        }
                     }
                 } else if let Some(&entity) = registry.windows.get(&id) {
-                    for (e, mut window, _) in other_windows_query.iter_mut() {
-                        if e == entity {
-                            tracing::debug!("Setting window #{} fullscreen: {}", id, fullscreen);
-                            window.mode = if fullscreen {
-                                bevy::window::WindowMode::BorderlessFullscreen(MonitorSelection::Current)
-                            } else {
-                                bevy::window::WindowMode::Windowed
-                            };
-                            break;
+                    if should_store_instead_of_apply(entity, &visibility_states) {
+                        tracing::debug!("Storing window #{} fullscreen (hidden on Wayland): {}", id, fullscreen);
+                        visibility_states.update_mode(entity, mode);
+                    } else {
+                        for (e, mut window, _) in other_windows_query.iter_mut() {
+                            if e == entity {
+                                tracing::debug!("Setting window #{} fullscreen: {}", id, fullscreen);
+                                window.mode = mode;
+                                break;
+                            }
                         }
                     }
                 }
             }
             WindowCommand::SetResizable { id, resizable } => {
                 if id == MAIN_WINDOW_ID {
-                    if let Ok((_, mut window)) = primary_window_query.single_mut() {
-                        tracing::debug!("Setting main window resizable: {}", resizable);
-                        window.resizable = resizable;
+                    if let Ok((entity, mut window)) = primary_window_query.single_mut() {
+                        if should_store_instead_of_apply(entity, &visibility_states) {
+                            tracing::debug!("Storing main window resizable (hidden on Wayland): {}", resizable);
+                            visibility_states.update_resizable(entity, resizable);
+                        } else {
+                            tracing::debug!("Setting main window resizable: {}", resizable);
+                            window.resizable = resizable;
+                        }
                     }
                 } else if let Some(&entity) = registry.windows.get(&id) {
-                    for (e, mut window, _) in other_windows_query.iter_mut() {
-                        if e == entity {
-                            tracing::debug!("Setting window #{} resizable: {}", id, resizable);
-                            window.resizable = resizable;
-                            break;
+                    if should_store_instead_of_apply(entity, &visibility_states) {
+                        tracing::debug!("Storing window #{} resizable (hidden on Wayland): {}", id, resizable);
+                        visibility_states.update_resizable(entity, resizable);
+                    } else {
+                        for (e, mut window, _) in other_windows_query.iter_mut() {
+                            if e == entity {
+                                tracing::debug!("Setting window #{} resizable: {}", id, resizable);
+                                window.resizable = resizable;
+                                break;
+                            }
                         }
                     }
                 }
             }
             WindowCommand::SetVisible { id, visible } => {
                 if id == MAIN_WINDOW_ID {
-                    if let Ok((_, mut window)) = primary_window_query.single_mut() {
+                    if let Ok((entity, mut window)) = primary_window_query.single_mut() {
                         tracing::info!("Setting main window visible: {}", visible);
-                        window.visible = visible;
+                        ensure_window_visibility(&mut window, entity, visible, false, &mut visibility_states);
                     }
                 } else if let Some(&entity) = registry.windows.get(&id) {
                     for (e, mut window, _) in other_windows_query.iter_mut() {
                         if e == entity {
                             tracing::info!("Setting window #{} visible: {}", id, visible);
-                            window.visible = visible;
+                            ensure_window_visibility(&mut window, e, visible, false, &mut visibility_states);
                             break;
+                        }
+                    }
+                }
+            }
+            WindowCommand::SetPositionMode { id, mode } => {
+                // Convert WindowPositionMode to Bevy's WindowPosition
+                let bevy_position = match mode {
+                    WindowPositionMode::Automatic => WindowPosition::Automatic,
+                    WindowPositionMode::Centered => WindowPosition::Centered(MonitorSelection::Current),
+                    WindowPositionMode::Manual => {
+                        // Manual mode doesn't change the position, just sets it to current position
+                        // This is used before calling set_position() to enable manual positioning
+                        tracing::debug!("Window #{} set to Manual position mode (position unchanged)", id);
+                        // Keep current position - we don't change it here
+                        // A separate SetPosition command would be needed to actually move the window
+                        return;
+                    }
+                };
+
+                if id == MAIN_WINDOW_ID {
+                    if let Ok((entity, mut window)) = primary_window_query.single_mut() {
+                        if should_store_instead_of_apply(entity, &visibility_states) {
+                            tracing::debug!("Storing main window position mode (hidden on Wayland): {:?}", mode);
+                            visibility_states.update_position(entity, bevy_position);
+                        } else {
+                            tracing::debug!("Setting main window position mode: {:?}", mode);
+                            window.position = bevy_position;
+                        }
+                    }
+                } else if let Some(&entity) = registry.windows.get(&id) {
+                    if should_store_instead_of_apply(entity, &visibility_states) {
+                        tracing::debug!("Storing window #{} position mode (hidden on Wayland): {:?}", id, mode);
+                        visibility_states.update_position(entity, bevy_position);
+                    } else {
+                        for (e, mut window, _) in other_windows_query.iter_mut() {
+                            if e == entity {
+                                tracing::debug!("Setting window #{} position mode: {:?}", id, mode);
+                                window.position = bevy_position;
+                                break;
+                            }
                         }
                     }
                 }
@@ -554,5 +639,61 @@ fn render_widget_inline(
                 }
             });
         }
+    }
+}
+
+/// Startup system to apply initial hidden state to the primary window (Wayland workaround)
+///
+/// On Wayland, windows are created with visible=true (to avoid stuck windows),
+/// so we need to apply the hiding workaround here.
+/// On non-Wayland, windows are created with visible=false, so we only apply
+/// the workaround if visible is already false.
+pub fn apply_initial_hidden_state_system(
+    mut window_query: Query<(Entity, &mut Window), With<PrimaryWindow>>,
+    mut visibility_states: ResMut<WindowVisibilityStates>,
+) {
+    if let Ok((entity, mut window)) = window_query.single_mut() {
+        if is_wayland() {
+            // On Wayland: window was created with visible=true, apply hiding workaround
+            tracing::info!("Applying initial hidden state to primary window (Wayland)");
+            // Store the current state and apply workaround
+            visibility_states.store_state(entity, &window);
+            // Move off-screen, set minimum size (1x1 pixel) and hide from taskbar
+            // IMPORTANT: Use WindowPosition::At (NOT Centered!) - Centered ignores position changes
+            // DO NOT minimize - causes window to become unresponsive on Wayland
+            // window.visible stays true on Wayland!
+            window.position = WindowPosition::At(IVec2::new(99999, 99999));
+            window.resolution.set(1.0, 1.0);
+            window.skip_taskbar = true;
+        }
+    }
+}
+
+/// System to apply initial hidden state to newly created windows (Wayland workaround)
+/// This runs in Update and processes windows with the NeedsInitialHiddenState marker
+///
+/// On Wayland, all windows must be created with visible=true, so we always apply
+/// the hiding workaround.
+/// On non-Wayland, windows can be created with visible=false directly.
+pub fn apply_new_windows_hidden_state(
+    mut commands: Commands,
+    mut window_query: Query<(Entity, &mut Window), With<NeedsInitialHiddenState>>,
+    mut visibility_states: ResMut<WindowVisibilityStates>,
+) {
+    for (entity, mut window) in window_query.iter_mut() {
+        if is_wayland() {
+            // On Wayland: apply hiding workaround regardless of visible state
+            tracing::info!("Applying initial hidden state to new window {:?} (Wayland)", entity);
+            visibility_states.store_state(entity, &window);
+            window.visible = true; // Ensure visible=true on Wayland
+            // Move off-screen, set minimum size (1x1 pixel) and hide from taskbar
+            // IMPORTANT: Use WindowPosition::At (NOT Centered!) - Centered ignores position changes
+            // DO NOT minimize - causes window to become unresponsive on Wayland
+            window.position = WindowPosition::At(IVec2::new(99999, 99999));
+            window.resolution.set(1.0, 1.0);
+            window.skip_taskbar = true;
+        }
+        // Remove the marker component
+        commands.entity(entity).remove::<NeedsInitialHiddenState>();
     }
 }

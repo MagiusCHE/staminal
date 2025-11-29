@@ -22,9 +22,9 @@ main.set_resizable(true);
 // Show the window
 main.show();
 
-// Create an additional window
+// Create an additional window (also created hidden)
 const settings = window.create("Settings", 400, 300, true);
-settings.show();
+settings.show(); // Must call show() to make it visible
 ```
 
 ---
@@ -293,8 +293,7 @@ function closeSettings(settingsWindow) {
 
 ## Notes
 
-- The main window (id=0) is always created hidden at startup
-- You must call `.show()` on the main window to make it visible
-- Additional windows created with `window.create()` are visible by default
+- **All windows are created hidden by default** - both the main window and windows created with `window.create()`
+- You must call `.show()` on any window to make it visible
 - Window handles can be stored and reused throughout your mod's lifecycle
 - Closing the main window will trigger application shutdown
