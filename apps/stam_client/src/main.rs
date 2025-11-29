@@ -1029,6 +1029,10 @@ async fn connect_to_game_server(
         };
         let terminal_input_active = terminal_rx.is_some();
 
+        // Pin the JS event loop future to avoid recreating it on each loop iteration
+        // This matches the server's optimized pattern for persistent async futures
+        let mut js_loop = std::pin::pin!(run_js_event_loop(js_runtime.clone()));
+
         // Main event loop - handles JS events, attach requests, send_event, shutdown, terminal input, and connection
         loop {
             tokio::select! {
@@ -1135,8 +1139,8 @@ async fn connect_to_game_server(
                     break;
                 }
 
-                // Run JS event loop for timer callbacks
-                fatal_error = run_js_event_loop(js_runtime.clone()) => {
+                // Run JS event loop for timer callbacks (uses pinned future reference)
+                fatal_error = &mut js_loop => {
                     if fatal_error {
                         error!("{}", locale.get("js-fatal-error"));
                     } else {

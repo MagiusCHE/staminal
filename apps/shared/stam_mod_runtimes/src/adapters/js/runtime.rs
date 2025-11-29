@@ -1477,8 +1477,6 @@ impl RuntimeAdapter for JsRuntimeAdapter {
 /// Uses `runtime.drive()` which properly uses async Wakers to wait for new jobs
 /// without busy-spinning. We use tokio::select! to also listen for fatal error signals.
 pub async fn run_js_event_loop(runtime: Arc<AsyncRuntime>) -> bool {
-    debug!("Starting JavaScript event loop");
-
     // Check for fatal error before starting
     if has_fatal_error() {
         error!("Fatal JavaScript error detected, terminating event loop");

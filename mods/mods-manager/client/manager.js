@@ -8,7 +8,7 @@ export class Manager {
         system.register_event(SystemEvents.TerminalKeyPressed, this.TerminalKeyPressed.bind(this), 100);
     }
     async TerminalKeyPressed(req, res) {
-        console.log("Console key pressed:", req);
+        //console.log("Console key pressed:", req);
         if (req.key == "c" && req.ctrl) {
             res.handled = true;
             system.exit(0);
