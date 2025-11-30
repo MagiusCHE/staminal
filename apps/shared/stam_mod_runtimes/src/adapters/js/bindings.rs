@@ -505,7 +505,7 @@ impl SystemJS {
     /// - mod_type: string | null
     /// - priority: number
     /// - bootstrapped: boolean
-    #[qjs(rename = "get_mods")]
+    #[qjs(rename = "getMods")]
     pub fn get_mods<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Array<'js>> {
         //tracing::debug!("SystemJS::get_mods called");
 
@@ -553,7 +553,7 @@ impl SystemJS {
     ///
     /// # Returns
     /// Unique handler ID for later removal
-    #[qjs(rename = "register_event")]
+    #[qjs(rename = "registerEvent")]
     pub fn register_event<'js>(
         &self,
         ctx: Ctx<'js>,
@@ -675,7 +675,7 @@ impl SystemJS {
     ///
     /// # Returns
     /// Promise that resolves when all handlers have completed
-    #[qjs(rename = "send_event")]
+    #[qjs(rename = "sendEvent")]
     pub async fn send_event<'js>(&self, ctx: Ctx<'js>, event_name: String, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
         // Convert each JS value to JSON string
         let json_args: Vec<String> = args.0.iter()
@@ -709,7 +709,7 @@ impl SystemJS {
     ///
     /// # Returns
     /// true if the handler was found and removed, false otherwise
-    #[qjs(rename = "unregister_event")]
+    #[qjs(rename = "unregisterEvent")]
     pub fn unregister_event(&self, ctx: Ctx<'_>, handler_id: u64) -> rquickjs::Result<bool> {
         tracing::debug!(
             "SystemJS::unregister_event called: handler_id={}",
@@ -775,7 +775,7 @@ impl SystemJS {
     /// - sha512: string
     /// - path: string
     /// - manifest: object with name, version, description, entry_point, etc.
-    #[qjs(rename = "get_mod_packages")]
+    #[qjs(rename = "getModPackages")]
     pub fn get_mod_packages<'js>(&self, ctx: Ctx<'js>, side: u32) -> rquickjs::Result<Array<'js>> {
         let mod_side = match ModSide::from_u32(side) {
             Some(s) => s,
@@ -822,7 +822,7 @@ impl SystemJS {
     ///
     /// # Returns
     /// The absolute file path to the mod package ZIP, or null if not found
-    #[qjs(rename = "get_mod_package_file_path")]
+    #[qjs(rename = "getModPackageFilePath")]
     pub fn get_mod_package_file_path(&self, mod_id: String, side: u32) -> rquickjs::Result<Option<String>> {
         let mod_side = match ModSide::from_u32(side) {
             Some(s) => s,
@@ -848,7 +848,7 @@ impl SystemJS {
     ///
     /// # Returns
     /// Promise that resolves to the installation path on success, or rejects on failure
-    #[qjs(rename = "install_mod_from_path")]
+    #[qjs(rename = "installModFromPath")]
     pub async fn install_mod_from_path(&self, zip_path: String, mod_id: String) -> rquickjs::Result<String> {
         tracing::debug!("SystemJS::install_mod_from_path called: zip_path={}, mod_id={}", zip_path, mod_id);
 
@@ -890,7 +890,7 @@ impl SystemJS {
     ///
     /// # Returns
     /// Promise that resolves on success, or rejects on failure
-    #[qjs(rename = "attach_mod")]
+    #[qjs(rename = "attachMod")]
     pub async fn attach_mod(&self, mod_id: String) -> rquickjs::Result<()> {
         //tracing::debug!("SystemJS::attach_mod called: mod_id={}", mod_id);
 
@@ -916,7 +916,7 @@ impl SystemJS {
     ///
     /// # Throws
     /// Error if called on the server (game info not available on server)
-    #[qjs(rename = "get_game_info")]
+    #[qjs(rename = "getGameInfo")]
     pub fn get_game_info<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
         match self.system_api.get_game_info() {
             Some(game_info) => {
@@ -1023,7 +1023,7 @@ impl LocaleJS {
     ///
     /// # Returns
     /// The localized string with arguments substituted, or `[id]` if not found
-    #[qjs(rename = "get_with_args")]
+    #[qjs(rename = "getWithArgs")]
     pub fn get_with_args(
         &self,
         ctx: Ctx<'_>,
