@@ -22,11 +22,13 @@
 
 use std::fmt as std_fmt;
 use std::io::{self, Write};
-use tracing::field::Field;
 use tracing::Level;
+use tracing::field::Field;
 use tracing_subscriber::field::Visit;
 use tracing_subscriber::fmt::time::OffsetTime;
-use tracing_subscriber::fmt::{self, format::Writer, FmtContext, FormatEvent, FormatFields, MakeWriter};
+use tracing_subscriber::fmt::{
+    self, FmtContext, FormatEvent, FormatFields, MakeWriter, format::Writer,
+};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -120,9 +122,7 @@ impl Visit for FieldExtractor {
 
     fn record_debug(&mut self, field: &Field, value: &dyn std_fmt::Debug) {
         match field.name() {
-            "game_id" => {
-                self.game_id = Some(format!("{:?}", value).trim_matches('"').to_string())
-            }
+            "game_id" => self.game_id = Some(format!("{:?}", value).trim_matches('"').to_string()),
             "runtime_type" => {
                 self.runtime_type = Some(format!("{:?}", value).trim_matches('"').to_string())
             }
@@ -233,9 +233,20 @@ where
         } else {
             // Otherwise use the default target formatting
             let target = metadata.target();
-            let display_target = if let Some(prefix) = &self.strip_prefix {
-                target.strip_prefix(prefix).unwrap_or(target)
+
+            // Check if this target belongs to our app (starts with our prefix)
+            let is_our_code = self.strip_prefix.as_ref()
+                .is_some_and(|prefix| target.starts_with(prefix.trim_end_matches("::")));
+
+            let display_target = if is_our_code {
+                // Strip our prefix for cleaner output
+                if let Some(prefix) = &self.strip_prefix {
+                    target.strip_prefix(prefix).unwrap_or(target)
+                } else {
+                    target
+                }
             } else {
+                // External dependency - show full target
                 target
             };
 
@@ -267,13 +278,12 @@ pub fn create_default_timer() -> OffsetTime<time::format_description::well_known
 /// Create a timer with custom format
 ///
 /// Uses format: `[year]/[month]/[day] [hour]:[minute]:[second].[subsecond digits:4]`
-pub fn create_custom_timer(
-) -> OffsetTime<&'static [time::format_description::BorrowedFormatItem<'static>]> {
+pub fn create_custom_timer()
+-> OffsetTime<&'static [time::format_description::BorrowedFormatItem<'static>]> {
     use time::macros::format_description;
 
-    let format = format_description!(
-        "[year]/[month]/[day] [hour]:[minute]:[second].[subsecond digits:4]"
-    );
+    let format =
+        format_description!("[year]/[month]/[day] [hour]:[minute]:[second].[subsecond digits:4]");
     let offset = time::UtcOffset::current_local_offset().unwrap_or(time::UtcOffset::UTC);
     OffsetTime::new(offset, format)
 }
