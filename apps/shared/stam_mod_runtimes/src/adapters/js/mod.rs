@@ -5,6 +5,7 @@
 mod runtime;
 mod config;
 pub mod bindings;
+pub mod graphic_bindings;
 
 pub use runtime::JsRuntimeAdapter;
 pub use runtime::run_js_event_loop;
@@ -13,3 +14,4 @@ pub use runtime::has_fatal_error;
 pub use runtime::flush_pending_jobs;
 pub use config::JsRuntimeConfig;
 pub use bindings::setup_network_api;
+pub use graphic_bindings::setup_graphic_api;

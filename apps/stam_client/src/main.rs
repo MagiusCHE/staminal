@@ -4,10 +4,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 use tracing::{Level, debug, error, info, warn};
+use tracing::subscriber::set_global_default;
 use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
-use stam_mod_runtimes::api::{DownloadResponse, LocaleApi, NetworkApi, NetworkConfig, parse_stam_uri, sanitize_uri, extract_mod_zip};
+use stam_mod_runtimes::api::{DownloadResponse, GraphicApi, GraphicEngines, GraphicProxy, GraphicEvent, PendingMainThreadEngine, LocaleApi, NetworkApi, NetworkConfig, parse_stam_uri, sanitize_uri, extract_mod_zip};
+use graphic::BevyEngine;
 use stam_mod_runtimes::logging::{create_custom_timer, CustomFormatter, RawModeStdoutWriter};
 use stam_protocol::{GameMessage, GameStream, IntentType, PrimalMessage, PrimalStream};
 use stam_schema::{ModManifest, Validatable, validate_mod_dependencies, validate_version_range};
@@ -17,6 +18,7 @@ mod locale;
 use locale::LocaleManager;
 
 mod app_paths;
+mod graphic;
 mod mod_runtime;
 
 use app_paths::AppPaths;
@@ -274,6 +276,10 @@ async fn perform_stam_request(
 }
 
 /// Connect to game server and maintain connection
+///
+/// When a graphic engine needs to run on the main thread, it will be sent via
+/// `engine_tx` and the loop will continue running. This allows the main thread
+/// to run the engine while the async loop keeps processing events.
 async fn connect_to_game_server(
     uri: &str,
     username: &str,
@@ -281,6 +287,8 @@ async fn connect_to_game_server(
     game_id: &str,
     locale: Arc<LocaleManager>,
     app_paths: &AppPaths,
+    graphic_proxy: GraphicProxy,
+    engine_tx: std::sync::mpsc::Sender<PendingMainThreadEngine>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize game-specific directory
     debug!("Initializing directories for game '{}'...", game_id);
@@ -404,6 +412,8 @@ async fn connect_to_game_server(
     let mut system_api_opt: Option<stam_mod_runtimes::api::SystemApi> = None;
     // Game root directory for resolving mod paths
     let mut game_root_opt: Option<std::path::PathBuf> = None;
+    // GraphicProxy for checking pending main-thread engine
+    let mut graphic_proxy_opt: Option<GraphicProxy> = None;
 
     match stream.read_game_message().await {
         Ok(GameMessage::LoginSuccess { game_name, game_version, mods }) => {
@@ -741,6 +751,18 @@ async fn connect_to_game_server(
                     })
                 }));
                 js_adapter.set_network_api(network_api);
+
+                // Set up graphic API (uses the proxy passed from main)
+                // Register BevyEngine factory so scripts can call system.enable_graphic_engine(GraphicEngines.Bevy)
+                graphic_proxy.register_engine_factory(GraphicEngines::Bevy, || {
+                    Box::new(BevyEngine::new())
+                });
+
+                // Clone the proxy for use in the main loop (original is moved into GraphicApi)
+                graphic_proxy_opt = Some(graphic_proxy.clone());
+
+                let graphic_api = GraphicApi::new(graphic_proxy);
+                js_adapter.set_graphic_api(graphic_api);
 
                 // Get runtime handle BEFORE moving the adapter to the manager
                 let js_runtime = js_adapter.get_runtime();
@@ -1136,6 +1158,43 @@ async fn connect_to_game_server(
                     }
                 }
 
+                // Handle graphic engine events (window close, etc.)
+                // Only listen for events when engine is actually running (not pending)
+                event = async {
+                    if let Some(ref gp) = graphic_proxy_opt {
+                        // Don't try to receive events if engine is pending on main thread
+                        // Let the check after select! handle sending it to main thread
+                        if gp.has_pending_main_thread_engine() {
+                            std::future::pending().await
+                        } else {
+                            gp.recv_event().await
+                        }
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    match event {
+                        Some(GraphicEvent::EngineShuttingDown) => {
+                            info!("Graphic engine is shutting down");
+                            break;
+                        }
+                        Some(GraphicEvent::WindowClosed { window_id }) => {
+                            debug!("Window {} closed", window_id);
+                            // Window closed event is informational - engine will send
+                            // EngineShuttingDown if it was the last window
+                        }
+                        Some(other_event) => {
+                            // Other events can be dispatched to mods in the future
+                            debug!("Graphic event received: {:?}", other_event);
+                        }
+                        None => {
+                            // Channel closed - engine died
+                            debug!("Graphic event channel closed");
+                            break;
+                        }
+                    }
+                }
+
                 // Maintain game connection
                 _ = maintain_game_connection(&mut stream, locale.clone()) => {
                     info!("{}", locale.get("connection-closed"));
@@ -1152,12 +1211,25 @@ async fn connect_to_game_server(
                     break;
                 }
             }
+
+            // Check if a graphic engine needs to run on main thread
+            if let Some(ref gp) = graphic_proxy_opt {
+                if gp.has_pending_main_thread_engine() {
+                    debug!("Graphic engine pending - sending to main thread");
+                    // Send the engine to main thread but DON'T return - continue the loop!
+                    if let Some(pending) = gp.take_pending_main_thread_engine().await {
+                        let _ = engine_tx.send(pending);
+                        // Continue loop - terminal input, JS events, network all keep running
+                    }
+                }
+            }
         }
 
         // Stop terminal input reader and wait for cleanup to complete
         if let Some(ref mut handle) = terminal_handle {
             handle.stop_async().await;
         }
+        return Ok(());
     } else {
         // No JS runtime, just wait for connection or Ctrl+C
         // Still dispatch TerminalKeyPressed to allow other runtimes to handle it
@@ -1238,10 +1310,55 @@ async fn connect_to_game_server(
                     break;
                 }
 
+                // Handle graphic engine events (window close, etc.)
+                // Only listen for events when engine is actually running (not pending)
+                event = async {
+                    if let Some(ref gp) = graphic_proxy_opt {
+                        // Don't try to receive events if engine is pending on main thread
+                        // Let the check after select! handle sending it to main thread
+                        if gp.has_pending_main_thread_engine() {
+                            std::future::pending().await
+                        } else {
+                            gp.recv_event().await
+                        }
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    match event {
+                        Some(GraphicEvent::EngineShuttingDown) => {
+                            info!("Graphic engine is shutting down");
+                            break;
+                        }
+                        Some(GraphicEvent::WindowClosed { window_id }) => {
+                            debug!("Window {} closed", window_id);
+                        }
+                        Some(other_event) => {
+                            debug!("Graphic event received: {:?}", other_event);
+                        }
+                        None => {
+                            debug!("Graphic event channel closed");
+                            break;
+                        }
+                    }
+                }
+
                 // Maintain game connection
                 _ = maintain_game_connection(&mut stream, locale.clone()) => {
                     info!("{}", locale.get("connection-closed"));
                     break;
+                }
+            }
+
+            // Check if a graphic engine needs to run on main thread
+            if let Some(ref gp) = graphic_proxy_opt {
+                if gp.has_pending_main_thread_engine() {
+                    debug!("Graphic engine pending - sending to main thread");
+                    // Send the engine to main thread but DON'T return - continue the loop!
+                    if let Some(pending) = gp.take_pending_main_thread_engine().await {
+                        let _ = engine_tx.send(pending);
+                        // Continue loop - terminal input, network all keep running
+                    }
                 }
             }
         }
@@ -1446,10 +1563,51 @@ struct Args {
     /// Enable logging to file (stam_client.log in current directory)
     #[arg(long, env = "STAM_LOG_FILE")]
     log_file: bool,
+
+    /// Enable graphic engine logs (bevy, wgpu, naga) - disabled by default
+    #[arg(long, env = "STAM_GFXENGINELOG", default_value = "false")]
+    gfx_engine_log: bool,
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Channel to receive the pending engine when it's ready
+    // The async loop sends engines here when graphic.enableEngine() is called
+    let (engine_tx, engine_rx) = std::sync::mpsc::channel::<PendingMainThreadEngine>();
+
+    // Spawn the entire async application logic (including tokio runtime) on a separate thread
+    // This keeps the main thread completely free for graphic engines that require it
+    // (like Bevy with winit on Linux/Wayland)
+    let _async_thread = std::thread::spawn(move || {
+        // Create tokio runtime on this thread
+        let runtime = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+
+        // Run the async main - this blocks until the client exits or sends an engine
+        // The loop continues running even after sending an engine
+        runtime.block_on(async_main(engine_tx));
+
+        // Runtime is dropped when async_main returns (client exit)
+    });
+
+    // Main thread waits here until a graphic engine needs to run
+    // When graphic.enableEngine() is called from JS, the engine is sent here
+    // The async loop continues running in the spawned thread
+    if let Ok(pending_engine) = engine_rx.recv() {
+        info!("Starting graphic engine on main thread...");
+
+        // Run the engine on the main thread (blocking)
+        // The async thread continues running in background
+        let mut engine = pending_engine.engine;
+        engine.run(pending_engine.command_rx, pending_engine.event_tx);
+        info!("Graphic engine terminated");
+    }
+
+    // Note: When the graphic engine terminates, we exit immediately
+    // The async thread will be killed when the process exits
+    // This is acceptable because the async loop handles shutdown gracefully
+    // before we reach this point (via Ctrl+C or window close)
+}
+
+async fn async_main(engine_tx: std::sync::mpsc::Sender<PendingMainThreadEngine>) {
     // Parse args first to check if log file is requested
     let args = Args::parse();
 
@@ -1464,6 +1622,17 @@ async fn main() {
         && std::env::var("NO_COLOR").is_err()
         && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
 
+    // Build the log filter based on gfx_engine_log flag
+    // When disabled (default), filter out verbose logs from bevy, wgpu, naga, winit, wayland
+    let log_filter = if args.gfx_engine_log {
+        tracing_subscriber::EnvFilter::new("debug")
+    } else {
+        tracing_subscriber::EnvFilter::new(
+            "debug,bevy=warn,wgpu=warn,naga=warn,winit=warn,naga_oil=warn,\
+             wayland_client=warn,smithay_client_toolkit=warn,calloop=warn,log=warn"
+        )
+    };
+
     // Setup logging based on whether file logging is enabled
     if args.log_file {
         // File logging: no ANSI colors
@@ -1474,7 +1643,7 @@ async fn main() {
         let formatter_file = CustomFormatter::new(timer, false)
             .with_strip_prefix("stam_client::");
 
-        tracing_subscriber::registry()
+        let subscriber = tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter_stdout)
@@ -1487,24 +1656,24 @@ async fn main() {
                     .with_ansi(false)
                     .with_writer(file_appender),
             )
-            .with(tracing_subscriber::filter::LevelFilter::from_level(
-                Level::DEBUG,
-            ))
-            .init();
+            .with(log_filter);
+        // Use set_global_default directly instead of .init() to avoid
+        // initializing the tracing-log bridge (which would forward log crate output)
+        set_global_default(subscriber).expect("Failed to set global subscriber");
     } else {
         let formatter = CustomFormatter::new(timer, use_ansi)
             .with_strip_prefix("stam_client::");
-        tracing_subscriber::registry()
+        let subscriber = tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter)
                     .with_ansi(use_ansi)
                     .with_writer(RawModeStdoutWriter),
             )
-            .with(tracing_subscriber::filter::LevelFilter::from_level(
-                Level::DEBUG,
-            ))
-            .init();
+            .with(log_filter);
+        // Use set_global_default directly instead of .init() to avoid
+        // initializing the tracing-log bridge (which would forward log crate output)
+        set_global_default(subscriber).expect("Failed to set global subscriber");
     }
 
     info!("========================================");
@@ -1752,7 +1921,12 @@ async fn main() {
                 first_server.name, first_server.game_id, first_server.uri
             );
 
+            // Create the GraphicProxy here so it can be shared with connect_to_game_server
+            let graphic_proxy = GraphicProxy::new();
+
             // Parse game server URI and connect
+            // The engine_tx is used to send pending engines to main thread
+            // while the async loop continues running
             if let Err(e) = connect_to_game_server(
                 &first_server.uri,
                 &username,
@@ -1760,6 +1934,8 @@ async fn main() {
                 &first_server.game_id,
                 locale.clone(),
                 &app_paths,
+                graphic_proxy,
+                engine_tx,
             )
             .await
             {

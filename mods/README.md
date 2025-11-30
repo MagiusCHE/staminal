@@ -239,7 +239,7 @@ This allows mods to have different configurations for client and server.
 │  └─────────────────────────────────────────────────────────────────────┘    │
 │                                                                             │
 │  Bootstrap mods can then:                                                   │
-│  • Download missing mods via system.get_mods()                              │
+│  • Download missing mods via system.getMods()                               │
 │  • Load additional mods dynamically                                         │
 │  • Show UI for mod management                                               │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -307,7 +307,7 @@ my-mod/
         └── main.ftl
 ```
 
-The `locale.get()` and `locale.get_with_args()` functions use hierarchical lookup:
+The `locale.get()` and `locale.getWithArgs()` functions use hierarchical lookup:
 
 1. **Mod's locale** (if present for current language)
 2. **Mod's fallback locale** (e.g., en-US)
@@ -321,7 +321,7 @@ Example usage in JavaScript:
 const msg = locale.get("welcome-message");
 
 // Message with arguments
-const error = locale.get_with_args("download-failed", { mod_id: "my-mod" });
+const error = locale.getWithArgs("download-failed", { mod_id: "my-mod" });
 ```
 
 Example `main.ftl`:

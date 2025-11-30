@@ -6,6 +6,7 @@
 
 pub mod console;
 pub mod events;
+pub mod graphic;
 pub mod locale;
 pub mod network;
 pub mod process;
@@ -13,6 +14,7 @@ pub mod system;
 
 pub use console::ConsoleApi;
 pub use events::{EventDispatcher, EventHandler, EventKey, SystemEvents, RequestUriProtocol, RequestUri, UriResponse, SendEventRequest, TerminalKeyRequest, TerminalKeyResponse};
+pub use graphic::{EngineFactory, GraphicApi, GraphicCommand, GraphicEngine, GraphicEngines, GraphicEvent, GraphicProxy, PendingMainThreadEngine, WindowConfig, WindowInfo, KeyModifiers, MouseButton, FrameSnapshot, MouseButtonState, GamepadState, KeyCode};
 pub use locale::LocaleApi;
 pub use network::{NetworkApi, NetworkConfig, DownloadResponse, parse_stam_uri, sanitize_uri};
 pub use process::{ProcessApi, AppApi};

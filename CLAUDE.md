@@ -73,6 +73,7 @@ import { helper } from '@js-helper';
 ## 5. Logging
 
 - Logs will be output without colors if tty is not detected.
+- Use `STAM_GFXENGINELOG=1` to enable verbose logging from graphic engines (bevy, wgpu, naga, winit). Disabled by default to reduce log noise.
 
 ## 6. Golden Rules
 
@@ -135,6 +136,12 @@ When developing features for the mod system (`stam_mod_runtimes`):
 6. **Cross-mod communication**: Design inter-mod APIs that can work across different language runtimes
 7. **Avoid busy-loops in event loops**: When implementing event loops for any runtime, NEVER use patterns that poll continuously without yielding (e.g., `loop { check(); }` or `loop { runtime.idle().await; }`). Always use proper async primitives like `tokio::select!` with notification mechanisms (`tokio::sync::Notify`) to wait for events without consuming 100% CPU. This is critical for both client and server applications.
 8. **Glue code in external files**: All scripting glue code (JavaScript, Lua, C#, etc.) must be placed in separate files in a `glue/` subdirectory within each runtime adapter folder (e.g., `apps/shared/stam_mod_runtimes/src/adapters/js/glue/`). NEVER embed large blocks of script code as string literals in Rust files. The build.rs script concatenates these files at compile time for embedding.
+9. **JavaScript method naming convention**: All methods exposed to JavaScript MUST use camelCase naming. Use the `#[qjs(rename = "methodName")]` attribute in rquickjs bindings to ensure consistency. Examples:
+   - `get_mods` → `getMods`
+   - `attach_mod` → `attachMod`
+   - `send_event` → `sendEvent`
+   - `set_resizable` → `setResizable`
+   - `enable_graphic_engine` → `enableGraphicEngine`
 
 ### Logging Hygiene
 - Ensure ANSI color codes are disabled when logs are redirected to files or piped (respect TTY detection and `NO_COLOR`), so log files stay plain and readable with correct mod identifiers.

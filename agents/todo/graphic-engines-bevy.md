@@ -7,6 +7,7 @@ This document describes the implementation of the advanced graphics system for t
 ## Multi-Language Scripting Support
 
 Staminal supports **multiple scripting languages** for mod development:
+
 - **JavaScript** (currently implemented via QuickJS)
 - **Lua** (planned)
 - **C#** (planned)
@@ -15,6 +16,7 @@ Staminal supports **multiple scripting languages** for mod development:
 The GraphicProxy and all graphic APIs are designed to be **language-agnostic**. Each scripting runtime adapter (JS, Lua, C#, etc.) will have its own bindings that expose the same functionality through language-specific idioms.
 
 **Important**: When implementing graphic bindings:
+
 1. The core `GraphicProxy` and `GraphicEngine` trait live in `stam_mod_runtimes/src/api/graphic/`
 2. Each adapter (JS, Lua, C#) implements bindings in its own adapter directory
 3. All adapters call the same underlying `GraphicProxy` methods
@@ -23,7 +25,9 @@ The GraphicProxy and all graphic APIs are designed to be **language-agnostic**. 
 ## Core Principles
 
 ### 1. Main Loop Preservation
+
 The client has its own main loop that handles:
+
 - Network communication
 - Mod lifecycle management
 - Event dispatching
@@ -33,6 +37,54 @@ The client has its own main loop that handles:
 - Other scripting runtimes as they are added
 
 **This main loop MUST be preserved.** The graphic engine runs in a separate thread and communicates with the main loop through message channels. All scripting runtimes share the same `GraphicProxy` instance.
+
+### 2. Main Thread Reservation for Graphic Engines
+
+**CRITICAL ARCHITECTURE RULE**: Some graphic engines (notably Bevy with winit on Linux/Wayland) **require execution on the main thread**. To support this:
+
+1. **Main thread stays free at startup**: All async application logic (tokio runtime, JS event loop, terminal input, network) runs on a **spawned thread**, keeping the main thread empty and waiting.
+
+2. **Engine activation via channel**: When a mod calls `graphic.enableEngine()`, the engine is created but stored as "pending". The pending engine is sent to the main thread via an `mpsc` channel.
+
+3. **Main thread receives and runs engine**: The main thread blocks on the channel receiver. When an engine arrives, it runs on the main thread (blocking call to `engine.run()`).
+
+4. **Async loop continues**: The spawned thread's async loop does **NOT exit** when sending the engine. It continues running the JS event loop, terminal input, network I/O, etc. in parallel with the graphic engine.
+
+5. **Engine-agnostic design**: The `GraphicEngine` trait has a `require_main_thread()` method (default `false`). Only engines that return `true` (like Bevy) are handled via the pending-engine-to-main-thread flow. Future engines that don't require the main thread can run on any thread.
+
+**Why this matters**: On Linux with Wayland, closing a Bevy window from a secondary thread causes a deadlock in winit's event loop. Running Bevy on the main thread solves this architectural limitation.
+
+```
+Application Startup:
++--------------------+     +------------------------------------+
+|    Main Thread     |     |       Spawned Thread (tokio)       |
+|                    |     |                                    |
+|  1. Create tokio   |     |                                    |
+|     runtime        |     |                                    |
+|                    |     |                                    |
+|  2. Create engine  |     |                                    |
+|     channel        |     |                                    |
+|                    |     |                                    |
+|  3. Spawn async    |---->|  4. Run async_main()               |
+|     logic          |     |     - Network connection           |
+|                    |     |     - Mod loading                  |
+|  5. Block on       |     |     - JS event loop                |
+|     engine_rx      |     |     - Terminal input               |
+|     .recv()        |     |                                    |
+|                    |     |  6. Mod calls enableEngine()       |
+|                    |     |     -> PendingEngine sent          |
+|                    |<----|        via channel                 |
+|                    |     |                                    |
+|  7. Receive        |     |  8. Loop CONTINUES running         |
+|     PendingEngine  |     |     (JS, terminal, network)        |
+|                    |     |                                    |
+|  8. engine.run()   |     |                                    |
+|     (blocking)     |     |                                    |
+|                    |     |                                    |
+|  Window visible,   |     |  Input events dispatched,          |
+|  rendering active  |     |  mods receive callbacks            |
++--------------------+     +------------------------------------+
+```
 
 ### 3. Graceful Shutdown
 
@@ -87,6 +139,7 @@ impl GraphicProxy {
 The graphic engine generates events that must be dispatched to all registered mod scripts. This enables mods to react to user input, window events, and rendering callbacks.
 
 **Event Flow**:
+
 ```
 +---------------------+     +------------------+     +----------------------+
 |   Graphic Engine    | --> |   GraphicProxy   | --> |   EventDispatcher    |
@@ -192,36 +245,66 @@ impl GraphicProxy {
 **Script Event Registration** (JavaScript example):
 
 ```javascript
-// Register for window events
-system.register_event("graphic:window:created", async (windowId) => {
-    console.log(`Window ${windowId} was created`);
+// Register frame update callback - this is the main game loop (on graphic object)
+graphic.onFrameUpdate((delta) => {
+  // All graphic.* methods are automatically optimized inside this callback
+  const mouse = graphic.get_mouse_position(); // Uses cached snapshot (O(1))
+  const keys = graphic.get_pressed_keys(); // Uses cached snapshot (O(1))
+
+  // Check for escape key to close window
+  if (graphic.is_key_pressed("Escape")) {
+    graphic.shutdown();
+  }
+
+  // Update game logic at ~60fps
+  updateGameState(delta);
 });
 
-system.register_event("graphic:window:closed", async (windowId) => {
-    console.log(`Window ${windowId} was closed`);
+// Create a window and register events on the window object
+const win = await graphic.create_window({
+  title: "My Game",
+  width: 1280,
+  height: 720,
 });
 
-// Register for input events
-system.register_event("graphic:input:key_pressed", async (windowId, key, modifiers) => {
-    if (key === "Escape") {
-        await window.get(windowId).close();
-    }
+// Window events are registered on the window instance, not on graphic
+win.onResized((width, height, state) => {
+  console.log(`Window resized to ${width}x${height} on state ${state}`);
 });
 
-system.register_event("graphic:input:mouse_moved", async (windowId, x, y) => {
-    // Handle mouse movement
+win.onRequestClose(async (event) => {
+  if (event.reasonId == WindowRequestReasons.UserRequest) {
+    // await graprhic.confirm("Are you sure?")
+    event.canClose = false;
+  } else {
+    // defulat
+    event.canClose = true; // window can be closed.
+  }
 });
 
-// Register for render loop
-system.register_event("graphic:render:frame_start", async (windowId, deltaTime) => {
-    // Update game logic at ~60fps
-    updateGameState(deltaTime);
+win.onClosed(() => {
+  console.log("Window was closed");
+});
+
+win.onFocused((focused) => {
+  console.log(`Window focus: ${focused}`);
+});
+
+win.onMoved((x, y) => {
+  console.log(`Window moved to ${x}, ${y}`);
 });
 ```
 
-**Integration with Existing EventDispatcher**:
+**Note**: The graphic event system does NOT use `system.register_event()`. Instead:
 
-The graphic events use the same `EventDispatcher` infrastructure already present in the system. Events are namespaced with "graphic:" prefix to distinguish them from other system events.
+1. **Frame updates**: Use `graphic.onFrameUpdate()` on the global `graphic` object
+2. **Window events**: Use `win.onResized()`, `win.onClosed()`, etc. on the window instance returned by `graphic.create_window()`
+
+This design allows for:
+
+1. Optimized per-frame callbacks with delta time
+2. Automatic input state caching during frame updates
+3. Per-window event handling without needing to filter by window ID
 
 ### 5. Architecture Layers
 
@@ -494,12 +577,12 @@ const engineType = system.get_graphic_engine(); // Returns GraphicEngines.Bevy o
 
 // Create a new window
 const win = await window.create({
-    title: "My Game Window",
-    width: 1280,
-    height: 720,
-    fullscreen: false,
-    resizable: true,
-    visible: true
+  title: "My Game Window",
+  width: 1280,
+  height: 720,
+  fullscreen: false,
+  resizable: true,
+  visible: true,
 });
 
 // Window methods
@@ -510,10 +593,10 @@ await win.setVisible(false);
 await win.close();
 
 // Window properties (read-only)
-console.log(win.id);        // Unique window ID
-console.log(win.title);     // Current title
-console.log(win.width);     // Current width
-console.log(win.height);    // Current height
+console.log(win.id); // Unique window ID
+console.log(win.title); // Current title
+console.log(win.width); // Current width
+console.log(win.height); // Current height
 ```
 
 ### Lua (Future - Example Syntax)
@@ -672,6 +755,7 @@ Timeout handling:
 ## Implementation Steps
 
 ### Phase 1: Core Infrastructure
+
 1. Create `graphic` module in `stam_mod_runtimes/src/api/`
 2. Implement `GraphicEngines` enum
 3. Implement `GraphicProxy` with command/response channels
@@ -679,24 +763,28 @@ Timeout handling:
 5. Add JavaScript bindings for `system.enable_graphic_engine()`
 
 ### Phase 2: Bevy Integration
+
 1. Add `bevy` dependency to `stam_client/Cargo.toml`
 2. Implement `BevyEngine` struct
 3. Implement Bevy command receiver system
 4. Test engine initialization in separate thread
 
 ### Phase 3: Window Management
+
 1. Implement `WindowConfig` and `WindowInfo`
 2. Add window-related `GraphicCommand` variants
 3. Implement JavaScript `window` object and `WindowJS` class
 4. Implement Bevy window creation/management
 
 ### Phase 4: Testing & Polish
+
 1. Create test mod that creates a window
 2. Test window property changes
 3. Test multiple windows
 4. Test engine shutdown and cleanup
 
 ### Phase 5: Additional Language Bindings (Future)
+
 1. Implement Lua bindings when Lua runtime is added
 2. Implement C# bindings when C# runtime is added
 3. Ensure API consistency across all languages
@@ -707,17 +795,17 @@ All graphic operations should return descriptive errors:
 
 ```javascript
 try {
-    await system.enable_graphic_engine(GraphicEngines.Bevy);
+  await system.enable_graphic_engine(GraphicEngines.Bevy);
 } catch (e) {
-    console.error("Failed to enable graphics:", e.message);
-    // e.g., "Graphic engine already enabled" or "Failed to spawn engine thread"
+  console.error("Failed to enable graphics:", e.message);
+  // e.g., "Graphic engine already enabled" or "Failed to spawn engine thread"
 }
 
 try {
-    const win = await window.create({ title: "Test" });
+  const win = await window.create({ title: "Test" });
 } catch (e) {
-    console.error("Failed to create window:", e.message);
-    // e.g., "No graphic engine enabled" or "Window creation failed: ..."
+  console.error("Failed to create window:", e.message);
+  // e.g., "No graphic engine enabled" or "Window creation failed: ..."
 }
 ```
 
@@ -735,6 +823,7 @@ This section describes how scripts can create UI elements (buttons, text fields,
 ### Element ID System
 
 Every UI element created by a script receives a unique ID. This ID is used to:
+
 - Track the element in the engine
 - Route events back to the correct script callback
 - Allow scripts to modify or remove elements
@@ -924,53 +1013,60 @@ const win = await window.create({ title: "My App", width: 800, height: 600 });
 
 // Create a button
 const btn = await win.createButton({
-    x: 100, y: 100,
-    width: 200, height: 50,
-    text: "Click Me!"
+  x: 100,
+  y: 100,
+  width: 200,
+  height: 50,
+  text: "Click Me!",
 });
 
 // Register click handler - callback is stored locally, not sent to engine
 btn.onClick(async () => {
-    console.log("Button clicked!");
-    await btn.setText("Clicked!");
+  console.log("Button clicked!");
+  await btn.setText("Clicked!");
 });
 
 // Alternative: inline event registration during creation
 const btn2 = await win.createButton({
-    x: 100, y: 200,
-    width: 200, height: 50,
-    text: "Another Button",
-    onClick: async () => {
-        console.log("Button 2 clicked!");
-    }
+  x: 100,
+  y: 200,
+  width: 200,
+  height: 50,
+  text: "Another Button",
+  onClick: async () => {
+    console.log("Button 2 clicked!");
+  },
 });
 
 // Create a text input
 const input = await win.createTextInput({
-    x: 100, y: 300,
-    width: 300, height: 40,
-    placeholder: "Enter your name..."
+  x: 100,
+  y: 300,
+  width: 300,
+  height: 40,
+  placeholder: "Enter your name...",
 });
 
 // Register text change handler
 input.onTextChanged(async (newValue) => {
-    console.log(`Text changed to: ${newValue}`);
+  console.log(`Text changed to: ${newValue}`);
 });
 
 // Register submit handler (Enter key)
 input.onSubmit(async (value) => {
-    console.log(`Submitted: ${value}`);
+  console.log(`Submitted: ${value}`);
 });
 
 // Create a checkbox
 const checkbox = await win.createCheckbox({
-    x: 100, y: 400,
-    text: "Enable feature",
-    checked: false
+  x: 100,
+  y: 400,
+  text: "Enable feature",
+  checked: false,
 });
 
 checkbox.onToggle(async (checked) => {
-    console.log(`Checkbox is now: ${checked ? 'checked' : 'unchecked'}`);
+  console.log(`Checkbox is now: ${checked ? "checked" : "unchecked"}`);
 });
 
 // Remove an element
@@ -1250,19 +1346,19 @@ Scripts register a frame update callback that receives only the delta time:
 ```javascript
 // Register frame update handler
 graphic.onFrameUpdate((delta) => {
-    // All graphic.* methods are automatically optimized here
-    const mouse = graphic.getMousePosition();  // Uses cached snapshot (O(1))
-    const keys = graphic.getPressedKeys();      // Uses cached snapshot (O(1))
-    const gamepads = graphic.getGamepadState(); // Uses cached snapshot (O(1))
+  // All graphic.* methods are automatically optimized here
+  const mouse = graphic.getMousePosition(); // Uses cached snapshot (O(1))
+  const keys = graphic.getPressedKeys(); // Uses cached snapshot (O(1))
+  const gamepads = graphic.getGamepadState(); // Uses cached snapshot (O(1))
 
-    // Game logic
-    player.x += velocity.x * delta;
-    player.y += velocity.y * delta;
+  // Game logic
+  player.x += velocity.x * delta;
+  player.y += velocity.y * delta;
 });
 
 // Outside frame loop, same API works but slower
 document.onClick(() => {
-    const mouse = graphic.getMousePosition();  // Sync request to engine (round-trip)
+  const mouse = graphic.getMousePosition(); // Sync request to engine (round-trip)
 });
 ```
 
@@ -1490,37 +1586,37 @@ impl GraphicProxy {
 // but are automatically optimized in the frame loop
 
 graphic.onFrameUpdate((delta) => {
-    // === OPTIMIZED (cached snapshot) ===
+  // === OPTIMIZED (cached snapshot) ===
 
-    // Mouse
-    const [mx, my] = graphic.getMousePosition();
-    const mouseButtons = graphic.getMouseButtons();
-    // mouseButtons = { left: bool, right: bool, middle: bool }
+  // Mouse
+  const [mx, my] = graphic.getMousePosition();
+  const mouseButtons = graphic.getMouseButtons();
+  // mouseButtons = { left: bool, right: bool, middle: bool }
 
-    // Keyboard
-    const keys = graphic.getPressedKeys();  // Array of key codes
-    if (graphic.isKeyPressed("KeyW")) {
-        player.moveForward(delta);
+  // Keyboard
+  const keys = graphic.getPressedKeys(); // Array of key codes
+  if (graphic.isKeyPressed("KeyW")) {
+    player.moveForward(delta);
+  }
+  if (graphic.isKeyPressed("Space")) {
+    player.jump();
+  }
+
+  // Gamepad
+  const gamepad = graphic.getGamepad(0);
+  if (gamepad) {
+    const [lx, ly] = gamepad.leftStick; // -1.0 to 1.0
+    const [rx, ry] = gamepad.rightStick; // -1.0 to 1.0
+    player.move(lx * speed * delta, ly * speed * delta);
+    camera.rotate(rx * sensitivity * delta, ry * sensitivity * delta);
+
+    if (gamepad.isButtonPressed("A")) {
+      player.jump();
     }
-    if (graphic.isKeyPressed("Space")) {
-        player.jump();
-    }
+  }
 
-    // Gamepad
-    const gamepad = graphic.getGamepad(0);
-    if (gamepad) {
-        const [lx, ly] = gamepad.leftStick;   // -1.0 to 1.0
-        const [rx, ry] = gamepad.rightStick;  // -1.0 to 1.0
-        player.move(lx * speed * delta, ly * speed * delta);
-        camera.rotate(rx * sensitivity * delta, ry * sensitivity * delta);
-
-        if (gamepad.isButtonPressed("A")) {
-            player.jump();
-        }
-    }
-
-    // Frame info
-    const frameNum = graphic.getFrameNumber();
+  // Frame info
+  const frameNum = graphic.getFrameNumber();
 });
 ```
 
@@ -1614,10 +1710,10 @@ Engine Thread                          Main Thread (GraphicProxy)
 
 ### Performance Characteristics
 
-| Context | Method Call Cost | Notes |
-|---------|------------------|-------|
-| Inside `onFrameUpdate` | O(1), ~10ns | Direct memory access |
-| Outside frame loop | ~1-10ms | Channel round-trip |
+| Context                | Method Call Cost | Notes                |
+| ---------------------- | ---------------- | -------------------- |
+| Inside `onFrameUpdate` | O(1), ~10ns      | Direct memory access |
+| Outside frame loop     | ~1-10ms          | Channel round-trip   |
 
 ### Memory Layout
 
@@ -1662,6 +1758,7 @@ This architecture supports future additions:
 The initial implementation should focus on:
 
 1. **Window Creation and Management**
+
    - `graphic.createWindow({ title, width, height, ... })`
    - `window.close()`
    - `window.setTitle(title)`
@@ -1673,6 +1770,7 @@ The initial implementation should focus on:
    - `window.isFullscreen()`
 
 2. **Basic Window Properties**
+
    - Title, size, position
    - Fullscreen toggle
    - Visibility (show/hide)
@@ -1692,6 +1790,7 @@ input and update every frame.
 ### Phase 2: UI Widgets (Future)
 
 After Phase 1 is complete and stable, the next phase will implement UI widgets:
+
 - Buttons, Labels, Text Inputs
 - Checkboxes, Sliders, Progress Bars
 - Panels, Layouts, Themes

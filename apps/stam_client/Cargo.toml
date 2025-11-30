@@ -5,7 +5,9 @@ edition = "2024"
 
 [dependencies]
 tracing = "0.1.41"
-tracing-subscriber = { version = "0.3.20", features = ["time", "local-time"] }
+tracing-subscriber = { version = "0.3.20", default-features = false, features = [
+    "fmt", "ansi", "std", "time", "local-time", "env-filter", "registry"
+] }
 tracing-appender = "0.2"
 time = { version = "0.3", features = ["macros", "formatting", "local-offset"] }
 clap = { version = "4.5", features = ["derive", "env"] }
@@ -25,6 +27,16 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 semver = "1.0"
 crossterm = "0.28"
+bevy = { version = "0.17", default-features = false, features = [
+    "bevy_winit",
+    "bevy_render",
+    "bevy_core_pipeline",
+    "bevy_sprite",  # Needed for Camera2d
+    "bevy_window",
+    "bevy_log",  # Needed to access LogPlugin for disabling it
+    "x11",
+    "wayland",
+] }
 
 [[bin]]
 name = "stam_client"

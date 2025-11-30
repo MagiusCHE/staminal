@@ -395,6 +395,8 @@ pub struct JsRuntimeAdapter {
     locale_api: Option<LocaleApi>,
     /// Network API for downloading resources (optional, client-side only)
     network_api: Option<NetworkApi>,
+    /// Graphic API for graphic engine access (optional, client-side only)
+    graphic_api: Option<crate::api::GraphicApi>,
     /// Temp file manager for downloaded content (tracks and cleans up temp files)
     temp_file_manager: TempFileManager,
 }
@@ -460,6 +462,7 @@ impl JsRuntimeAdapter {
             system_api: SystemApi::new(),
             locale_api: None,
             network_api: None,
+            graphic_api: None,
             temp_file_manager: TempFileManager::new(),
         };
 
@@ -482,6 +485,14 @@ impl JsRuntimeAdapter {
     /// Typically only used on the client side.
     pub fn set_network_api(&mut self, network_api: NetworkApi) {
         self.network_api = Some(network_api);
+    }
+
+    /// Set the graphic API for graphic engine access
+    ///
+    /// This is optional and typically only set on the client side.
+    /// Provides access to graphic engine features like window creation and input handling.
+    pub fn set_graphic_api(&mut self, graphic_api: crate::api::GraphicApi) {
+        self.graphic_api = Some(graphic_api);
     }
 
     /// Get a clone of the async runtime for the event loop
@@ -519,6 +530,7 @@ impl JsRuntimeAdapter {
         let system_api = self.system_api.clone();
         let locale_api = self.locale_api.clone();
         let network_api = self.network_api.clone();
+        let graphic_api = self.graphic_api.clone();
         let temp_file_manager = self.temp_file_manager.clone();
 
         // Configure temp directory for downloads (game_data_dir/tmp)
@@ -554,6 +566,11 @@ impl JsRuntimeAdapter {
                 // Register network API (network.download()) - client-side only
                 if let Some(network) = network_api {
                     bindings::setup_network_api(ctx.clone(), network, temp_file_manager)?;
+                }
+
+                // Register graphic API (graphic.create_window(), etc.) - client-side only
+                if let Some(graphic) = graphic_api {
+                    super::graphic_bindings::setup_graphic_api(ctx.clone(), graphic)?;
                 }
 
                 // Register text API (Text.DecodeUTF8())
