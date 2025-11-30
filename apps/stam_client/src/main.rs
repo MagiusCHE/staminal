@@ -2,6 +2,8 @@ use clap::Parser;
 use sha2::{Digest, Sha512};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc as std_mpsc;
 use tokio::net::TcpStream;
 use tracing::{Level, debug, error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
@@ -11,6 +13,27 @@ use stam_mod_runtimes::api::{DownloadResponse, LocaleApi, NetworkApi, NetworkCon
 use stam_mod_runtimes::logging::{create_custom_timer, CustomFormatter, RawModeStdoutWriter};
 use stam_protocol::{GameMessage, GameStream, IntentType, PrimalMessage, PrimalStream};
 use stam_schema::{ModManifest, Validatable, validate_mod_dependencies, validate_version_range};
+
+// ============================================================================
+// Worker Thread Communication
+// ============================================================================
+
+/// Messages sent from the worker thread to the main thread
+#[derive(Debug)]
+enum WorkerMessage {
+    /// Worker thread terminated normally with an exit code
+    Terminated { exit_code: i32 },
+    /// Worker thread encountered a fatal error
+    Error { message: String },
+}
+
+/// Messages sent from the main thread to the worker thread
+#[derive(Debug)]
+#[allow(dead_code)] // Will be used when GraphicEngine is implemented
+enum MainMessage {
+    /// Request graceful shutdown of the worker
+    Shutdown,
+}
 
 #[macro_use]
 mod locale;
@@ -990,6 +1013,26 @@ async fn connect_to_game_server(
         info!("{}", locale.get("game-client-ready"));
     }
 
+    // Setup SIGTERM handler (Linux/Unix only)
+    // This allows graceful shutdown when the process receives SIGTERM
+    let sigterm_received = Arc::new(AtomicBool::new(false));
+    #[cfg(unix)]
+    {
+        let sigterm_flag = sigterm_received.clone();
+        tokio::spawn(async move {
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(mut stream) => {
+                    stream.recv().await;
+                    info!("Received SIGTERM signal");
+                    sigterm_flag.store(true, Ordering::Relaxed);
+                }
+                Err(err) => {
+                    warn!("Error setting up SIGTERM handler: {}", err);
+                }
+            }
+        });
+    }
+
     // Run the JS event loop if we have JS mods loaded
     // This is necessary for setTimeout/setInterval to work properly
     if let Some(js_runtime) = js_runtime_handle {
@@ -1151,6 +1194,13 @@ async fn connect_to_game_server(
                     }
                     break;
                 }
+
+                // Check for SIGTERM (polled periodically)
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                    if sigterm_received.load(Ordering::Relaxed) {
+                        break;
+                    }
+                }
             }
         }
 
@@ -1242,6 +1292,13 @@ async fn connect_to_game_server(
                 _ = maintain_game_connection(&mut stream, locale.clone()) => {
                     info!("{}", locale.get("connection-closed"));
                     break;
+                }
+
+                // Check for SIGTERM (polled periodically)
+                _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
+                    if sigterm_received.load(Ordering::Relaxed) {
+                        break;
+                    }
                 }
             }
         }
@@ -1448,12 +1505,72 @@ struct Args {
     log_file: bool,
 }
 
-#[tokio::main]
-async fn main() {
+// ============================================================================
+// Main Entry Point
+// ============================================================================
+
+/// Main entry point - runs on the main thread
+///
+/// The main thread is kept minimal to prepare for future GraphicEngine support.
+/// All client logic (networking, mods, JS runtime) runs in a worker thread.
+/// This architecture allows the main thread to host graphic engines (like Bevy)
+/// which require the main thread on some platforms (macOS, Windows).
+fn main() {
     // Parse args first to check if log file is requested
     let args = Args::parse();
 
-    // Setup logging
+    // Setup logging (must happen on main thread before spawning worker)
+    setup_logging(&args);
+
+    info!("========================================");
+    info!("   STAMINAL CLIENT v{}", VERSION);
+    info!("========================================");
+
+    // Create communication channels between main and worker thread
+    let (worker_tx, main_rx) = std_mpsc::channel::<WorkerMessage>();
+    let (_main_tx, worker_rx) = std_mpsc::channel::<MainMessage>();
+
+    // Spawn the worker thread that runs all client logic
+    let worker_handle = std::thread::Builder::new()
+        .name("client-worker".to_string())
+        .spawn(move || {
+            worker_thread_main(args, worker_tx, worker_rx);
+        })
+        .expect("Failed to spawn worker thread");
+
+    // Main loop - wait for worker thread completion
+    // In the future, this will also handle GraphicEngine events
+    let exit_code = loop {
+        match main_rx.recv() {
+            Ok(WorkerMessage::Terminated { exit_code }) => {
+                debug!("Worker thread terminated with exit code {}", exit_code);
+                break exit_code;
+            }
+            Ok(WorkerMessage::Error { message }) => {
+                error!("Worker thread error: {}", message);
+                break 1;
+            }
+            Err(_) => {
+                // Channel closed unexpectedly - worker thread panicked or crashed
+                error!("Worker thread communication channel closed unexpectedly");
+                break 1;
+            }
+        }
+    };
+
+    // Wait for the worker thread to fully terminate
+    if let Err(e) = worker_handle.join() {
+        error!("Worker thread panicked: {:?}", e);
+    }
+
+    // Future: Check if GraphicEngine is still active
+    // For now, we just exit since there's no graphic engine yet
+    debug!("Main thread exiting with code {}", exit_code);
+    std::process::exit(exit_code);
+}
+
+/// Setup logging (called from main thread)
+fn setup_logging(args: &Args) {
     let timer = create_custom_timer();
 
     // Disable ANSI colors if:
@@ -1464,7 +1581,6 @@ async fn main() {
         && std::env::var("NO_COLOR").is_err()
         && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
 
-    // Setup logging based on whether file logging is enabled
     if args.log_file {
         // File logging: no ANSI colors
         let file_appender = std::fs::File::create("stam_client.log")
@@ -1506,11 +1622,41 @@ async fn main() {
             ))
             .init();
     }
+}
 
-    info!("========================================");
-    info!("   STAMINAL CLIENT v{}", VERSION);
-    info!("========================================");
+// ============================================================================
+// Worker Thread
+// ============================================================================
 
+/// Worker thread entry point
+///
+/// Creates a tokio runtime and runs all async client logic.
+/// This thread handles networking, mod loading, and the JS event loop.
+fn worker_thread_main(
+    args: Args,
+    worker_tx: std_mpsc::Sender<WorkerMessage>,
+    _main_rx: std_mpsc::Receiver<MainMessage>,
+) {
+    // Create a multi-threaded tokio runtime for this worker
+    // We need multi-threaded because the JS runtime uses block_on internally
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("Failed to create tokio runtime");
+
+    // Run the async client logic
+    let exit_code = runtime.block_on(async {
+        run_client(args).await
+    });
+
+    // Notify main thread that we're done
+    let _ = worker_tx.send(WorkerMessage::Terminated { exit_code });
+}
+
+/// Main async client logic (runs in worker thread)
+///
+/// Returns an exit code (0 = success, non-zero = error)
+async fn run_client(args: Args) -> i32 {
     // Check if custom home is specified
     let custom_home = args.home.as_deref();
     if let Some(home) = custom_home {
@@ -1522,7 +1668,7 @@ async fn main() {
         Ok(paths) => paths,
         Err(e) => {
             error!("Failed to initialize application paths: {}", e);
-            return;
+            return 1;
         }
     };
 
@@ -1532,7 +1678,7 @@ async fn main() {
         Err(e) => {
             error!("Failed to initialize locale system: {}", e);
             error!("Continuing without localization support");
-            return;
+            return 1;
         }
     };
 
@@ -1547,7 +1693,7 @@ async fn main() {
                 })
             )
         );
-        return;
+        return 1;
     }
 
     let uri_without_scheme = args.uri.strip_prefix("stam://").unwrap();
@@ -1567,7 +1713,7 @@ async fn main() {
                 })
             )
         );
-        return;
+        return 1;
     };
 
     let (username, password) = if let Some(creds) = credentials {
@@ -1585,7 +1731,7 @@ async fn main() {
                     })
                 )
             );
-            return;
+            return 1;
         }
     } else {
         error!(
@@ -1597,7 +1743,7 @@ async fn main() {
                 })
             )
         );
-        return;
+        return 1;
     };
 
     info!(
@@ -1634,7 +1780,7 @@ async fn main() {
                     })
                 )
             );
-            return;
+            return 1;
         }
     };
 
@@ -1672,7 +1818,7 @@ async fn main() {
                             })
                         )
                     );
-                    return;
+                    return 1;
                 }
 
                 info!(
@@ -1689,11 +1835,11 @@ async fn main() {
         }
         Ok(msg) => {
             error!("{}: {:?}", locale.get("error-unexpected-message"), msg);
-            return;
+            return 1;
         }
         Err(e) => {
             error!("{}: {}", locale.get("error-parse-failed"), e);
-            return;
+            return 1;
         }
     }
 
@@ -1714,7 +1860,7 @@ async fn main() {
 
     if let Err(e) = stream.write_primal_message(&intent).await {
         error!("{}: {}", locale.get("login-failed"), e);
-        return;
+        return 1;
     }
 
     // Wait for ServerList or Error
@@ -1732,7 +1878,7 @@ async fn main() {
 
             if servers.is_empty() {
                 warn!("{}", locale.get("server-list-empty"));
-                return;
+                return 1;
             }
 
             for (i, server) in servers.iter().enumerate() {
@@ -1772,6 +1918,7 @@ async fn main() {
                         })
                     )
                 );
+                return 1;
             }
         }
         Ok(PrimalMessage::Error { message }) => {
@@ -1786,12 +1933,18 @@ async fn main() {
                     })
                 )
             );
+            return 1;
         }
         Ok(msg) => {
             error!("{}: {:?}", locale.get("error-unexpected-message"), msg);
+            return 1;
         }
         Err(e) => {
             error!("{}: {}", locale.get("error-parse-failed"), e);
+            return 1;
         }
     }
+
+    // Success
+    0
 }
