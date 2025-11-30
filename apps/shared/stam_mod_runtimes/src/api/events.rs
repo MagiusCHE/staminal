@@ -31,6 +31,9 @@ pub enum SystemEvents {
     /// Terminal key pressed event - triggered when a key is pressed in the terminal
     /// Allows mods to intercept key combinations like Ctrl+C before default behavior
     TerminalKeyPressed = 2,
+    /// Graphic engine ready event - triggered when the graphic engine has been initialized
+    /// and is ready to receive commands. This is a client-only event.
+    GraphicEngineReady = 3,
 }
 
 impl SystemEvents {
@@ -39,6 +42,7 @@ impl SystemEvents {
         match value {
             1 => Some(SystemEvents::RequestUri),
             2 => Some(SystemEvents::TerminalKeyPressed),
+            3 => Some(SystemEvents::GraphicEngineReady),
             _ => None,
         }
     }
@@ -53,6 +57,7 @@ impl SystemEvents {
         match self {
             SystemEvents::RequestUri => "system:RequestUri".to_string(),
             SystemEvents::TerminalKeyPressed => "system:TerminalKeyPressed".to_string(),
+            SystemEvents::GraphicEngineReady => "system:GraphicEngineReady".to_string(),
         }
     }
 
@@ -61,6 +66,7 @@ impl SystemEvents {
         match key {
             "system:RequestUri" => Some(SystemEvents::RequestUri),
             "system:TerminalKeyPressed" => Some(SystemEvents::TerminalKeyPressed),
+            "system:GraphicEngineReady" => Some(SystemEvents::GraphicEngineReady),
             _ => None,
         }
     }
@@ -354,6 +360,56 @@ impl TerminalKeyResponse {
     }
 }
 
+/// Request object passed to GraphicEngineReady handlers
+///
+/// This event is triggered when the graphic engine has been initialized
+/// and is ready to receive commands. This is a client-only event.
+#[derive(Debug, Clone)]
+pub struct GraphicEngineReadyRequest {
+    // Currently empty - may be extended in the future with engine info
+}
+
+impl GraphicEngineReadyRequest {
+    /// Create a new GraphicEngineReadyRequest
+    pub fn new() -> Self {
+        Self {}
+    }
+}
+
+impl Default for GraphicEngineReadyRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Response object for GraphicEngineReady handlers
+///
+/// This object is allocated by the Core and passed to handlers.
+/// Handlers set `handled = true` to indicate they have processed the event.
+#[derive(Debug, Clone)]
+pub struct GraphicEngineReadyResponse {
+    /// Whether the event has been handled (default: false)
+    pub handled: bool,
+}
+
+impl Default for GraphicEngineReadyResponse {
+    fn default() -> Self {
+        Self { handled: false }
+    }
+}
+
+impl GraphicEngineReadyResponse {
+    /// Create a new GraphicEngineReadyResponse
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set whether the event has been handled
+    pub fn set_handled(&mut self, handled: bool) {
+        self.handled = handled;
+    }
+}
+
 /// Handler registration information
 #[derive(Clone)]
 pub struct EventHandler {
@@ -558,6 +614,20 @@ impl EventDispatcher {
     pub fn get_handlers_for_terminal_key(&self) -> Vec<EventHandler> {
         let handlers = self.handlers.read().unwrap();
         let key = EventKey::System(SystemEvents::TerminalKeyPressed).to_string_key();
+
+        handlers
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Get handlers for GraphicEngineReady event
+    ///
+    /// Returns all handlers registered for the GraphicEngineReady event,
+    /// sorted by priority (lower first).
+    pub fn get_handlers_for_graphic_engine_ready(&self) -> Vec<EventHandler> {
+        let handlers = self.handlers.read().unwrap();
+        let key = EventKey::System(SystemEvents::GraphicEngineReady).to_string_key();
 
         handlers
             .get(&key)

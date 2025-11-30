@@ -8,9 +8,11 @@ export class Manager {
     }
 
     register() {
-        system.registerEvent(SystemEvents.TerminalKeyPressed, this.TerminalKeyPressed.bind(this), 100);
+        system.registerEvent(SystemEvents.TerminalKeyPressed, this.onTerminalKeyPressed.bind(this), 100);
+        system.registerEvent(SystemEvents.GraphicEngineReady, this.onGraphicEngineReady.bind(this), 100);
     }
-    async TerminalKeyPressed(req, res) {
+
+    async onTerminalKeyPressed(req, res) {
         //console.log("Console key pressed:", req);
         if (req.key == "c" && req.ctrl) {
             res.handled = true;
@@ -20,18 +22,28 @@ export class Manager {
     }
 
     async run() {
+        // system.enableGraphicEngine(GraphicEngines.Bevy) // can be awaited but we dont care about return here. Let it going asynchronously.
+
+    }
+
+    async onGraphicEngineReady() {
+
+        const engine = system.getGraphicEngineInfo();
+
+        console.log("Graphic engine ready", engine);
+
         await this.prepareUi();
         await this.ensureMods();
     }
 
     async prepareUi() {
-        console.log("Preparing UI for game %o", this.#gameInfo.id);        
-        // await system.enableGraphicEngine(GraphicEngines.Bevy)
-        // this.#window = await graphic.createWindow({
-        //     title: "Staminal: " + this.#gameInfo.name,
-        //     width: 1280,
-        //     height: 720,
-        // })
+        console.log("Preparing UI for game %o", this.#gameInfo.id);
+
+        this.#window = await graphic.createWindow({
+             title: "Staminal: " + this.#gameInfo.name,
+             width: 1280,
+             height: 720,
+        })
         // this.#window.setPositionMode(WindowPositionModes.Centered);
         // this.#window.setResizable(true);
         // this.#window.show();

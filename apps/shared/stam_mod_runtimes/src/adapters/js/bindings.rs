@@ -957,6 +957,7 @@ pub fn setup_system_api(ctx: Ctx, system_api: SystemApi) -> Result<(), rquickjs:
     let system_events = Object::new(ctx.clone())?;
     system_events.set("RequestUri", SystemEvents::RequestUri.to_u32())?;
     system_events.set("TerminalKeyPressed", SystemEvents::TerminalKeyPressed.to_u32())?;
+    system_events.set("GraphicEngineReady", SystemEvents::GraphicEngineReady.to_u32())?;
     ctx.globals().set("SystemEvents", system_events)?;
 
     // Create RequestUriProtocol enum object
