@@ -26,9 +26,9 @@ export class Manager {
         graphic.enableEngine(GraphicEngines.Bevy, {
             window: {
                 title: "Staminal",
-                width: 800,
-                height: 600,
-                resizable: true,
+                width: 400,
+                height: 100,
+                resizable: false,
                 positionMode: WindowPositionModes.Centered
             }
         }) // can be awaited but we dont care about return here. Let it going asynchronously.
@@ -61,13 +61,13 @@ export class Manager {
 
         await this.#window.setTitle("Staminal: " + this.#gameInfo.name);
 
-        await graphic.createWindow({
-            title: "Staminal (subwin): " + this.#gameInfo.name,
-            width: 1280,
-            height: 800,
-            resizable: true,
-            positionMode: WindowPositionModes.Centered
-        })
+        // await graphic.createWindow({
+        //     title: "Staminal (subwin): " + this.#gameInfo.name,
+        //     width: 1280,
+        //     height: 800,
+        //     resizable: true,
+        //     positionMode: WindowPositionModes.Centered
+        // })
 
     }
 
