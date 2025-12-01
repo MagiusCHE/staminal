@@ -34,6 +34,9 @@ pub enum SystemEvents {
     /// Graphic engine ready event - triggered when the graphic engine has been initialized
     /// and is ready to receive commands. This is a client-only event.
     GraphicEngineReady = 3,
+    /// Graphic engine window closed event - triggered when a window is closed.
+    /// The request contains the window_id of the closed window. This is a client-only event.
+    GraphicEngineWindowClosed = 4,
 }
 
 impl SystemEvents {
@@ -43,6 +46,7 @@ impl SystemEvents {
             1 => Some(SystemEvents::RequestUri),
             2 => Some(SystemEvents::TerminalKeyPressed),
             3 => Some(SystemEvents::GraphicEngineReady),
+            4 => Some(SystemEvents::GraphicEngineWindowClosed),
             _ => None,
         }
     }
@@ -58,6 +62,7 @@ impl SystemEvents {
             SystemEvents::RequestUri => "system:RequestUri".to_string(),
             SystemEvents::TerminalKeyPressed => "system:TerminalKeyPressed".to_string(),
             SystemEvents::GraphicEngineReady => "system:GraphicEngineReady".to_string(),
+            SystemEvents::GraphicEngineWindowClosed => "system:GraphicEngineWindowClosed".to_string(),
         }
     }
 
@@ -67,6 +72,7 @@ impl SystemEvents {
             "system:RequestUri" => Some(SystemEvents::RequestUri),
             "system:TerminalKeyPressed" => Some(SystemEvents::TerminalKeyPressed),
             "system:GraphicEngineReady" => Some(SystemEvents::GraphicEngineReady),
+            "system:GraphicEngineWindowClosed" => Some(SystemEvents::GraphicEngineWindowClosed),
             _ => None,
         }
     }
@@ -410,6 +416,52 @@ impl GraphicEngineReadyResponse {
     }
 }
 
+/// Request object passed to GraphicEngineWindowClosed handlers
+///
+/// This event is triggered when a window managed by the graphic engine is closed.
+/// The request contains the window_id of the closed window.
+/// This is a client-only event.
+#[derive(Debug, Clone)]
+pub struct GraphicEngineWindowClosedRequest {
+    /// The ID of the window that was closed
+    pub window_id: u64,
+}
+
+impl GraphicEngineWindowClosedRequest {
+    /// Create a new GraphicEngineWindowClosedRequest
+    pub fn new(window_id: u64) -> Self {
+        Self { window_id }
+    }
+}
+
+/// Response object for GraphicEngineWindowClosed handlers
+///
+/// This object is allocated by the Core and passed to handlers.
+/// Handlers set `handled = true` to indicate they have processed the event.
+#[derive(Debug, Clone)]
+pub struct GraphicEngineWindowClosedResponse {
+    /// Whether the event has been handled (default: false)
+    pub handled: bool,
+}
+
+impl Default for GraphicEngineWindowClosedResponse {
+    fn default() -> Self {
+        Self { handled: false }
+    }
+}
+
+impl GraphicEngineWindowClosedResponse {
+    /// Create a new GraphicEngineWindowClosedResponse
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set whether the event has been handled
+    pub fn set_handled(&mut self, handled: bool) {
+        self.handled = handled;
+    }
+}
+
 /// Handler registration information
 #[derive(Clone)]
 pub struct EventHandler {
@@ -628,6 +680,20 @@ impl EventDispatcher {
     pub fn get_handlers_for_graphic_engine_ready(&self) -> Vec<EventHandler> {
         let handlers = self.handlers.read().unwrap();
         let key = EventKey::System(SystemEvents::GraphicEngineReady).to_string_key();
+
+        handlers
+            .get(&key)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Get handlers for GraphicEngineWindowClosed event
+    ///
+    /// Returns all handlers registered for the GraphicEngineWindowClosed event,
+    /// sorted by priority (lower first).
+    pub fn get_handlers_for_graphic_engine_window_closed(&self) -> Vec<EventHandler> {
+        let handlers = self.handlers.read().unwrap();
+        let key = EventKey::System(SystemEvents::GraphicEngineWindowClosed).to_string_key();
 
         handlers
             .get(&key)

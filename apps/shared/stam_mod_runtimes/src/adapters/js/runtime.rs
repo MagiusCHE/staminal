@@ -395,6 +395,8 @@ pub struct JsRuntimeAdapter {
     locale_api: Option<LocaleApi>,
     /// Network API for downloading resources (optional, client-side only)
     network_api: Option<NetworkApi>,
+    /// Graphic proxy for graphic engine operations (optional, client-side only)
+    graphic_proxy: Option<Arc<crate::api::GraphicProxy>>,
     /// Temp file manager for downloaded content (tracks and cleans up temp files)
     temp_file_manager: TempFileManager,
 }
@@ -460,6 +462,7 @@ impl JsRuntimeAdapter {
             system_api: SystemApi::new(),
             locale_api: None,
             network_api: None,
+            graphic_proxy: None,
             temp_file_manager: TempFileManager::new(),
         };
 
@@ -482,6 +485,15 @@ impl JsRuntimeAdapter {
     /// Typically only used on the client side.
     pub fn set_network_api(&mut self, network_api: NetworkApi) {
         self.network_api = Some(network_api);
+    }
+
+    /// Set the graphic proxy for graphic engine operations
+    ///
+    /// This should be called before loading any mods to ensure
+    /// the `graphic` global object is available in all mod contexts.
+    /// Only used on the client side.
+    pub fn set_graphic_proxy(&mut self, graphic_proxy: Arc<crate::api::GraphicProxy>) {
+        self.graphic_proxy = Some(graphic_proxy);
     }
 
     /// Get a clone of the async runtime for the event loop
@@ -519,6 +531,7 @@ impl JsRuntimeAdapter {
         let system_api = self.system_api.clone();
         let locale_api = self.locale_api.clone();
         let network_api = self.network_api.clone();
+        let graphic_proxy = self.graphic_proxy.clone();
         let temp_file_manager = self.temp_file_manager.clone();
 
         // Configure temp directory for downloads (game_data_dir/tmp)
@@ -554,6 +567,11 @@ impl JsRuntimeAdapter {
                 // Register network API (network.download()) - client-side only
                 if let Some(network) = network_api {
                     bindings::setup_network_api(ctx.clone(), network, temp_file_manager)?;
+                }
+
+                // Register graphic API (graphic.enableEngine(), etc.) - client-side only
+                if let Some(proxy) = graphic_proxy {
+                    bindings::setup_graphic_api(ctx.clone(), proxy)?;
                 }
 
                 // Register text API (Text.DecodeUTF8())
@@ -637,7 +655,8 @@ impl JsRuntimeAdapter {
             }
         }
 
-        output.push_str("Error: Unknown JavaScript error");
+        // Try to get more debug info from the rquickjs::Error
+        output.push_str(&format!("Error: Unknown JavaScript error (rquickjs: {:?})", _error));
         output
     }
 
@@ -980,12 +999,22 @@ impl JsRuntimeAdapter {
 
                             match call_result {
                                 Ok(result) => {
-                                    // If result is a Promise, resolve it
+                                    // If result is a Promise, try to resolve it
                                     if let Some(promise) = result.into_promise() {
-                                        if let Err(e) = promise.finish::<()>() {
-                                            let error_msg = Self::format_js_error(&ctx, &e);
-                                            error!("Handler error in mod '{}': {}", mod_id, error_msg);
-                                            return Err(format!("Handler error: {}", error_msg));
+                                        match promise.finish::<()>() {
+                                            Ok(_) => {
+                                                // Promise resolved successfully
+                                            }
+                                            Err(rquickjs::Error::WouldBlock) => {
+                                                // Promise is still pending - async handler is running in background
+                                                // This is expected for async handlers that perform I/O operations
+                                                debug!("Handler in mod '{}' returned pending Promise (async operation in progress)", mod_id);
+                                            }
+                                            Err(e) => {
+                                                let error_msg = Self::format_js_error(&ctx, &e);
+                                                error!("Handler error in mod '{}': {}", mod_id, error_msg);
+                                                return Err(format!("Handler error: {}", error_msg));
+                                            }
                                         }
                                     }
 
@@ -1154,12 +1183,22 @@ impl JsRuntimeAdapter {
 
                             match call_result {
                                 Ok(result) => {
-                                    // If result is a Promise, resolve it
+                                    // If result is a Promise, try to resolve it
                                     if let Some(promise) = result.into_promise() {
-                                        if let Err(e) = promise.finish::<()>() {
-                                            let error_msg = Self::format_js_error(&ctx, &e);
-                                            error!("Handler error in mod '{}': {}", mod_id, error_msg);
-                                            return Err(format!("Handler error: {}", error_msg));
+                                        match promise.finish::<()>() {
+                                            Ok(_) => {
+                                                // Promise resolved successfully
+                                            }
+                                            Err(rquickjs::Error::WouldBlock) => {
+                                                // Promise is still pending - async handler is running in background
+                                                // This is expected for async handlers that perform I/O operations
+                                                debug!("Handler in mod '{}' returned pending Promise (async operation in progress)", mod_id);
+                                            }
+                                            Err(e) => {
+                                                let error_msg = Self::format_js_error(&ctx, &e);
+                                                error!("Handler error in mod '{}': {}", mod_id, error_msg);
+                                                return Err(format!("Handler error: {}", error_msg));
+                                            }
                                         }
                                     }
 
@@ -1391,6 +1430,242 @@ impl JsRuntimeAdapter {
             self.temp_file_manager.cleanup();
         }
     }
+
+    /// Dispatch GraphicEngineReady event to all registered handlers (async version)
+    ///
+    /// This is called when the graphic engine has been initialized and is ready
+    /// to receive commands. This is a client-only event.
+    pub async fn dispatch_graphic_engine_ready(
+        &self,
+        _request: &crate::api::GraphicEngineReadyRequest,
+    ) -> crate::api::GraphicEngineReadyResponse {
+        let handlers = self.system_api.event_dispatcher().get_handlers_for_graphic_engine_ready();
+
+        if handlers.is_empty() {
+            return crate::api::GraphicEngineReadyResponse::default();
+        }
+
+        debug!("Dispatching GraphicEngineReady to {} handlers", handlers.len());
+
+        let mut response = crate::api::GraphicEngineReadyResponse::default();
+
+        for handler in handlers {
+            // Get the mod's context
+            let loaded_mod = match self.loaded_mods.get(&handler.mod_id) {
+                Some(m) => m,
+                None => {
+                    error!("Handler mod '{}' not loaded", handler.mod_id);
+                    continue;
+                }
+            };
+
+            let handler_id = handler.handler_id;
+            let mod_id = handler.mod_id.clone();
+
+            // Call the handler function with request and response objects
+            let result: Result<bool, String> = loaded_mod
+                .context
+                .with(|ctx| {
+                    // Get the handler function from the context's handler map
+                    match bindings::get_js_handler(&ctx, handler_id) {
+                        Ok(Some(func)) => {
+                            // Create request object (empty for now, extensible in future)
+                            let request_obj = Object::new(ctx.clone()).map_err(|e| format!("Failed to create request object: {:?}", e))?;
+
+                            // Create response object
+                            let response_obj = Object::new(ctx.clone()).map_err(|e| format!("Failed to create response object: {:?}", e))?;
+                            response_obj.set("handled", false).map_err(|e| format!("Failed to set handled: {:?}", e))?;
+
+                            // Add setHandled method
+                            let set_handled = Function::new(ctx.clone(), |ctx: Ctx, handled: bool| -> rquickjs::Result<()> {
+                                let this: Object = ctx.globals().get("__currentGraphicEngineReadyResponse")?;
+                                this.set("handled", handled)?;
+                                Ok(())
+                            }).map_err(|e| format!("Failed to create setHandled: {:?}", e))?;
+                            response_obj.set("setHandled", set_handled).map_err(|e| format!("Failed to set setHandled: {:?}", e))?;
+
+                            // Store response object as global for method access
+                            ctx.globals().set("__currentGraphicEngineReadyResponse", response_obj.clone()).map_err(|e| format!("Failed to set __currentGraphicEngineReadyResponse: {:?}", e))?;
+
+                            // Call the handler function
+                            let call_result = func.call::<(Object, Object), Value>((request_obj, response_obj.clone()));
+
+                            match call_result {
+                                Ok(result) => {
+                                    // If result is a Promise, DO NOT call promise.finish() here!
+                                    // The Promise will execute asynchronously via the JS event loop.
+                                    // Calling finish() would block the tokio runtime and prevent
+                                    // async operations (like createWindow's oneshot await) from completing.
+                                    //
+                                    // The Promise body will be executed by run_js_event_loop via
+                                    // runtime.drive() which properly handles async operations.
+                                    if result.is_promise() {
+                                        debug!("Handler in mod '{}' returned Promise - will execute asynchronously via event loop", mod_id);
+                                        // Return true to indicate the handler was triggered successfully.
+                                        // The actual async work will complete via run_js_event_loop.
+                                        return Ok(true);
+                                    }
+
+                                    // Read back the response values (for synchronous handlers)
+                                    let handled: bool = response_obj.get("handled").unwrap_or(false);
+                                    Ok(handled)
+                                }
+                                Err(e) => {
+                                    let error_msg = Self::format_js_error(&ctx, &e);
+                                    error!("Handler call error in mod '{}': {}", mod_id, error_msg);
+                                    Err(format!("Handler call error: {}", error_msg))
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            error!("Handler {} not found in mod '{}'", handler_id, mod_id);
+                            Err(format!("Handler {} not found", handler_id))
+                        }
+                        Err(e) => {
+                            error!("Failed to get handler {} from mod '{}': {:?}", handler_id, mod_id, e);
+                            Err(format!("Failed to get handler: {:?}", e))
+                        }
+                    }
+                })
+                .await;
+
+            // Update response based on handler result
+            match result {
+                Ok(handled) => {
+                    response.handled = handled;
+
+                    // If handler set handled=true, stop processing more handlers
+                    // Note: For async handlers returning Promise, we set handled=true
+                    // to indicate the handler was triggered (async completion via event loop)
+                    if handled {
+                        debug!("Handler in mod '{}' triggered for GraphicEngineReady", handler.mod_id);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("Handler execution failed: {}", e);
+                    // Continue to next handler on error
+                }
+            }
+        }
+
+        response
+    }
+
+    /// Dispatch GraphicEngineWindowClosed event to all registered handlers (async version)
+    ///
+    /// This is called when a window managed by the graphic engine is closed.
+    /// The request contains the window_id of the closed window.
+    /// This is a client-only event.
+    pub async fn dispatch_graphic_engine_window_closed(
+        &self,
+        request: &crate::api::GraphicEngineWindowClosedRequest,
+    ) -> crate::api::GraphicEngineWindowClosedResponse {
+        let handlers = self.system_api.event_dispatcher().get_handlers_for_graphic_engine_window_closed();
+
+        if handlers.is_empty() {
+            return crate::api::GraphicEngineWindowClosedResponse::default();
+        }
+
+        debug!("Dispatching GraphicEngineWindowClosed (window_id={}) to {} handlers", request.window_id, handlers.len());
+
+        let mut response = crate::api::GraphicEngineWindowClosedResponse::default();
+        let window_id = request.window_id;
+
+        for handler in handlers {
+            // Get the mod's context
+            let loaded_mod = match self.loaded_mods.get(&handler.mod_id) {
+                Some(m) => m,
+                None => {
+                    error!("Handler mod '{}' not loaded", handler.mod_id);
+                    continue;
+                }
+            };
+
+            let handler_id = handler.handler_id;
+            let mod_id = handler.mod_id.clone();
+
+            // Call the handler function with request and response objects
+            let result: Result<bool, String> = loaded_mod
+                .context
+                .with(|ctx| {
+                    // Get the handler function from the context's handler map
+                    match bindings::get_js_handler(&ctx, handler_id) {
+                        Ok(Some(func)) => {
+                            // Create request object with windowId
+                            let request_obj = Object::new(ctx.clone()).map_err(|e| format!("Failed to create request object: {:?}", e))?;
+                            request_obj.set("windowId", window_id).map_err(|e| format!("Failed to set windowId: {:?}", e))?;
+
+                            // Create response object
+                            let response_obj = Object::new(ctx.clone()).map_err(|e| format!("Failed to create response object: {:?}", e))?;
+                            response_obj.set("handled", false).map_err(|e| format!("Failed to set handled: {:?}", e))?;
+
+                            // Add setHandled method
+                            let set_handled = Function::new(ctx.clone(), |ctx: Ctx, handled: bool| -> rquickjs::Result<()> {
+                                let this: Object = ctx.globals().get("__currentGraphicEngineWindowClosedResponse")?;
+                                this.set("handled", handled)?;
+                                Ok(())
+                            }).map_err(|e| format!("Failed to create setHandled: {:?}", e))?;
+                            response_obj.set("setHandled", set_handled).map_err(|e| format!("Failed to set setHandled: {:?}", e))?;
+
+                            // Store response object as global for method access
+                            ctx.globals().set("__currentGraphicEngineWindowClosedResponse", response_obj.clone()).map_err(|e| format!("Failed to set __currentGraphicEngineWindowClosedResponse: {:?}", e))?;
+
+                            // Call the handler function
+                            let call_result = func.call::<(Object, Object), Value>((request_obj, response_obj.clone()));
+
+                            match call_result {
+                                Ok(result) => {
+                                    // If result is a Promise, DO NOT call promise.finish() here!
+                                    // The Promise will execute asynchronously via the JS event loop.
+                                    if result.is_promise() {
+                                        debug!("Handler in mod '{}' returned Promise - will execute asynchronously via event loop", mod_id);
+                                        return Ok(true);
+                                    }
+
+                                    // Read back the response values (for synchronous handlers)
+                                    let handled: bool = response_obj.get("handled").unwrap_or(false);
+                                    Ok(handled)
+                                }
+                                Err(e) => {
+                                    let error_msg = Self::format_js_error(&ctx, &e);
+                                    error!("Handler call error in mod '{}': {}", mod_id, error_msg);
+                                    Err(format!("Handler call error: {}", error_msg))
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            error!("Handler {} not found in mod '{}'", handler_id, mod_id);
+                            Err(format!("Handler {} not found", handler_id))
+                        }
+                        Err(e) => {
+                            error!("Failed to get handler {} from mod '{}': {:?}", handler_id, mod_id, e);
+                            Err(format!("Failed to get handler: {:?}", e))
+                        }
+                    }
+                })
+                .await;
+
+            // Update response based on handler result
+            match result {
+                Ok(handled) => {
+                    response.handled = handled;
+
+                    // If handler set handled=true, stop processing more handlers
+                    if handled {
+                        debug!("Handler in mod '{}' triggered for GraphicEngineWindowClosed", handler.mod_id);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    error!("Handler execution failed: {}", e);
+                    // Continue to next handler on error
+                }
+            }
+        }
+
+        response
+    }
 }
 
 impl Drop for JsRuntimeAdapter {
@@ -1460,6 +1735,26 @@ impl RuntimeAdapter for JsRuntimeAdapter {
         self.system_api
             .event_dispatcher()
             .handler_count(crate::api::SystemEvents::TerminalKeyPressed)
+    }
+
+    fn dispatch_graphic_engine_ready(
+        &self,
+        request: &crate::api::GraphicEngineReadyRequest,
+    ) -> crate::api::GraphicEngineReadyResponse {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.dispatch_graphic_engine_ready(request))
+        })
+    }
+
+    fn dispatch_graphic_engine_window_closed(
+        &self,
+        request: &crate::api::GraphicEngineWindowClosedRequest,
+    ) -> crate::api::GraphicEngineWindowClosedResponse {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.dispatch_graphic_engine_window_closed(request))
+        })
     }
 }
 

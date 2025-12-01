@@ -73,7 +73,7 @@ import { helper } from '@js-helper';
 ## 5. Logging
 
 - Logs will be output without colors if tty is not detected.
-- Use `STAM_GFXENGINELOG=1` to enable verbose logging from graphic engines (bevy, wgpu, naga, winit). Disabled by default to reduce log noise.
+- Use `STAM_LOGDEPS=1` to enable logging from external dependencies (bevy, wgpu, vulkan, naga, winit, etc.). By default (`STAM_LOGDEPS=0`), only Staminal code logs at DEBUG level while external dependencies are filtered to WARN to reduce noise.
 
 ## 6. Golden Rules
 

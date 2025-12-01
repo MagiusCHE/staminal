@@ -913,6 +913,8 @@ impl SystemJS {
     /// # Returns
     /// An object with:
     /// - id: string - The game identifier
+    /// - name: string - The game display name
+    /// - version: string - The game version
     ///
     /// # Throws
     /// Error if called on the server (game info not available on server)
@@ -922,6 +924,8 @@ impl SystemJS {
             Some(game_info) => {
                 let obj = Object::new(ctx)?;
                 obj.set("id", game_info.id.as_str())?;
+                obj.set("name", game_info.name.as_str())?;
+                obj.set("version", game_info.version.as_str())?;
                 Ok(obj)
             }
             None => {
@@ -958,6 +962,7 @@ pub fn setup_system_api(ctx: Ctx, system_api: SystemApi) -> Result<(), rquickjs:
     system_events.set("RequestUri", SystemEvents::RequestUri.to_u32())?;
     system_events.set("TerminalKeyPressed", SystemEvents::TerminalKeyPressed.to_u32())?;
     system_events.set("GraphicEngineReady", SystemEvents::GraphicEngineReady.to_u32())?;
+    system_events.set("GraphicEngineWindowClosed", SystemEvents::GraphicEngineWindowClosed.to_u32())?;
     ctx.globals().set("SystemEvents", system_events)?;
 
     // Create RequestUriProtocol enum object
@@ -1215,6 +1220,355 @@ pub fn setup_text_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
 
     // Register Text object globally
     globals.set("Text", text_obj)?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Graphic API Bindings
+// ============================================================================
+
+use crate::api::{GraphicProxy, GraphicEngines, WindowConfig, WindowPositionMode, InitialWindowConfig};
+
+/// JavaScript Graphic API class
+///
+/// Exposed as the `graphic` global object in JavaScript.
+/// Provides methods to enable graphic engines and create windows.
+#[rquickjs::class]
+#[derive(Clone, Trace, JsLifetime)]
+pub struct GraphicJS {
+    #[qjs(skip_trace)]
+    graphic_proxy: Arc<GraphicProxy>,
+}
+
+#[rquickjs::methods]
+impl GraphicJS {
+    /// Enable a graphic engine
+    ///
+    /// # Arguments
+    /// * `engine_type` - GraphicEngines enum value (0 = Bevy, 1 = Wgpu, 2 = Terminal)
+    /// * `config` - Optional configuration object with:
+    ///   - window: Object with initial window settings:
+    ///     - title: string (default: "Staminal")
+    ///     - width: number (default: 1280)
+    ///     - height: number (default: 720)
+    ///     - resizable: boolean (default: true)
+    ///     - fullscreen: boolean (default: false)
+    ///     - positionMode: WindowPositionModes enum value (default: Centered)
+    ///
+    /// # Returns
+    /// Promise that resolves when engine is ready
+    ///
+    /// # Throws
+    /// Error if called on server or if engine is already enabled
+    #[qjs(rename = "enableEngine")]
+    pub async fn enable_engine<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        engine_type: u32,
+        config: Opt<Object<'js>>,
+    ) -> rquickjs::Result<()> {
+        let engine = GraphicEngines::from_u32(engine_type).ok_or_else(|| {
+            let msg = format!("Invalid engine type: {}. Use GraphicEngines.Bevy (0), GraphicEngines.Wgpu (1), or GraphicEngines.Terminal (2)", engine_type);
+            ctx.throw(rquickjs::String::from_str(ctx.clone(), &msg).unwrap().into())
+        })?;
+
+        // Parse the optional config object
+        let initial_window_config = if let Some(cfg) = config.0 {
+            // Try to get the window sub-object
+            if let Ok(window_obj) = cfg.get::<_, Object>("window") {
+                Some(InitialWindowConfig {
+                    title: window_obj.get::<_, String>("title").unwrap_or_else(|_| "Staminal".to_string()),
+                    width: window_obj.get::<_, u32>("width").unwrap_or(1280),
+                    height: window_obj.get::<_, u32>("height").unwrap_or(720),
+                    resizable: window_obj.get::<_, bool>("resizable").unwrap_or(true),
+                    fullscreen: window_obj.get::<_, bool>("fullscreen").unwrap_or(false),
+                    position_mode: WindowPositionMode::from_u32(
+                        window_obj.get::<_, u32>("positionMode").unwrap_or(1) // Default: Centered
+                    ),
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        self.graphic_proxy.enable_engine(engine, initial_window_config).await.map_err(|e| {
+            ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into())
+        })
+    }
+
+    /// Check if a graphic engine is enabled
+    ///
+    /// # Returns
+    /// true if an engine is currently enabled, false otherwise
+    #[qjs(rename = "isEngineEnabled")]
+    pub fn is_engine_enabled(&self) -> bool {
+        self.graphic_proxy.is_engine_enabled()
+    }
+
+    /// Get the current engine type
+    ///
+    /// # Returns
+    /// GraphicEngines enum value, or null if no engine is enabled
+    #[qjs(rename = "getEngine")]
+    pub fn get_engine(&self) -> Option<u32> {
+        self.graphic_proxy.get_active_engine().map(|e| e.to_u32())
+    }
+
+    /// Get detailed information about the active graphic engine
+    ///
+    /// # Returns
+    /// Promise that resolves to an object containing:
+    /// - engineType: string (e.g., "Bevy")
+    /// - engineTypeId: number (GraphicEngines enum value)
+    /// - name: string (library name)
+    /// - version: string (library version)
+    /// - description: string (engine description)
+    /// - features: string[] (list of enabled features)
+    /// - backend: string (rendering backend, e.g., "Vulkan")
+    /// - supports2d: boolean
+    /// - supports3d: boolean
+    /// - supportsUi: boolean
+    /// - supportsAudio: boolean
+    /// - mainWindow: Window (the primary/main window created at engine startup)
+    ///
+    /// # Throws
+    /// Error if called on server or if no engine is enabled
+    #[qjs(rename = "getEngineInfo")]
+    pub async fn get_engine_info<'js>(
+        &self,
+        ctx: Ctx<'js>,
+    ) -> rquickjs::Result<Object<'js>> {
+        let info = self.graphic_proxy.get_engine_info().await.map_err(|e| {
+            ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into())
+        })?;
+
+        // Create JavaScript object from GraphicEngineInfo
+        let obj = Object::new(ctx.clone())?;
+        obj.set("engineType", info.engine_type)?;
+        obj.set("engineTypeId", info.engine_type_id)?;
+        obj.set("name", info.name)?;
+        obj.set("version", info.version)?;
+        obj.set("description", info.description)?;
+
+        // Convert features Vec to JS array
+        let features_array = rquickjs::Array::new(ctx.clone())?;
+        for (i, feature) in info.features.iter().enumerate() {
+            features_array.set(i, feature.as_str())?;
+        }
+        obj.set("features", features_array)?;
+
+        obj.set("backend", info.backend)?;
+        obj.set("supports2d", info.supports_2d)?;
+        obj.set("supports3d", info.supports_3d)?;
+        obj.set("supportsUi", info.supports_ui)?;
+        obj.set("supportsAudio", info.supports_audio)?;
+
+        // Create mainWindow object wrapping the primary window (ID 1)
+        // The primary window is the hidden window created at engine startup
+        // which can be modified by the mod to become the main game window
+        let main_window = rquickjs::Class::<WindowJS>::instance(
+            ctx.clone(),
+            WindowJS {
+                id: 1, // Primary window ID
+                graphic_proxy: self.graphic_proxy.clone(),
+            },
+        )?;
+        obj.set("mainWindow", main_window)?;
+
+        Ok(obj)
+    }
+
+    /// Create a new window
+    ///
+    /// # Arguments
+    /// * `config` - Window configuration object with properties:
+    ///   - title: string (default: "Staminal")
+    ///   - width: number (default: 1280)
+    ///   - height: number (default: 720)
+    ///   - fullscreen: boolean (default: false)
+    ///   - resizable: boolean (default: true)
+    ///   - visible: boolean (default: true)
+    ///   - positionMode: WindowPositionModes enum (default: Centered)
+    ///
+    /// The config uses the same format as the `window` parameter in `enableEngine()`.
+    ///
+    /// # Returns
+    /// Promise that resolves to a Window object
+    ///
+    /// # Throws
+    /// Error if called on server or if no engine is enabled
+    #[qjs(rename = "createWindow")]
+    pub async fn create_window<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        config: Opt<Object<'js>>,
+    ) -> rquickjs::Result<rquickjs::Class<'js, WindowJS>> {
+        tracing::debug!("GraphicJS::create_window called");
+
+        let window_config = if let Some(cfg) = config.0 {
+            WindowConfig {
+                title: cfg
+                    .get::<_, String>("title")
+                    .unwrap_or_else(|_| "Staminal".to_string()),
+                width: cfg.get::<_, u32>("width").unwrap_or(1280),
+                height: cfg.get::<_, u32>("height").unwrap_or(720),
+                fullscreen: cfg.get::<_, bool>("fullscreen").unwrap_or(false),
+                resizable: cfg.get::<_, bool>("resizable").unwrap_or(true),
+                visible: cfg.get::<_, bool>("visible").unwrap_or(true),
+                position_mode: WindowPositionMode::from_u32(
+                    cfg.get::<_, u32>("positionMode").unwrap_or(1), // 1 = Centered
+                ),
+            }
+        } else {
+            WindowConfig::default()
+        };
+
+        let window_id = self
+            .graphic_proxy
+            .create_window(window_config)
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))?;
+
+        rquickjs::Class::<WindowJS>::instance(
+            ctx,
+            WindowJS {
+                id: window_id,
+                graphic_proxy: self.graphic_proxy.clone(),
+            },
+        )
+    }
+}
+
+/// JavaScript Window class
+///
+/// Represents a window created by the graphic engine.
+/// Instances are returned by `graphic.createWindow()`.
+#[rquickjs::class]
+#[derive(Clone, Trace, JsLifetime)]
+pub struct WindowJS {
+    #[qjs(skip_trace)]
+    id: u64,
+    #[qjs(skip_trace)]
+    graphic_proxy: Arc<GraphicProxy>,
+}
+
+#[rquickjs::methods]
+impl WindowJS {
+    /// Get the window ID
+    #[qjs(get, rename = "id")]
+    pub fn get_id(&self) -> u64 {
+        self.id
+    }
+
+    /// Set window size
+    ///
+    /// # Arguments
+    /// * `width` - New width in pixels
+    /// * `height` - New height in pixels
+    ///
+    /// # Returns
+    /// Promise that resolves when size is changed
+    #[qjs(rename = "setSize")]
+    pub async fn set_size(&self, ctx: Ctx<'_>, width: u32, height: u32) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .set_window_size(self.id, width, height)
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+
+    /// Set window title
+    ///
+    /// # Arguments
+    /// * `title` - New window title
+    ///
+    /// # Returns
+    /// Promise that resolves when title is changed
+    #[qjs(rename = "setTitle")]
+    pub async fn set_title(&self, ctx: Ctx<'_>, title: String) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .set_window_title(self.id, title)
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+
+    /// Set fullscreen mode
+    ///
+    /// # Arguments
+    /// * `fullscreen` - true to enable fullscreen, false for windowed
+    ///
+    /// # Returns
+    /// Promise that resolves when mode is changed
+    #[qjs(rename = "setFullscreen")]
+    pub async fn set_fullscreen(&self, ctx: Ctx<'_>, fullscreen: bool) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .set_window_fullscreen(self.id, fullscreen)
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+
+    /// Set window visibility
+    ///
+    /// # Arguments
+    /// * `visible` - true to show, false to hide
+    ///
+    /// # Returns
+    /// Promise that resolves when visibility is changed
+    #[qjs(rename = "setVisible")]
+    pub async fn set_visible(&self, ctx: Ctx<'_>, visible: bool) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .set_window_visible(self.id, visible)
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+
+    /// Close the window
+    ///
+    /// # Returns
+    /// Promise that resolves when window is closed
+    #[qjs(rename = "close")]
+    pub async fn close(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .close_window(self.id)
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+
+    // Note: setResizable was removed - resizable must be set at window creation time via enableEngine()
+}
+
+/// Setup graphic API in the JavaScript context
+///
+/// Creates the `graphic` global object and `GraphicEngines` enum.
+/// Also defines the `WindowJS` class for window instances.
+///
+/// # Arguments
+/// * `ctx` - The JavaScript context
+/// * `graphic_proxy` - The shared GraphicProxy instance
+pub fn setup_graphic_api(ctx: Ctx, graphic_proxy: Arc<GraphicProxy>) -> Result<(), rquickjs::Error> {
+    // Define classes
+    rquickjs::Class::<GraphicJS>::define(&ctx.globals())?;
+    rquickjs::Class::<WindowJS>::define(&ctx.globals())?;
+
+    // Create graphic instance
+    let graphic_obj =
+        rquickjs::Class::<GraphicJS>::instance(ctx.clone(), GraphicJS { graphic_proxy })?;
+    ctx.globals().set("graphic", graphic_obj)?;
+
+    // Create GraphicEngines enum
+    let engines = Object::new(ctx.clone())?;
+    engines.set("Bevy", GraphicEngines::Bevy.to_u32())?;
+    engines.set("Wgpu", GraphicEngines::Wgpu.to_u32())?;
+    engines.set("Terminal", GraphicEngines::Terminal.to_u32())?;
+    ctx.globals().set("GraphicEngines", engines)?;
+
+    // Create WindowPositionModes enum
+    let position_modes = Object::new(ctx.clone())?;
+    position_modes.set("Default", WindowPositionMode::Default.to_u32())?;
+    position_modes.set("Centered", WindowPositionMode::Centered.to_u32())?;
+    ctx.globals().set("WindowPositionModes", position_modes)?;
 
     Ok(())
 }

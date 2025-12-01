@@ -7,7 +7,11 @@
 
 // Format argument for normal console output (no quotes on strings)
 const __formatArg = (arg) =>{
-    // 1. Special Case: Error Objects
+    // 1. Special Case: Null and Undefined
+    if (arg === null) return 'null';
+    if (arg === undefined) return 'undefined';
+
+    // 2. Special Case: Error Objects
     if (arg instanceof Error) {
         if (arg.stack) {
             return arg.name + ": " + arg.message + "\n" + arg.stack;
@@ -15,15 +19,52 @@ const __formatArg = (arg) =>{
         return arg.toString();
     }
 
-    // 2. Special Case: Null and Undefined
-    if (arg === null) return 'null';
-    if (arg === undefined) return 'undefined';
+    // 3. Special Case: Promises (like Node.js: Promise { <pending> })
+    if (arg instanceof Promise) {
+        return 'Promise { <pending> }';
+    }
 
-    // 3. Special Case: Functions
+    // 4. Special Case: Functions
     if (typeof arg === 'function') return arg.toString();
 
-    // 4. Objects - use JSON.stringify
+    // 5. Objects - use JSON.stringify with type annotation for special types
     if (typeof arg === 'object') {
+        // Check for typed arrays and other special objects
+        const typeName = Object.prototype.toString.call(arg).slice(8, -1);
+
+        // Handle ArrayBuffer and TypedArrays
+        if (typeName === 'ArrayBuffer') {
+            return `ArrayBuffer { byteLength: ${arg.byteLength} }`;
+        }
+        if (typeName.endsWith('Array') && typeName !== 'Array') {
+            return `${typeName}(${arg.length}) [ ${Array.from(arg.slice(0, 10)).join(', ')}${arg.length > 10 ? ', ...' : ''} ]`;
+        }
+
+        // Handle Map
+        if (arg instanceof Map) {
+            const entries = Array.from(arg.entries()).slice(0, 10);
+            const formatted = entries.map(([k, v]) => `${__formatArg(k)} => ${__formatArg(v)}`).join(', ');
+            return `Map(${arg.size}) { ${formatted}${arg.size > 10 ? ', ...' : ''} }`;
+        }
+
+        // Handle Set
+        if (arg instanceof Set) {
+            const values = Array.from(arg.values()).slice(0, 10);
+            const formatted = values.map(v => __formatArg(v)).join(', ');
+            return `Set(${arg.size}) { ${formatted}${arg.size > 10 ? ', ...' : ''} }`;
+        }
+
+        // Handle Date
+        if (arg instanceof Date) {
+            return arg.toISOString();
+        }
+
+        // Handle RegExp
+        if (arg instanceof RegExp) {
+            return arg.toString();
+        }
+
+        // Regular objects - use JSON.stringify
         try {
             return JSON.stringify(arg, null, 2);
         } catch (e) {
@@ -31,7 +72,7 @@ const __formatArg = (arg) =>{
         }
     }
 
-    // 5. Primitives (Strings, Numbers, Booleans)
+    // 6. Primitives (Strings, Numbers, Booleans)
     return String(arg);
 };
 
@@ -59,19 +100,61 @@ const __inspectArg = (arg) => {
         return arg.toString();
     }
 
+    // Promises (like Node.js: Promise { <pending> })
+    if (arg instanceof Promise) {
+        return 'Promise { <pending> }';
+    }
+
     // Arrays - format each element with inspect
     if (Array.isArray(arg)) {
-        const items = arg.map(item => __inspectArg(item));
-        return '[ ' + items.join(', ') + ' ]';
+        const items = arg.slice(0, 10).map(item => __inspectArg(item));
+        return '[ ' + items.join(', ') + (arg.length > 10 ? ', ...' : '') + ' ]';
     }
 
     // Objects - format with keys and inspected values
     if (typeof arg === 'object') {
+        // Check for typed arrays and other special objects
+        const typeName = Object.prototype.toString.call(arg).slice(8, -1);
+
+        // Handle ArrayBuffer and TypedArrays
+        if (typeName === 'ArrayBuffer') {
+            return `ArrayBuffer { byteLength: ${arg.byteLength} }`;
+        }
+        if (typeName.endsWith('Array') && typeName !== 'Array') {
+            return `${typeName}(${arg.length}) [ ${Array.from(arg.slice(0, 10)).join(', ')}${arg.length > 10 ? ', ...' : ''} ]`;
+        }
+
+        // Handle Map
+        if (arg instanceof Map) {
+            const entries = Array.from(arg.entries()).slice(0, 10);
+            const formatted = entries.map(([k, v]) => `${__inspectArg(k)} => ${__inspectArg(v)}`).join(', ');
+            return `Map(${arg.size}) { ${formatted}${arg.size > 10 ? ', ...' : ''} }`;
+        }
+
+        // Handle Set
+        if (arg instanceof Set) {
+            const values = Array.from(arg.values()).slice(0, 10);
+            const formatted = values.map(v => __inspectArg(v)).join(', ');
+            return `Set(${arg.size}) { ${formatted}${arg.size > 10 ? ', ...' : ''} }`;
+        }
+
+        // Handle Date
+        if (arg instanceof Date) {
+            return arg.toISOString();
+        }
+
+        // Handle RegExp
+        if (arg instanceof RegExp) {
+            return arg.toString();
+        }
+
+        // Regular objects
         try {
             const keys = Object.keys(arg);
             if (keys.length === 0) return '{}';
-            const pairs = keys.map(k => k + ': ' + __inspectArg(arg[k]));
-            return '{ ' + pairs.join(', ') + ' }';
+            const displayKeys = keys.slice(0, 10);
+            const pairs = displayKeys.map(k => k + ': ' + __inspectArg(arg[k]));
+            return '{ ' + pairs.join(', ') + (keys.length > 10 ? ', ...' : '') + ' }';
         } catch (e) {
             return arg.toString();
         }

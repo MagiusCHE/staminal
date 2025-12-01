@@ -5,6 +5,12 @@
 //! - Extracts `runtime_type` and `mod_id` fields to display as `js::mod-id`
 //! - Strips common prefixes from targets for cleaner output
 //! - Handles raw mode terminal output with proper `\r\n` line endings
+//! - Filters external dependency logs based on `STAM_LOGDEPS` environment variable
+//!
+//! # Environment Variables
+//!
+//! - `STAM_LOGDEPS`: Set to `1` to enable logging from external dependencies (bevy, wgpu, etc.).
+//!   Default is `0` which only shows logs from Staminal code.
 //!
 //! # Usage
 //!
@@ -288,6 +294,41 @@ pub fn create_custom_timer()
     OffsetTime::new(offset, format)
 }
 
+/// Check if dependency logging is enabled via STAM_LOGDEPS environment variable
+///
+/// Returns `true` if `STAM_LOGDEPS=1`, `false` otherwise (default).
+pub fn is_dependency_logging_enabled() -> bool {
+    std::env::var("STAM_LOGDEPS")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Build the filter directive for dependency logging
+///
+/// When `STAM_LOGDEPS=0` (default), only logs from Staminal code are shown.
+/// When `STAM_LOGDEPS=1`, all logs are shown including external dependencies.
+fn build_filter_directives(level: Level, log_deps: bool) -> String {
+    let level_str = match level {
+        Level::TRACE => "trace",
+        Level::DEBUG => "debug",
+        Level::INFO => "info",
+        Level::WARN => "warn",
+        Level::ERROR => "error",
+    };
+
+    if log_deps {
+        // Show all logs at the specified level
+        level_str.to_string()
+    } else {
+        // Only show logs from Staminal code (stam_*) at the specified level
+        // External dependencies are set to WARN to reduce noise
+        format!(
+            "warn,stam_client={level},stam_server={level},stam_protocol={level},stam_schema={level},stam_mod_runtimes={level}",
+            level = level_str
+        )
+    }
+}
+
 /// Initialize logging with a custom formatter
 ///
 /// # Arguments
@@ -295,6 +336,11 @@ pub fn create_custom_timer()
 /// * `log_file` - Optional file to write logs to (in addition to stdout)
 /// * `strip_prefix` - Optional prefix to strip from log targets (e.g., "stam_server::")
 /// * `level` - The minimum log level to output
+///
+/// # Environment Variables
+///
+/// * `STAM_LOGDEPS` - Set to `1` to enable logging from external dependencies (bevy, wgpu, etc.).
+///   Default is `0` which only shows logs from Staminal code.
 ///
 /// # Example
 ///
@@ -310,7 +356,15 @@ pub fn init_logging<W: Write + Send + 'static>(
     strip_prefix: Option<&str>,
     level: Level,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    use tracing_subscriber::EnvFilter;
+
     let timer = create_custom_timer();
+    let log_deps = is_dependency_logging_enabled();
+    let filter_directives = build_filter_directives(level, log_deps);
+
+    // Create the env filter - allows RUST_LOG to override our defaults
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&filter_directives));
 
     if let Some(file) = log_file {
         let formatter_stdout = CustomFormatter::new(timer.clone(), use_ansi);
@@ -338,7 +392,7 @@ pub fn init_logging<W: Write + Send + 'static>(
                     .event_format(formatter_file)
                     .with_writer(std::sync::Mutex::new(file)),
             )
-            .with(tracing_subscriber::filter::LevelFilter::from_level(level))
+            .with(env_filter)
             .init();
     } else {
         let formatter = CustomFormatter::new(timer, use_ansi);
@@ -354,7 +408,7 @@ pub fn init_logging<W: Write + Send + 'static>(
                     .event_format(formatter)
                     .with_writer(std::io::stdout),
             )
-            .with(tracing_subscriber::filter::LevelFilter::from_level(level))
+            .with(env_filter)
             .init();
     }
 

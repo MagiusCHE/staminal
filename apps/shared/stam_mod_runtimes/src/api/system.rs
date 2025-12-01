@@ -174,6 +174,10 @@ pub struct ModInfo {
 pub struct GameInfo {
     /// The game identifier
     pub id: String,
+    /// The game display name
+    pub name: String,
+    /// The game version
+    pub version: String,
 }
 
 /// System API providing access to mod registry and system state
@@ -228,9 +232,18 @@ impl SystemApi {
     ///
     /// This should be called on the client after connecting to a game server.
     /// On the server, this should NOT be called - leave game_info as None.
-    pub fn set_game_info(&self, game_id: impl Into<String>) {
+    pub fn set_game_info(
+        &self,
+        game_id: impl Into<String>,
+        game_name: impl Into<String>,
+        game_version: impl Into<String>,
+    ) {
         let mut info = self.game_info.write().unwrap();
-        *info = Some(GameInfo { id: game_id.into() });
+        *info = Some(GameInfo {
+            id: game_id.into(),
+            name: game_name.into(),
+            version: game_version.into(),
+        });
     }
 
     /// Get the game information (client-side only)

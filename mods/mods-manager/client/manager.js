@@ -10,6 +10,7 @@ export class Manager {
     register() {
         system.registerEvent(SystemEvents.TerminalKeyPressed, this.onTerminalKeyPressed.bind(this), 100);
         system.registerEvent(SystemEvents.GraphicEngineReady, this.onGraphicEngineReady.bind(this), 100);
+        system.registerEvent(SystemEvents.GraphicEngineWindowClosed, this.onGraphicEngineWindowClosed.bind(this), 100);
     }
 
     async onTerminalKeyPressed(req, res) {
@@ -22,15 +23,34 @@ export class Manager {
     }
 
     async run() {
-        // system.enableGraphicEngine(GraphicEngines.Bevy) // can be awaited but we dont care about return here. Let it going asynchronously.
+        graphic.enableEngine(GraphicEngines.Bevy, {
+            window: {
+                title: "Staminal",
+                width: 800,
+                height: 600,
+                resizable: true,
+                positionMode: WindowPositionModes.Centered
+            }
+        }) // can be awaited but we dont care about return here. Let it going asynchronously.
 
+    }
+
+    async onGraphicEngineWindowClosed(req, res) {
+        console.log("Graphic engine window closed", req);
+        if (req.windowId === this.#window.id) {
+            console.log("Main window closed, exiting...");
+            system.exit(0);
+            res.handled = true;
+        }
     }
 
     async onGraphicEngineReady() {
 
-        const engine = system.getGraphicEngineInfo();
+        const engine = await graphic.getEngineInfo();
 
         console.log("Graphic engine ready", engine);
+
+        this.#window = engine.mainWindow;
 
         await this.prepareUi();
         await this.ensureMods();
@@ -39,16 +59,16 @@ export class Manager {
     async prepareUi() {
         console.log("Preparing UI for game %o", this.#gameInfo.id);
 
-        this.#window = await graphic.createWindow({
-             title: "Staminal: " + this.#gameInfo.name,
-             width: 1280,
-             height: 720,
-        })
-        // this.#window.setPositionMode(WindowPositionModes.Centered);
-        // this.#window.setResizable(true);
-        // this.#window.show();
+        await this.#window.setTitle("Staminal: " + this.#gameInfo.name);
 
-        console.warn("TODO: implement User Interface to show mods loading/startup progress...");
+        await graphic.createWindow({
+            title: "Staminal (subwin): " + this.#gameInfo.name,
+            width: 1280,
+            height: 800,
+            resizable: true,
+            positionMode: WindowPositionModes.Centered
+        })
+
     }
 
     async ensureMods() {

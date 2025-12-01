@@ -110,6 +110,34 @@ pub trait RuntimeAdapter {
     /// This is used to determine if any mod has registered to handle terminal input,
     /// which affects whether the default "Ctrl+C to exit" message should be shown.
     fn terminal_key_handler_count(&self) -> usize;
+
+    /// Dispatch a GraphicEngineReady event to all registered handlers
+    ///
+    /// This method finds all handlers registered for GraphicEngineReady, calls them
+    /// in priority order (lowest first), and returns whether the event was handled.
+    /// This event is client-only and is triggered when the graphic engine has been
+    /// initialized and is ready to receive commands.
+    ///
+    /// # Arguments
+    /// * `request` - The graphic engine ready request (currently empty but extensible)
+    ///
+    /// # Returns
+    /// A `GraphicEngineReadyResponse` containing whether the event was handled
+    fn dispatch_graphic_engine_ready(&self, request: &api::GraphicEngineReadyRequest) -> api::GraphicEngineReadyResponse;
+
+    /// Dispatch a GraphicEngineWindowClosed event to all registered handlers
+    ///
+    /// This method finds all handlers registered for GraphicEngineWindowClosed, calls them
+    /// in priority order (lowest first), and returns whether the event was handled.
+    /// This event is client-only and is triggered when a window managed by the
+    /// graphic engine is closed.
+    ///
+    /// # Arguments
+    /// * `request` - The window closed request containing the window_id
+    ///
+    /// # Returns
+    /// A `GraphicEngineWindowClosedResponse` containing whether the event was handled
+    fn dispatch_graphic_engine_window_closed(&self, request: &api::GraphicEngineWindowClosedRequest) -> api::GraphicEngineWindowClosedResponse;
 }
 
 /// Manager for all mod runtimes
@@ -280,6 +308,54 @@ impl RuntimeManager {
     /// which affects whether the default "Ctrl+C to exit" message should be shown.
     pub fn terminal_key_handler_count(&self) -> usize {
         self.runtimes.values().map(|r| r.terminal_key_handler_count()).sum()
+    }
+
+    /// Dispatch a GraphicEngineReady event to all registered handlers
+    ///
+    /// This method iterates through all runtime adapters and dispatches the
+    /// GraphicEngineReady event. If any handler marks the event as handled,
+    /// the loop stops and returns immediately.
+    ///
+    /// # Arguments
+    /// * `request` - The graphic engine ready request (currently empty but extensible)
+    ///
+    /// # Returns
+    /// A `GraphicEngineReadyResponse` containing whether the event was handled by any runtime
+    pub fn dispatch_graphic_engine_ready(&self, request: &api::GraphicEngineReadyRequest) -> api::GraphicEngineReadyResponse {
+        // Dispatch to all runtimes (currently only JavaScript)
+        // If any runtime handles the event, stop and return
+        for runtime in self.runtimes.values() {
+            let response = runtime.dispatch_graphic_engine_ready(request);
+            if response.handled {
+                return response;
+            }
+        }
+        // No runtime handled the event
+        api::GraphicEngineReadyResponse::default()
+    }
+
+    /// Dispatch a GraphicEngineWindowClosed event to all registered handlers
+    ///
+    /// This method iterates through all runtime adapters and dispatches the
+    /// GraphicEngineWindowClosed event. If any handler marks the event as handled,
+    /// the loop stops and returns immediately.
+    ///
+    /// # Arguments
+    /// * `request` - The window closed request containing the window_id
+    ///
+    /// # Returns
+    /// A `GraphicEngineWindowClosedResponse` containing whether the event was handled by any runtime
+    pub fn dispatch_graphic_engine_window_closed(&self, request: &api::GraphicEngineWindowClosedRequest) -> api::GraphicEngineWindowClosedResponse {
+        // Dispatch to all runtimes (currently only JavaScript)
+        // If any runtime handles the event, stop and return
+        for runtime in self.runtimes.values() {
+            let response = runtime.dispatch_graphic_engine_window_closed(request);
+            if response.handled {
+                return response;
+            }
+        }
+        // No runtime handled the event
+        api::GraphicEngineWindowClosedResponse::default()
     }
 }
 

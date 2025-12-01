@@ -9,10 +9,17 @@ use tracing::{Level, debug, error, info, warn};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use stam_mod_runtimes::api::{DownloadResponse, LocaleApi, NetworkApi, NetworkConfig, parse_stam_uri, sanitize_uri, extract_mod_zip};
+use stam_mod_runtimes::api::{
+    DownloadResponse, EnableEngineRequest, GraphicCommand, GraphicEngineReadyRequest,
+    GraphicEngineWindowClosedRequest, GraphicEngines, GraphicEvent, GraphicProxy, LocaleApi,
+    NetworkApi, NetworkConfig, extract_mod_zip, parse_stam_uri, sanitize_uri,
+};
 use stam_mod_runtimes::logging::{create_custom_timer, CustomFormatter, RawModeStdoutWriter};
 use stam_protocol::{GameMessage, GameStream, IntentType, PrimalMessage, PrimalStream};
 use stam_schema::{ModManifest, Validatable, validate_mod_dependencies, validate_version_range};
+
+mod engines;
+use engines::BevyEngine;
 
 // ============================================================================
 // Worker Thread Communication
@@ -304,6 +311,7 @@ async fn connect_to_game_server(
     game_id: &str,
     locale: Arc<LocaleManager>,
     app_paths: &AppPaths,
+    engine_request_tx: std_mpsc::Sender<EnableEngineRequest>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize game-specific directory
     debug!("Initializing directories for game '{}'...", game_id);
@@ -425,6 +433,8 @@ async fn connect_to_game_server(
     // Runtime manager and system API for dynamic mod loading
     let mut runtime_manager_opt: Option<ModRuntimeManager> = None;
     let mut system_api_opt: Option<stam_mod_runtimes::api::SystemApi> = None;
+    // Graphic proxy for polling graphic engine events
+    let mut graphic_proxy_opt: Option<Arc<GraphicProxy>> = None;
     // Game root directory for resolving mod paths
     let mut game_root_opt: Option<std::path::PathBuf> = None;
 
@@ -708,7 +718,13 @@ async fn connect_to_game_server(
                 js_adapter.system_api().set_home_dir(game_root.clone());
 
                 // Set game info for system.get_game_info() (client-only API)
-                js_adapter.system_api().set_game_info(game_id.clone());
+                js_adapter.system_api().set_game_info(game_id, &game_name, &game_version);
+
+                // Setup graphic proxy for graphic engine operations (client-only)
+                let graphic_proxy = Arc::new(GraphicProxy::new_client(engine_request_tx.clone()));
+                js_adapter.set_graphic_proxy(graphic_proxy.clone());
+                // Save for main loop to poll graphic events
+                graphic_proxy_opt = Some(graphic_proxy.clone());
 
                 // Setup locale API for internationalization in JavaScript mods
                 // LocaleApi now supports hierarchical lookup: mod locale -> global locale
@@ -1059,6 +1075,14 @@ async fn connect_to_game_server(
             None
         };
 
+        // Take the graphic event receiver from GraphicProxy (if engine is enabled)
+        // This receiver gets graphic engine events like EngineReady, WindowCreated, KeyPressed, etc.
+        let mut graphic_event_rx = if let Some(ref graphic_proxy) = graphic_proxy_opt {
+            graphic_proxy.take_event_receiver().await
+        } else {
+            None
+        };
+
         // Start terminal input reader if running in a terminal
         let terminal_input_enabled = stam_mod_runtimes::terminal_input::is_terminal();
         let (mut terminal_rx, mut terminal_handle) = if terminal_input_enabled {
@@ -1179,6 +1203,22 @@ async fn connect_to_game_server(
                     }
                 }
 
+                // Handle graphic engine events
+                event = async {
+                    if let Some(ref mut rx) = graphic_event_rx {
+                        rx.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                    if let Some(event) = event {
+                        handle_graphic_event(
+                            event,
+                            &mut runtime_manager_opt,
+                        );
+                    }
+                }
+
                 // Maintain game connection
                 _ = maintain_game_connection(&mut stream, locale.clone()) => {
                     info!("{}", locale.get("connection-closed"));
@@ -1195,10 +1235,21 @@ async fn connect_to_game_server(
                     break;
                 }
 
-                // Check for SIGTERM (polled periodically)
+                // Check for SIGTERM and graphic event receiver (polled periodically)
                 _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
                     if sigterm_received.load(Ordering::Relaxed) {
                         break;
+                    }
+
+                    // If we don't have a graphic event receiver yet, try to get one
+                    // This handles the case where enableEngine() was called after our initial check
+                    if graphic_event_rx.is_none() {
+                        if let Some(ref graphic_proxy) = graphic_proxy_opt {
+                            if let Some(rx) = graphic_proxy.take_event_receiver().await {
+                                debug!("Obtained graphic event receiver after engine enablement");
+                                graphic_event_rx = Some(rx);
+                            }
+                        }
                     }
                 }
             }
@@ -1306,6 +1357,17 @@ async fn connect_to_game_server(
         // Stop terminal input reader and wait for cleanup to complete
         if let Some(ref mut handle) = terminal_handle {
             handle.stop_async().await;
+        }
+    }
+
+    // Shutdown graphic engine if one was enabled
+    // This sends a Shutdown command to the engine thread, causing it to exit its main loop
+    // and allowing the main thread to proceed with termination
+    if let Some(ref graphic_proxy) = graphic_proxy_opt {
+        debug!("Shutting down graphic engine...");
+        match graphic_proxy.shutdown(std::time::Duration::from_secs(5)).await {
+            Ok(()) => debug!("Graphic engine shut down successfully"),
+            Err(e) => warn!("Graphic engine shutdown error: {}", e),
         }
     }
 
@@ -1440,6 +1502,116 @@ async fn handle_send_event_request(
     Ok(())
 }
 
+/// Handle a graphic engine event
+///
+/// This is called when the worker thread receives an event from the graphic engine.
+/// It dispatches the event to the appropriate handlers in the mod runtime.
+fn handle_graphic_event(
+    event: GraphicEvent,
+    runtime_manager_opt: &mut Option<ModRuntimeManager>,
+) {
+    match event {
+        GraphicEvent::EngineReady => {
+            debug!("Graphic engine is ready, dispatching GraphicEngineReady event");
+
+            // Dispatch GraphicEngineReady to all registered handlers
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                let request = GraphicEngineReadyRequest::new();
+                let response = runtime_manager.dispatch_graphic_engine_ready(&request);
+
+                if response.handled {
+                    debug!("GraphicEngineReady was handled by a mod");
+                } else {
+                    debug!("GraphicEngineReady was not handled (no handlers or all handlers declined)");
+                }
+            } else {
+                debug!("No runtime manager available to dispatch GraphicEngineReady");
+            }
+        }
+        GraphicEvent::WindowCreated { window_id } => {
+            debug!("Window {} created", window_id);
+            // TODO: Dispatch window:created event to mods
+        }
+        GraphicEvent::WindowClosed { window_id } => {
+            debug!("Window {} closed, dispatching GraphicEngineWindowClosed event", window_id);
+
+            // Dispatch GraphicEngineWindowClosed to all registered handlers
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                let request = GraphicEngineWindowClosedRequest::new(window_id);
+                let response = runtime_manager.dispatch_graphic_engine_window_closed(&request);
+
+                if response.handled {
+                    debug!("GraphicEngineWindowClosed was handled by a mod");
+                } else {
+                    debug!("GraphicEngineWindowClosed was not handled (no handlers or all handlers declined)");
+                }
+            } else {
+                debug!("No runtime manager available to dispatch GraphicEngineWindowClosed");
+            }
+        }
+        GraphicEvent::WindowResized { window_id, width, height } => {
+            debug!("Window {} resized to {}x{}", window_id, width, height);
+            // TODO: Dispatch window:resized event to mods
+        }
+        GraphicEvent::WindowFocused { window_id, focused } => {
+            debug!("Window {} focus changed: {}", window_id, focused);
+            // TODO: Dispatch window:focused event to mods
+        }
+        GraphicEvent::WindowMoved { window_id, x, y } => {
+            debug!("Window {} moved to ({}, {})", window_id, x, y);
+            // TODO: Dispatch window:moved event to mods
+        }
+        GraphicEvent::KeyPressed { window_id, key, modifiers } => {
+            debug!("Key pressed in window {}: {} (mods: {:?})", window_id, key, modifiers);
+            // TODO: Dispatch input:keyPressed event to mods
+        }
+        GraphicEvent::KeyReleased { window_id, key, modifiers } => {
+            debug!("Key released in window {}: {} (mods: {:?})", window_id, key, modifiers);
+            // TODO: Dispatch input:keyReleased event to mods
+        }
+        GraphicEvent::CharacterInput { window_id, character } => {
+            debug!("Character input in window {}: '{}'", window_id, character);
+            // TODO: Dispatch input:character event to mods
+        }
+        GraphicEvent::MouseMoved { window_id, x, y } => {
+            // Too verbose for debug, use trace if needed
+            // trace!("Mouse moved in window {}: ({}, {})", window_id, x, y);
+            let _ = (window_id, x, y); // Suppress unused warnings
+            // TODO: Dispatch input:mouseMoved event to mods
+        }
+        GraphicEvent::MouseButtonPressed { window_id, button, x, y } => {
+            debug!("Mouse button {:?} pressed in window {} at ({}, {})", button, window_id, x, y);
+            // TODO: Dispatch input:mousePressed event to mods
+        }
+        GraphicEvent::MouseButtonReleased { window_id, button, x, y } => {
+            debug!("Mouse button {:?} released in window {} at ({}, {})", button, window_id, x, y);
+            // TODO: Dispatch input:mouseReleased event to mods
+        }
+        GraphicEvent::MouseWheel { window_id, delta_x, delta_y } => {
+            debug!("Mouse wheel in window {}: ({}, {})", window_id, delta_x, delta_y);
+            // TODO: Dispatch input:mouseWheel event to mods
+        }
+        GraphicEvent::FrameStart { window_id, delta_time } => {
+            // Too verbose for debug
+            let _ = (window_id, delta_time);
+            // TODO: Dispatch frame:start event to mods if needed
+        }
+        GraphicEvent::FrameEnd { window_id, frame_time } => {
+            // Too verbose for debug
+            let _ = (window_id, frame_time);
+            // TODO: Dispatch frame:end event to mods if needed
+        }
+        GraphicEvent::EngineError { message } => {
+            error!("Graphic engine error: {}", message);
+            // TODO: Dispatch engine:error event to mods
+        }
+        GraphicEvent::EngineShuttingDown => {
+            info!("Graphic engine is shutting down");
+            // TODO: Dispatch engine:shuttingDown event to mods
+        }
+    }
+}
+
 /// Maintain game connection - read messages from server
 async fn maintain_game_connection(stream: &mut TcpStream, locale: Arc<LocaleManager>) {
     loop {
@@ -1511,10 +1683,9 @@ struct Args {
 
 /// Main entry point - runs on the main thread
 ///
-/// The main thread is kept minimal to prepare for future GraphicEngine support.
-/// All client logic (networking, mods, JS runtime) runs in a worker thread.
-/// This architecture allows the main thread to host graphic engines (like Bevy)
-/// which require the main thread on some platforms (macOS, Windows).
+/// The main thread hosts graphic engines (like Bevy) which require the main thread
+/// on some platforms (macOS, Windows). All other client logic (networking, mods,
+/// JS runtime) runs in a worker thread.
 fn main() {
     // Parse args first to check if log file is requested
     let args = Args::parse();
@@ -1530,18 +1701,61 @@ fn main() {
     let (worker_tx, main_rx) = std_mpsc::channel::<WorkerMessage>();
     let (_main_tx, worker_rx) = std_mpsc::channel::<MainMessage>();
 
+    // Create channel for graphic engine enable requests
+    let (engine_request_tx, engine_request_rx) = std_mpsc::channel::<EnableEngineRequest>();
+
     // Spawn the worker thread that runs all client logic
     let worker_handle = std::thread::Builder::new()
         .name("client-worker".to_string())
         .spawn(move || {
-            worker_thread_main(args, worker_tx, worker_rx);
+            worker_thread_main(args, worker_tx, worker_rx, engine_request_tx);
         })
         .expect("Failed to spawn worker thread");
 
-    // Main loop - wait for worker thread completion
-    // In the future, this will also handle GraphicEngine events
+    // Main loop - wait for worker thread completion or graphic engine requests
     let exit_code = loop {
-        match main_rx.recv() {
+        // Check for engine enable requests (non-blocking)
+        if let Ok(request) = engine_request_rx.try_recv() {
+            match request.engine_type {
+                GraphicEngines::Bevy => {
+                    info!("Main thread: Starting Bevy graphic engine");
+
+                    // Create event channel for engine -> worker communication
+                    let (event_tx, event_rx) = tokio::sync::mpsc::channel::<GraphicEvent>(256);
+
+                    // Create command channel for worker -> engine communication
+                    let (cmd_tx, cmd_rx) = std_mpsc::channel::<GraphicCommand>();
+
+                    // Send channels back to worker thread
+                    if request.response_tx.send(Ok((cmd_tx, event_rx))).is_err() {
+                        error!("Failed to send engine channels to worker thread");
+                        break 1;
+                    }
+
+                    // Create and run Bevy engine on main thread (blocks until shutdown)
+                    // Pass the initial window config from the request
+                    let mut engine = BevyEngine::new(event_tx);
+                    use stam_mod_runtimes::api::GraphicEngine;
+                    engine.run(cmd_rx, request.initial_window_config);
+
+                    info!("Bevy engine has shut down");
+                    // Engine has exited, continue to check for worker termination
+                }
+                other => {
+                    warn!(
+                        "Unsupported graphic engine requested: {:?}",
+                        other
+                    );
+                    let _ = request.response_tx.send(Err(format!(
+                        "Graphic engine '{:?}' is not yet supported",
+                        other
+                    )));
+                }
+            }
+        }
+
+        // Check for worker termination (non-blocking)
+        match main_rx.try_recv() {
             Ok(WorkerMessage::Terminated { exit_code }) => {
                 debug!("Worker thread terminated with exit code {}", exit_code);
                 break exit_code;
@@ -1550,12 +1764,18 @@ fn main() {
                 error!("Worker thread error: {}", message);
                 break 1;
             }
-            Err(_) => {
+            Err(std_mpsc::TryRecvError::Empty) => {
+                // No message yet, continue polling
+            }
+            Err(std_mpsc::TryRecvError::Disconnected) => {
                 // Channel closed unexpectedly - worker thread panicked or crashed
                 error!("Worker thread communication channel closed unexpectedly");
                 break 1;
             }
         }
+
+        // Small sleep to avoid busy-loop (10ms)
+        std::thread::sleep(std::time::Duration::from_millis(10));
     };
 
     // Wait for the worker thread to fully terminate
@@ -1563,14 +1783,18 @@ fn main() {
         error!("Worker thread panicked: {:?}", e);
     }
 
-    // Future: Check if GraphicEngine is still active
-    // For now, we just exit since there's no graphic engine yet
     debug!("Main thread exiting with code {}", exit_code);
     std::process::exit(exit_code);
 }
 
 /// Setup logging (called from main thread)
+///
+/// Uses STAM_LOGDEPS environment variable to control dependency logging:
+/// - STAM_LOGDEPS=0 (default): Only show logs from Staminal code
+/// - STAM_LOGDEPS=1: Show all logs including external dependencies (bevy, wgpu, etc.)
 fn setup_logging(args: &Args) {
+    use tracing_subscriber::EnvFilter;
+
     let timer = create_custom_timer();
 
     // Disable ANSI colors if:
@@ -1580,6 +1804,24 @@ fn setup_logging(args: &Args) {
     let use_ansi = atty::is(atty::Stream::Stdout)
         && std::env::var("NO_COLOR").is_err()
         && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
+
+    // Check STAM_LOGDEPS env var for dependency logging
+    let log_deps = std::env::var("STAM_LOGDEPS")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+
+    // Build filter: if STAM_LOGDEPS=0, only show Staminal logs at DEBUG level
+    // External dependencies are filtered to WARN to reduce noise
+    // The "js" target is used for JavaScript mod console output
+    let filter_directives = if log_deps {
+        "debug".to_string()
+    } else {
+        "warn,stam_client=debug,stam_protocol=debug,stam_schema=debug,stam_mod_runtimes=debug,js=debug".to_string()
+    };
+
+    // Create the env filter - allows RUST_LOG to override our defaults
+    let env_filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new(&filter_directives));
 
     if args.log_file {
         // File logging: no ANSI colors
@@ -1603,9 +1845,7 @@ fn setup_logging(args: &Args) {
                     .with_ansi(false)
                     .with_writer(file_appender),
             )
-            .with(tracing_subscriber::filter::LevelFilter::from_level(
-                Level::DEBUG,
-            ))
+            .with(env_filter)
             .init();
     } else {
         let formatter = CustomFormatter::new(timer, use_ansi)
@@ -1617,9 +1857,7 @@ fn setup_logging(args: &Args) {
                     .with_ansi(use_ansi)
                     .with_writer(RawModeStdoutWriter),
             )
-            .with(tracing_subscriber::filter::LevelFilter::from_level(
-                Level::DEBUG,
-            ))
+            .with(env_filter)
             .init();
     }
 }
@@ -1636,6 +1874,7 @@ fn worker_thread_main(
     args: Args,
     worker_tx: std_mpsc::Sender<WorkerMessage>,
     _main_rx: std_mpsc::Receiver<MainMessage>,
+    engine_request_tx: std_mpsc::Sender<EnableEngineRequest>,
 ) {
     // Create a multi-threaded tokio runtime for this worker
     // We need multi-threaded because the JS runtime uses block_on internally
@@ -1646,7 +1885,7 @@ fn worker_thread_main(
 
     // Run the async client logic
     let exit_code = runtime.block_on(async {
-        run_client(args).await
+        run_client(args, engine_request_tx).await
     });
 
     // Notify main thread that we're done
@@ -1656,7 +1895,7 @@ fn worker_thread_main(
 /// Main async client logic (runs in worker thread)
 ///
 /// Returns an exit code (0 = success, non-zero = error)
-async fn run_client(args: Args) -> i32 {
+async fn run_client(args: Args, engine_request_tx: std_mpsc::Sender<EnableEngineRequest>) -> i32 {
     // Check if custom home is specified
     let custom_home = args.home.as_deref();
     if let Some(home) = custom_home {
@@ -1906,6 +2145,7 @@ async fn run_client(args: Args) -> i32 {
                 &first_server.game_id,
                 locale.clone(),
                 &app_paths,
+                engine_request_tx,
             )
             .await
             {
