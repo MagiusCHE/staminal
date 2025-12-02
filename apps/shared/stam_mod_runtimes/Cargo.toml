@@ -6,11 +6,12 @@ edition = "2024"
 [dependencies]
 # Core dependencies
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "time"] }
 tokio = { version = "1", features = ["sync", "time", "rt", "rt-multi-thread", "macros"] }
-time = { version = "0.3", features = ["formatting", "macros", "local-offset"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+
+# Logging (shared library)
+stam_log = { path = "../stam_log" }
 
 # Internationalization (for mod-specific locales)
 fluent = "0.16"

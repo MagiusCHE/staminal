@@ -5,13 +5,13 @@
 //! processed by the default terminal handler.
 
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyModifiers,
     KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
+use stam_log::set_raw_mode_active;
 use crossterm::terminal;
 use crossterm::execute;
 use tokio::sync::mpsc;
@@ -19,17 +19,8 @@ use tracing::{debug, error};
 
 use crate::api::TerminalKeyRequest;
 
-/// Global flag indicating whether terminal is in raw mode
-/// Used by logging to determine if \r\n should be used instead of \n
-static RAW_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
-
-/// Check if the terminal is currently in raw mode
-///
-/// This is used by logging systems to determine if they need to use
-/// `\r\n` line endings instead of just `\n`.
-pub fn is_raw_mode_active() -> bool {
-    RAW_MODE_ACTIVE.load(Ordering::Relaxed)
-}
+// Re-export is_raw_mode_active from stam_log for backwards compatibility
+pub use stam_log::is_raw_mode_active;
 
 /// Terminal input handler that reads keyboard events in raw mode
 pub struct TerminalInputHandler {
@@ -213,7 +204,7 @@ pub fn spawn_terminal_event_reader() -> io::Result<(
 )> {
     // Enable raw mode
     terminal::enable_raw_mode()?;
-    RAW_MODE_ACTIVE.store(true, Ordering::Relaxed);
+    set_raw_mode_active(true);
 
     // Try to enable keyboard enhancement for better modifier key detection
     // This uses the kitty keyboard protocol which is supported by modern terminals
@@ -284,7 +275,7 @@ pub fn spawn_terminal_event_reader() -> io::Result<(
         }
 
         // Disable raw mode when done
-        RAW_MODE_ACTIVE.store(false, Ordering::Relaxed);
+        set_raw_mode_active(false);
         if let Err(e) = terminal::disable_raw_mode() {
             error!("Failed to disable raw mode: {}", e);
         }

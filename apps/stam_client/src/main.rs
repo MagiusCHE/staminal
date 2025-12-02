@@ -6,15 +6,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
 use tokio::net::TcpStream;
 use tracing::{Level, debug, error, info, warn};
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 use stam_mod_runtimes::api::{
     DownloadResponse, EnableEngineRequest, GraphicCommand, GraphicEngineReadyRequest,
     GraphicEngineWindowClosedRequest, GraphicEngines, GraphicEvent, GraphicProxy, LocaleApi,
     NetworkApi, NetworkConfig, extract_mod_zip, parse_stam_uri, sanitize_uri,
 };
-use stam_mod_runtimes::logging::{create_custom_timer, CustomFormatter, RawModeStdoutWriter};
+use stam_log::{LogConfig, init_logging};
 use stam_protocol::{GameMessage, GameStream, IntentType, PrimalMessage, PrimalStream};
 use stam_schema::{ModManifest, Validatable, validate_mod_dependencies, validate_version_range};
 
@@ -1531,7 +1529,7 @@ fn handle_graphic_event(
         }
         GraphicEvent::WindowCreated { window_id } => {
             debug!("Window {} created", window_id);
-            // TODO: Dispatch window:created event to mods
+            warn!("TODO: Dispatch window:created event to mods");
         }
         GraphicEvent::WindowClosed { window_id } => {
             debug!("Window {} closed, dispatching GraphicEngineWindowClosed event", window_id);
@@ -1552,84 +1550,84 @@ fn handle_graphic_event(
         }
         GraphicEvent::WindowResized { window_id, width, height } => {
             debug!("Window {} resized to {}x{}", window_id, width, height);
-            // TODO: Dispatch window:resized event to mods
+            warn!("TODO: Dispatch window:resized event to mods");
         }
         GraphicEvent::WindowFocused { window_id, focused } => {
             debug!("Window {} focus changed: {}", window_id, focused);
-            // TODO: Dispatch window:focused event to mods
+            warn!("TODO: Dispatch window:focused event to mods");
         }
         GraphicEvent::WindowMoved { window_id, x, y } => {
             debug!("Window {} moved to ({}, {})", window_id, x, y);
-            // TODO: Dispatch window:moved event to mods
+            warn!("TODO: Dispatch window:moved event to mods");
         }
         GraphicEvent::KeyPressed { window_id, key, modifiers } => {
             debug!("Key pressed in window {}: {} (mods: {:?})", window_id, key, modifiers);
-            // TODO: Dispatch input:keyPressed event to mods
+            warn!("TODO: Dispatch input:keyPressed event to mods");
         }
         GraphicEvent::KeyReleased { window_id, key, modifiers } => {
             debug!("Key released in window {}: {} (mods: {:?})", window_id, key, modifiers);
-            // TODO: Dispatch input:keyReleased event to mods
+            warn!("TODO: Dispatch input:keyReleased event to mods");
         }
         GraphicEvent::CharacterInput { window_id, character } => {
             debug!("Character input in window {}: '{}'", window_id, character);
-            // TODO: Dispatch input:character event to mods
+            warn!("TODO: Dispatch input:character event to mods");
         }
         GraphicEvent::MouseMoved { window_id, x, y } => {
             // Too verbose for debug, use trace if needed
             // trace!("Mouse moved in window {}: ({}, {})", window_id, x, y);
             let _ = (window_id, x, y); // Suppress unused warnings
-            // TODO: Dispatch input:mouseMoved event to mods
+            warn!("TODO: Dispatch input:mouseMoved event to mods");
         }
         GraphicEvent::MouseButtonPressed { window_id, button, x, y } => {
             debug!("Mouse button {:?} pressed in window {} at ({}, {})", button, window_id, x, y);
-            // TODO: Dispatch input:mousePressed event to mods
+            warn!("TODO: Dispatch input:mousePressed event to mods");
         }
         GraphicEvent::MouseButtonReleased { window_id, button, x, y } => {
             debug!("Mouse button {:?} released in window {} at ({}, {})", button, window_id, x, y);
-            // TODO: Dispatch input:mouseReleased event to mods
+            warn!("TODO: Dispatch input:mouseReleased event to mods");
         }
         GraphicEvent::MouseWheel { window_id, delta_x, delta_y } => {
             debug!("Mouse wheel in window {}: ({}, {})", window_id, delta_x, delta_y);
-            // TODO: Dispatch input:mouseWheel event to mods
+            warn!("TODO: Dispatch input:mouseWheel event to mods");
         }
         GraphicEvent::FrameStart { window_id, delta_time } => {
             // Too verbose for debug
             let _ = (window_id, delta_time);
-            // TODO: Dispatch frame:start event to mods if needed
+            //warn!("TODO: Dispatch frame:start event to mods if needed");
         }
         GraphicEvent::FrameEnd { window_id, frame_time } => {
             // Too verbose for debug
             let _ = (window_id, frame_time);
-            // TODO: Dispatch frame:end event to mods if needed
+            //warn!("TODO: Dispatch frame:end event to mods if needed");
         }
         GraphicEvent::EngineError { message } => {
             error!("Graphic engine error: {}", message);
-            // TODO: Dispatch engine:error event to mods
+            warn!("TODO: Dispatch engine:error event to mods");
         }
         GraphicEvent::EngineShuttingDown => {
             info!("Graphic engine is shutting down");
-            // TODO: Dispatch engine:shuttingDown event to mods
+            warn!("TODO: Dispatch engine:shuttingDown event to mods");
         }
         // Widget events
         GraphicEvent::WidgetCreated { window_id, widget_id, widget_type } => {
             debug!("Widget {} ({:?}) created in window {}", widget_id, widget_type, window_id);
-            // TODO: Dispatch widget:created event to mods
+            warn!("TODO: Dispatch widget:created event to mods");
         }
         GraphicEvent::WidgetDestroyed { window_id, widget_id } => {
             debug!("Widget {} destroyed in window {}", widget_id, window_id);
-            // TODO: Dispatch widget:destroyed event to mods
+            warn!("TODO: Dispatch widget:destroyed event to mods");
         }
         GraphicEvent::WidgetClicked { window_id, widget_id, x, y, button } => {
             debug!("Widget {} clicked in window {} at ({}, {}) with {:?}", widget_id, window_id, x, y, button);
-            // TODO: Dispatch widget:clicked event to mods
+            warn!("TODO: Dispatch widget:clicked event to mods");
         }
         GraphicEvent::WidgetHovered { window_id, widget_id, entered, x, y } => {
             debug!("Widget {} hover {} in window {} at ({}, {})", widget_id, if entered { "enter" } else { "leave" }, window_id, x, y);
-            // TODO: Dispatch widget:hovered event to mods
+            warn!("TODO: Dispatch widget:hovered event to mods");
         }
         GraphicEvent::WidgetFocused { window_id, widget_id, focused } => {
             debug!("Widget {} focus {} in window {}", widget_id, if focused { "gained" } else { "lost" }, window_id);
-            // TODO: Dispatch widget:focused event to mods
+            warn!("TODO: Dispatch widget:focused event to mods");
         }
         GraphicEvent::WidgetInteractionChanged { window_id, widget_id, interaction } => {
             debug!("Widget {} interaction changed to '{}' in window {}", widget_id, interaction, window_id);
@@ -1664,7 +1662,7 @@ async fn maintain_game_connection(stream: &mut TcpStream, locale: Arc<LocaleMana
             }
             Ok(msg) => {
                 debug!("Received game message: {:?}", msg);
-                // TODO: Handle other game messages
+                warn!("TODO: Handle other game messages");
             }
             Err(e) => {
                 debug!("Connection closed: {}", e);
@@ -1819,73 +1817,18 @@ fn main() {
 /// - STAM_LOGDEPS=0 (default): Only show logs from Staminal code
 /// - STAM_LOGDEPS=1: Show all logs including external dependencies (bevy, wgpu, etc.)
 fn setup_logging(args: &Args) {
-    use tracing_subscriber::EnvFilter;
-
-    let timer = create_custom_timer();
-
-    // Disable ANSI colors if:
-    // - stdout is not a TTY (piped/redirected)
-    // - NO_COLOR env var is set (https://no-color.org/)
-    // - TERM=dumb
-    let use_ansi = atty::is(atty::Stream::Stdout)
-        && std::env::var("NO_COLOR").is_err()
-        && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
-
-    // Check STAM_LOGDEPS env var for dependency logging
-    let log_deps = std::env::var("STAM_LOGDEPS")
-        .map(|v| v == "1")
-        .unwrap_or(false);
-
-    // Build filter: if STAM_LOGDEPS=0, only show Staminal logs at DEBUG level
-    // External dependencies are filtered to WARN to reduce noise
-    // The "js" target is used for JavaScript mod console output
-    let filter_directives = if log_deps {
-        "debug".to_string()
+    let config = if args.log_file {
+        let file = std::fs::File::create("stam_client.log")
+            .expect("Unable to create stam_client.log");
+        LogConfig::new("stam_client::")
+            .with_level(Level::DEBUG)
+            .with_log_file(file)
     } else {
-        "warn,stam_client=debug,stam_protocol=debug,stam_schema=debug,stam_mod_runtimes=debug,js=debug".to_string()
+        LogConfig::<std::fs::File>::new("stam_client::")
+            .with_level(Level::DEBUG)
     };
 
-    // Create the env filter - allows RUST_LOG to override our defaults
-    let env_filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&filter_directives));
-
-    if args.log_file {
-        // File logging: no ANSI colors
-        let file_appender = std::fs::File::create("stam_client.log")
-            .expect("Unable to create stam_client.log");
-        let formatter_stdout = CustomFormatter::new(timer.clone(), use_ansi)
-            .with_strip_prefix("stam_client::");
-        let formatter_file = CustomFormatter::new(timer, false)
-            .with_strip_prefix("stam_client::");
-
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .event_format(formatter_stdout)
-                    .with_ansi(use_ansi)
-                    .with_writer(RawModeStdoutWriter),
-            )
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .event_format(formatter_file)
-                    .with_ansi(false)
-                    .with_writer(file_appender),
-            )
-            .with(env_filter)
-            .init();
-    } else {
-        let formatter = CustomFormatter::new(timer, use_ansi)
-            .with_strip_prefix("stam_client::");
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .event_format(formatter)
-                    .with_ansi(use_ansi)
-                    .with_writer(RawModeStdoutWriter),
-            )
-            .with(env_filter)
-            .init();
-    }
+    init_logging(config).expect("Failed to initialize logging");
 }
 
 // ============================================================================

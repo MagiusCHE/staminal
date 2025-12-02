@@ -1,4 +1,4 @@
-//! Shared logging utilities for Staminal
+//! Centralized logging for Staminal applications
 //!
 //! Provides a custom formatter for tracing that:
 //! - Formats thread IDs as #N instead of ThreadId(N)
@@ -15,19 +15,24 @@
 //! # Usage
 //!
 //! ```rust,ignore
-//! use stam_mod_runtimes::logging::{CustomFormatter, init_logging};
-//! use time::UtcOffset;
+//! use stam_log::{init_logging, LogConfig};
+//! use tracing::Level;
 //!
 //! // Simple initialization with defaults
-//! init_logging(true, None, None)?;
+//! let config = LogConfig::new("stam_client::");
+//! init_logging(config)?;
 //!
 //! // Or with file logging
 //! let file = std::fs::File::create("app.log")?;
-//! init_logging(true, Some(file), None)?;
+//! let config = LogConfig::new("stam_server::")
+//!     .with_log_file(file)
+//!     .with_level(Level::DEBUG);
+//! init_logging(config)?;
 //! ```
 
 use std::fmt as std_fmt;
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::Level;
 use tracing::field::Field;
 use tracing_subscriber::field::Visit;
@@ -39,7 +44,25 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 
-use crate::terminal_input;
+/// Global flag indicating whether terminal is in raw mode
+/// Used by logging to determine if \r\n should be used instead of \n
+static RAW_MODE_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Set the raw mode state for logging
+///
+/// When raw mode is active, the logger will use `\r\n` line endings
+/// instead of just `\n` for proper terminal output.
+pub fn set_raw_mode_active(active: bool) {
+    RAW_MODE_ACTIVE.store(active, Ordering::Relaxed);
+}
+
+/// Check if the terminal is currently in raw mode
+///
+/// This is used by logging systems to determine if they need to use
+/// `\r\n` line endings instead of just `\n`.
+pub fn is_raw_mode_active() -> bool {
+    RAW_MODE_ACTIVE.load(Ordering::Relaxed)
+}
 
 /// A writer that converts `\n` to `\r\n` for raw mode terminal output.
 ///
@@ -57,13 +80,7 @@ impl<W: Write> RawModeWriter<W> {
 
 impl<W: Write> Write for RawModeWriter<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        // Only convert if raw mode is active
-        #[cfg(unix)]
-        let raw_mode = terminal_input::is_raw_mode_active();
-        #[cfg(not(unix))]
-        let raw_mode = false;
-
-        if raw_mode {
+        if is_raw_mode_active() {
             // Convert \n to \r\n
             let mut start = 0;
             for (i, &byte) in buf.iter().enumerate() {
@@ -174,6 +191,16 @@ impl<T> CustomFormatter<T> {
     pub fn with_strip_prefix(mut self, prefix: impl Into<String>) -> Self {
         self.strip_prefix = Some(prefix.into());
         self
+    }
+}
+
+impl<T: Clone> Clone for CustomFormatter<T> {
+    fn clone(&self) -> Self {
+        Self {
+            timer: self.timer.clone(),
+            ansi: self.ansi,
+            strip_prefix: self.strip_prefix.clone(),
+        }
     }
 }
 
@@ -307,7 +334,7 @@ pub fn is_dependency_logging_enabled() -> bool {
 ///
 /// When `STAM_LOGDEPS=0` (default), only logs from Staminal code are shown.
 /// When `STAM_LOGDEPS=1`, all logs are shown including external dependencies.
-fn build_filter_directives(level: Level, log_deps: bool) -> String {
+pub fn build_filter_directives(level: Level, log_deps: bool) -> String {
     let level_str = match level {
         Level::TRACE => "trace",
         Level::DEBUG => "debug",
@@ -321,96 +348,150 @@ fn build_filter_directives(level: Level, log_deps: bool) -> String {
         level_str.to_string()
     } else {
         // Only show logs from Staminal code (stam_*) at the specified level
-        // External dependencies are set to WARN to reduce noise
+        // External dependencies are filtered to OFF to reduce noise completely
         format!(
-            "warn,stam_client={level},stam_server={level},stam_protocol={level},stam_schema={level},stam_mod_runtimes={level}",
+            "off,stam_client={level},stam_server={level},stam_protocol={level},stam_schema={level},stam_mod_runtimes={level},stam_log={level},js={level}",
             level = level_str
         )
     }
 }
 
-/// Initialize logging with a custom formatter
+/// Detect if ANSI colors should be used based on environment
+///
+/// Disables ANSI colors if:
+/// - stdout is not a TTY (piped/redirected)
+/// - NO_COLOR env var is set (https://no-color.org/)
+/// - TERM=dumb
+pub fn should_use_ansi() -> bool {
+    atty::is(atty::Stream::Stdout)
+        && std::env::var("NO_COLOR").is_err()
+        && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true)
+}
+
+/// Logging configuration
+pub struct LogConfig<W: Write + Send + 'static = std::fs::File> {
+    /// Prefix to strip from log targets (e.g., "stam_client::")
+    pub strip_prefix: String,
+    /// Whether to use ANSI color codes (auto-detected if None)
+    pub use_ansi: Option<bool>,
+    /// Minimum log level
+    pub level: Level,
+    /// Optional file to write logs to
+    pub log_file: Option<W>,
+}
+
+impl<W: Write + Send + 'static> LogConfig<W> {
+    /// Create a new LogConfig with the given strip prefix
+    pub fn new(strip_prefix: impl Into<String>) -> Self {
+        Self {
+            strip_prefix: strip_prefix.into(),
+            use_ansi: None,
+            level: Level::DEBUG,
+            log_file: None,
+        }
+    }
+
+    /// Set whether to use ANSI colors (default: auto-detect)
+    pub fn with_ansi(mut self, use_ansi: bool) -> Self {
+        self.use_ansi = Some(use_ansi);
+        self
+    }
+
+    /// Set the minimum log level
+    pub fn with_level(mut self, level: Level) -> Self {
+        self.level = level;
+        self
+    }
+
+    /// Set the log file
+    pub fn with_log_file(mut self, file: W) -> Self {
+        self.log_file = Some(file);
+        self
+    }
+}
+
+/// Initialize logging with the given configuration
 ///
 /// # Arguments
-/// * `use_ansi` - Whether to use ANSI color codes (typically based on TTY detection)
-/// * `log_file` - Optional file to write logs to (in addition to stdout)
-/// * `strip_prefix` - Optional prefix to strip from log targets (e.g., "stam_server::")
-/// * `level` - The minimum log level to output
+/// * `config` - Logging configuration
 ///
 /// # Environment Variables
 ///
 /// * `STAM_LOGDEPS` - Set to `1` to enable logging from external dependencies (bevy, wgpu, etc.).
 ///   Default is `0` which only shows logs from Staminal code.
+/// * `RUST_LOG` - Can override the default filter directives
 ///
 /// # Example
 ///
 /// ```rust,ignore
-/// use stam_mod_runtimes::logging::init_logging;
+/// use stam_log::{init_logging, LogConfig};
 /// use tracing::Level;
 ///
-/// init_logging(true, None, Some("stam_server::"), Level::DEBUG)?;
+/// let config = LogConfig::new("stam_client::")
+///     .with_level(Level::DEBUG);
+/// init_logging(config)?;
 /// ```
 pub fn init_logging<W: Write + Send + 'static>(
-    use_ansi: bool,
-    log_file: Option<W>,
-    strip_prefix: Option<&str>,
-    level: Level,
+    config: LogConfig<W>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use tracing_subscriber::EnvFilter;
 
     let timer = create_custom_timer();
+    let use_ansi = config.use_ansi.unwrap_or_else(should_use_ansi);
     let log_deps = is_dependency_logging_enabled();
-    let filter_directives = build_filter_directives(level, log_deps);
+    let filter_directives = build_filter_directives(config.level, log_deps);
 
     // Create the env filter - allows RUST_LOG to override our defaults
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new(&filter_directives));
 
-    if let Some(file) = log_file {
-        let formatter_stdout = CustomFormatter::new(timer.clone(), use_ansi);
-        let formatter_stdout = if let Some(prefix) = strip_prefix {
-            formatter_stdout.with_strip_prefix(prefix)
-        } else {
-            formatter_stdout
-        };
-
-        let formatter_file = CustomFormatter::new(timer, false);
-        let formatter_file = if let Some(prefix) = strip_prefix {
-            formatter_file.with_strip_prefix(prefix)
-        } else {
-            formatter_file
-        };
+    if let Some(file) = config.log_file {
+        let formatter_stdout = CustomFormatter::new(timer.clone(), use_ansi)
+            .with_strip_prefix(&config.strip_prefix);
+        let formatter_file = CustomFormatter::new(timer, false)
+            .with_strip_prefix(&config.strip_prefix);
 
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter_stdout)
-                    .with_writer(std::io::stdout),
+                    .with_ansi(use_ansi)
+                    .with_writer(RawModeStdoutWriter),
             )
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter_file)
+                    .with_ansi(false)
                     .with_writer(std::sync::Mutex::new(file)),
             )
             .with(env_filter)
             .init();
     } else {
-        let formatter = CustomFormatter::new(timer, use_ansi);
-        let formatter = if let Some(prefix) = strip_prefix {
-            formatter.with_strip_prefix(prefix)
-        } else {
-            formatter
-        };
+        let formatter = CustomFormatter::new(timer, use_ansi)
+            .with_strip_prefix(&config.strip_prefix);
 
         tracing_subscriber::registry()
             .with(
                 tracing_subscriber::fmt::layer()
                     .event_format(formatter)
-                    .with_writer(std::io::stdout),
+                    .with_ansi(use_ansi)
+                    .with_writer(RawModeStdoutWriter),
             )
             .with(env_filter)
             .init();
     }
 
     Ok(())
+}
+
+/// Initialize logging without a log file
+///
+/// This is a convenience function for simpler cases.
+pub fn init_logging_simple(
+    strip_prefix: impl Into<String>,
+    level: Level,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config: LogConfig<std::fs::File> = LogConfig::new(strip_prefix)
+        .with_level(level);
+    init_logging(config)
 }

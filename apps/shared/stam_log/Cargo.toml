@@ -1,0 +1,11 @@
+[package]
+name = "stam_log"
+version = "0.1.0"
+edition = "2024"
+description = "Centralized logging for Staminal applications"
+
+[dependencies]
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
+time = { version = "0.3", features = ["formatting", "local-offset", "macros"] }
+atty = "0.2"

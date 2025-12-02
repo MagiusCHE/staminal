@@ -14,9 +14,11 @@ use std::collections::HashMap;
 use std::path::Path;
 
 pub mod api;
-pub mod logging;
 pub mod runtime_type;
 pub mod terminal_input;
+
+// Re-export stam_log for convenience
+pub use stam_log as logging;
 
 // Conditional module imports based on features
 #[cfg(feature = "js")]

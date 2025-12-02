@@ -84,6 +84,7 @@ import { helper } from '@js-helper';
 2. **Async Runtime**: Use `tokio` for all async operations
 3. **Error Handling**: Use `Result<T, E>` with descriptive error messages, avoid `unwrap()` in production code
 4. **Logging**: Use `tracing` crate macros (`info!`, `debug!`, `error!`, etc.)
+5. **TODOs as warnings**: Never leave `// TODO:` comments in the code. Instead, use `warn!("TODO: ...")` to log the pending work at runtime. This makes TODOs visible during execution and ensures they are not forgotten.
 
 ### Architecture
 1. **Separation of Concerns**: The core engine is "undifferentiated" - game logic belongs in Mods, not in the engine

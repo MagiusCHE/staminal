@@ -9,10 +9,8 @@ use tokio::time::{Duration, interval};
 use tracing::{Level, debug, error, info, warn};
 
 use stam_mod_runtimes::adapters::js::run_js_event_loop;
-use stam_mod_runtimes::logging::{CustomFormatter, RawModeStdoutWriter, create_custom_timer};
+use stam_log::{LogConfig, init_logging};
 use stam_schema::Validatable;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 mod config;
 use config::Config;
@@ -103,54 +101,19 @@ async fn main() {
         }
     };
 
-    // Custom time format: YYYY/MM/DD hh:mm:ss.xxxx
-    let timer = create_custom_timer();
-
-    // Auto-detect if stdout is a terminal for ANSI color support
-    let use_ansi = atty::is(atty::Stream::Stdout)
-        && std::env::var("NO_COLOR").is_err()
-        && std::env::var("TERM").map(|t| t != "dumb").unwrap_or(true);
-
     // Setup logging with configured log level
-    if args.log_file {
-        // File logging: no ANSI colors, truncate previous run
-        let file =
-            std::fs::File::create("stam_server.log").expect("Unable to create stam_server.log");
-        let formatter_stdout =
-            CustomFormatter::new(timer.clone(), use_ansi).with_strip_prefix("stam_server::");
-        let formatter_file = CustomFormatter::new(timer, false).with_strip_prefix("stam_server::");
-
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .event_format(formatter_stdout)
-                    .with_ansi(use_ansi)
-                    .with_writer(RawModeStdoutWriter),
-            )
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .event_format(formatter_file)
-                    .with_ansi(false)
-                    .with_writer(file),
-            )
-            .with(tracing_subscriber::filter::LevelFilter::from_level(
-                log_level,
-            ))
-            .init();
+    let log_config = if args.log_file {
+        let file = std::fs::File::create("stam_server.log")
+            .expect("Unable to create stam_server.log");
+        LogConfig::new("stam_server::")
+            .with_level(log_level)
+            .with_log_file(file)
     } else {
-        let formatter = CustomFormatter::new(timer, use_ansi).with_strip_prefix("stam_server::");
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .event_format(formatter)
-                    .with_ansi(use_ansi)
-                    .with_writer(RawModeStdoutWriter),
-            )
-            .with(tracing_subscriber::filter::LevelFilter::from_level(
-                log_level,
-            ))
-            .init();
-    }
+        LogConfig::<std::fs::File>::new("stam_server::")
+            .with_level(log_level)
+    };
+
+    init_logging(log_config).expect("Failed to initialize logging");
 
     info!("Staminal Core Server v{}", VERSION);
     info!("Copyright (C) 2025 Magius(CHE)");
