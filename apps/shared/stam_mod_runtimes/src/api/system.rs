@@ -78,7 +78,17 @@ pub struct ModPackageManifest {
 pub struct ModPackageInfo {
     pub id: String,
     pub manifest: ModPackageManifest,
-    pub sha512: String,
+    /// Hash of file paths + modification dates (for fast change detection during packing)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub date_sha512: Option<String>,
+    /// SHA512 hash of the archive file (for integrity verification)
+    pub archive_sha512: String,
+    /// Size of the compressed archive in bytes
+    #[serde(default)]
+    pub archive_bytes: u64,
+    /// Sum of all uncompressed file sizes in bytes
+    #[serde(default)]
+    pub uncompressed_bytes: u64,
     pub path: String,
 }
 
@@ -432,19 +442,19 @@ impl SystemApi {
         self.get_home_dir().map(|h| h.join("mods"))
     }
 
-    /// Install a mod from a ZIP file
+    /// Install a mod from a tar.gz archive
     ///
-    /// Extracts the ZIP file contents to the mods directory under the specified mod_id.
+    /// Extracts the tar.gz archive contents to the mods directory under the specified mod_id.
     /// If the mod directory already exists, it is removed first.
     /// After extraction, reads the manifest and registers the mod with `loaded=false`.
     ///
     /// # Arguments
-    /// * `zip_path` - Path to the ZIP file to extract
+    /// * `archive_path` - Path to the tar.gz file to extract
     /// * `mod_id` - The mod identifier (directory name)
     ///
     /// # Returns
     /// Ok(PathBuf) with the mod installation path on success, or Err(String) on failure
-    pub fn install_mod_from_zip(&self, zip_path: &std::path::Path, mod_id: &str) -> Result<PathBuf, String> {
+    pub fn install_mod_from_archive(&self, archive_path: &std::path::Path, mod_id: &str) -> Result<PathBuf, String> {
         let mods_dir = self.get_mods_dir()
             .ok_or_else(|| "Home directory not configured".to_string())?;
 
@@ -452,11 +462,11 @@ impl SystemApi {
 
         tracing::debug!("Installing mod '{}' from {} to {}",
             mod_id,
-            zip_path.display(),
+            archive_path.display(),
             mod_target_dir.display());
 
         // Use the standalone extraction function
-        extract_mod_zip(zip_path, &mod_target_dir)?;
+        extract_mod_archive(archive_path, &mod_target_dir)?;
 
         // Read manifest and register the mod with loaded=false
         // Check client/ subdirectory first, then root
@@ -495,6 +505,13 @@ impl SystemApi {
         tracing::debug!("Mod '{}' installed and registered (loaded=false)", mod_id);
 
         Ok(mod_target_dir)
+    }
+
+    /// Deprecated: Use install_mod_from_archive instead
+    #[doc(hidden)]
+    #[deprecated(note = "Use install_mod_from_archive instead - format changed from zip to tar.gz")]
+    pub fn install_mod_from_zip(&self, archive_path: &std::path::Path, mod_id: &str) -> Result<PathBuf, String> {
+        self.install_mod_from_archive(archive_path, mod_id)
     }
 
     /// Resolve an asset path for a mod
@@ -597,21 +614,24 @@ impl Default for SystemApi {
     }
 }
 
-/// Extract a mod from a ZIP file to a target directory
+/// Extract a mod from a tar.gz archive to a target directory
 ///
 /// This is a standalone function that can be used without a SystemApi instance.
-/// It extracts the ZIP file contents to the specified target directory.
+/// It extracts the tar.gz archive contents to the specified target directory.
 /// If the target directory already exists, it is removed first.
 ///
 /// # Arguments
-/// * `zip_path` - Path to the ZIP file to extract
+/// * `archive_path` - Path to the tar.gz file to extract
 /// * `target_dir` - Target directory where the mod will be extracted
 ///
 /// # Returns
 /// Ok(()) on success, or Err(String) on failure
-pub fn extract_mod_zip(zip_path: &std::path::Path, target_dir: &std::path::Path) -> Result<(), String> {
-    tracing::debug!("Extracting ZIP {} to {}",
-        zip_path.display(),
+pub fn extract_mod_archive(archive_path: &std::path::Path, target_dir: &std::path::Path) -> Result<(), String> {
+    use flate2::read::GzDecoder;
+    use tar::Archive;
+
+    tracing::debug!("Extracting tar.gz {} to {}",
+        archive_path.display(),
         target_dir.display());
 
     // Remove existing directory if present
@@ -624,41 +644,27 @@ pub fn extract_mod_zip(zip_path: &std::path::Path, target_dir: &std::path::Path)
     std::fs::create_dir_all(target_dir)
         .map_err(|e| format!("Failed to create target directory: {}", e))?;
 
-    // Open ZIP file
-    let zip_file = std::fs::File::open(zip_path)
-        .map_err(|e| format!("Failed to open ZIP file: {}", e))?;
+    // Open tar.gz file
+    let tar_gz_file = std::fs::File::open(archive_path)
+        .map_err(|e| format!("Failed to open tar.gz file: {}", e))?;
 
-    let mut archive = zip::ZipArchive::new(zip_file)
-        .map_err(|e| format!("Failed to read ZIP archive: {}", e))?;
+    // Create gzip decoder
+    let gz_decoder = GzDecoder::new(tar_gz_file);
 
-    // Extract all files
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i)
-            .map_err(|e| format!("Failed to read ZIP entry {}: {}", i, e))?;
+    // Create tar archive reader
+    let mut archive = Archive::new(gz_decoder);
 
-        let outpath = target_dir.join(file.mangled_name());
+    // Extract all entries to target directory
+    archive.unpack(target_dir)
+        .map_err(|e| format!("Failed to extract tar.gz archive: {}", e))?;
 
-        if file.is_dir() {
-            std::fs::create_dir_all(&outpath)
-                .map_err(|e| format!("Failed to create directory {:?}: {}", outpath, e))?;
-        } else {
-            // Create parent directories if needed
-            if let Some(parent) = outpath.parent() {
-                if !parent.exists() {
-                    std::fs::create_dir_all(parent)
-                        .map_err(|e| format!("Failed to create parent directory {:?}: {}", parent, e))?;
-                }
-            }
-
-            // Extract file
-            let mut outfile = std::fs::File::create(&outpath)
-                .map_err(|e| format!("Failed to create file {:?}: {}", outpath, e))?;
-
-            std::io::copy(&mut file, &mut outfile)
-                .map_err(|e| format!("Failed to write file {:?}: {}", outpath, e))?;
-        }
-    }
-
-    tracing::debug!("ZIP extracted successfully to {}", target_dir.display());
+    tracing::debug!("tar.gz extracted successfully to {}", target_dir.display());
     Ok(())
+}
+
+// Keep old name as alias for backwards compatibility during transition
+#[doc(hidden)]
+#[deprecated(note = "Use extract_mod_archive instead - format changed from zip to tar.gz")]
+pub fn extract_mod_zip(archive_path: &std::path::Path, target_dir: &std::path::Path) -> Result<(), String> {
+    extract_mod_archive(archive_path, target_dir)
 }

@@ -772,7 +772,9 @@ impl SystemJS {
     /// # Returns
     /// Array of mod package info objects with properties:
     /// - id: string
-    /// - sha512: string
+    /// - archive_sha512: string (SHA512 hash of archive for integrity verification)
+    /// - archive_bytes: number (size of compressed archive in bytes)
+    /// - uncompressed_bytes: number (sum of all uncompressed file sizes in bytes)
     /// - path: string
     /// - manifest: object with name, version, description, entry_point, etc.
     #[qjs(rename = "getModPackages")]
@@ -793,7 +795,9 @@ impl SystemJS {
         for (idx, pkg) in packages.iter().enumerate() {
             let obj = Object::new(ctx.clone())?;
             obj.set("id", pkg.id.as_str())?;
-            obj.set("sha512", pkg.sha512.as_str())?;
+            obj.set("archive_sha512", pkg.archive_sha512.as_str())?;
+            obj.set("archive_bytes", pkg.archive_bytes)?;
+            obj.set("uncompressed_bytes", pkg.uncompressed_bytes)?;
             obj.set("path", pkg.path.as_str())?;
 
             // Create manifest object
@@ -836,30 +840,30 @@ impl SystemJS {
         Ok(path.map(|p| p.to_string_lossy().to_string()))
     }
 
-    /// Install a mod from a ZIP file (async)
+    /// Install a mod from a tar.gz archive (async)
     ///
-    /// Extracts the ZIP file contents to the mods directory under the specified mod_id.
+    /// Extracts the tar.gz archive contents to the mods directory under the specified mod_id.
     /// If the mod directory already exists, it is removed first.
     /// This operation runs in a blocking thread pool to avoid blocking the event loop.
     ///
     /// # Arguments
-    /// * `zip_path` - Path to the ZIP file to extract
+    /// * `archive_path` - Path to the tar.gz file to extract
     /// * `mod_id` - The mod identifier (directory name)
     ///
     /// # Returns
     /// Promise that resolves to the installation path on success, or rejects on failure
     #[qjs(rename = "installModFromPath")]
-    pub async fn install_mod_from_path(&self, zip_path: String, mod_id: String) -> rquickjs::Result<String> {
-        tracing::debug!("SystemJS::install_mod_from_path called: zip_path={}, mod_id={}", zip_path, mod_id);
+    pub async fn install_mod_from_path(&self, archive_path: String, mod_id: String) -> rquickjs::Result<String> {
+        tracing::debug!("SystemJS::install_mod_from_path called: archive_path={}, mod_id={}", archive_path, mod_id);
 
         let system_api = self.system_api.clone();
-        let zip_path_owned = zip_path.clone();
+        let archive_path_owned = archive_path.clone();
         let mod_id_owned = mod_id.clone();
 
-        // Run the blocking ZIP extraction in a separate thread
+        // Run the blocking tar.gz extraction in a separate thread
         let result = tokio::task::spawn_blocking(move || {
-            let path = std::path::Path::new(&zip_path_owned);
-            system_api.install_mod_from_zip(path, &mod_id_owned)
+            let path = std::path::Path::new(&archive_path_owned);
+            system_api.install_mod_from_archive(path, &mod_id_owned)
         })
         .await
         .map_err(|e| {
@@ -1131,10 +1135,11 @@ pub struct NetworkJS {
 
 #[rquickjs::methods]
 impl NetworkJS {
-    /// Download a resource from a URI
+    /// Download a resource from a URI with optional progress callback
     ///
     /// # Arguments
     /// * `uri` - The URI to download from (stam://, http://, https://)
+    /// * `progress_callback` - Optional callback function(percentage, receivedBytes, totalBytes)
     ///
     /// # Returns
     /// A Promise that resolves to an object with:
@@ -1142,19 +1147,81 @@ impl NetworkJS {
     /// - buffer: Uint8Array | null
     /// - file_name: string | null
     /// - temp_file_path: string | null (path to temp file containing downloaded content)
+    ///
+    /// # Example
+    /// ```javascript
+    /// const response = await network.download(uri, (percentage, receivedBytes, totalBytes) => {
+    ///     console.log(`Progress: ${percentage}% (${receivedBytes}/${totalBytes})`);
+    /// });
+    /// ```
     #[qjs(rename = "download")]
-    pub async fn download<'js>(&self, ctx: Ctx<'js>, uri: String) -> rquickjs::Result<Object<'js>> {
+    pub async fn download<'js>(&self, ctx: Ctx<'js>, uri: String, progress_callback: Opt<Function<'js>>) -> rquickjs::Result<Object<'js>> {
         //tracing::debug!("NetworkJS::download called: uri={}", uri);
 
-        // Perform the download
-        let response = self.network_api.download(&uri).await;
+        // Shared state for progress updates: (percentage, received, total)
+        // The Rust progress callback updates this, and we read it periodically to call JS
+        let progress_state = Arc::new(std::sync::Mutex::new((0.0f64, 0u64, 0u64)));
+        let state_for_callback = progress_state.clone();
 
-        // tracing::debug!("NetworkJS::download response: status={}, buffer_len={:?}, file_name={:?}, file_content_len={:?}, temp_file_path={:?}",
-        //     response.status,
-        //     response.buffer.as_ref().map(|b| b.len()),
-        //     response.file_name,
-        //     response.file_content.as_ref().map(|b| b.len()),
-        //     response.temp_file_path);
+        // Create Rust progress callback that updates shared state
+        let progress_cb: Option<crate::api::ProgressCallback> = if progress_callback.0.is_some() {
+            Some(Arc::new(move |percentage: f64, received: u64, total: u64| {
+                if let Ok(mut state) = state_for_callback.lock() {
+                    *state = (percentage, received, total);
+                }
+            }) as crate::api::ProgressCallback)
+        } else {
+            None
+        };
+
+        // Get the JS callback if provided
+        let js_callback = progress_callback.0;
+
+        // If we have a JS callback, set up periodic progress reporting
+        let response = if let Some(ref callback) = js_callback {
+            let state_for_polling = progress_state.clone();
+            let callback_clone = callback.clone();
+            let ctx_clone = ctx.clone();
+
+            // Use tokio::select to run download and periodic callback together
+            let download_future = self.network_api.download_with_progress(&uri, progress_cb);
+
+            // We'll poll the state every second while download is in progress
+            let mut last_reported = (0.0f64, 0u64, 0u64);
+
+            tokio::pin!(download_future);
+
+            loop {
+                tokio::select! {
+                    result = &mut download_future => {
+                        // Download completed - break and return result
+                        break result;
+                    }
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                        // Timer fired - check progress and call JS callback if changed
+                        if let Ok(state) = state_for_polling.lock() {
+                            let current = *state;
+                            // Only call if there's been progress
+                            if current.1 > last_reported.1 {
+                                last_reported = current;
+                                // Call the JS callback with current progress
+                                let _ = callback_clone.call::<_, ()>((current.0, current.1, current.2));
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // No callback, just do the download
+            self.network_api.download_with_progress(&uri, progress_cb).await
+        };
+
+        // Call the JS callback one final time with 100% (or current state if failed)
+        if let Some(ref callback) = js_callback {
+            let final_state = progress_state.lock().map(|s| *s).unwrap_or((100.0, 0, 0));
+            let final_percentage = if response.status == 200 { 100.0 } else { final_state.0 };
+            let _ = callback.call::<_, ()>((final_percentage, final_state.1, final_state.2));
+        }
 
         // Create response object
         let result = Object::new(ctx.clone())?;
@@ -1187,7 +1254,7 @@ impl NetworkJS {
                     //tracing::debug!("NetworkJS::download: created temp file at {}", path_str);
                     result.set("temp_file_path", path_str)?;
                 }
-                Err(e) => {
+                Err(_e) => {
                     //tracing::error!("Failed to create temp file for download: {}", e);
                     result.set("temp_file_path", rquickjs::Null)?;
                 }
@@ -1273,8 +1340,8 @@ pub fn setup_text_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
 
 use crate::api::{
     AlignItems, ColorValue, EdgeInsets, FlexDirection, FontConfig, GraphicEngines, GraphicProxy,
-    InitialWindowConfig, JustifyContent, SizeValue, WidgetConfig, WidgetEventType, WidgetType,
-    WindowConfig, WindowPositionMode,
+    InitialWindowConfig, JustifyContent, PropertyValue, SizeValue, WidgetConfig, WidgetEventType,
+    WidgetType, WindowConfig, WindowPositionMode,
 };
 
 /// JavaScript Graphic API class
@@ -1821,6 +1888,125 @@ impl WidgetJS {
             .await
             .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
     }
+
+    /// Set a widget property dynamically
+    ///
+    /// # Arguments
+    /// * `property` - Property name (e.g., "content", "width", "backgroundColor", "disabled", "label")
+    /// * `value` - Property value (string, number, boolean, or color)
+    ///
+    /// # Example
+    /// ```javascript
+    /// await widget.setProperty("content", "New text");
+    /// await widget.setProperty("width", "50%");
+    /// await widget.setProperty("backgroundColor", "#ff0000");
+    /// await widget.setProperty("disabled", true);
+    /// ```
+    #[qjs(rename = "setProperty")]
+    pub async fn set_property<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        property: String,
+        value: Value<'js>,
+    ) -> rquickjs::Result<()> {
+        use crate::api::PropertyValue;
+
+        // Parse the value based on the property name and value type
+        let prop_value = parse_property_value(&ctx, &property, &value)?;
+
+        self.graphic_proxy
+            .update_widget_property(self.id, property, prop_value)
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+
+    /// Subscribe to widget events
+    ///
+    /// # Arguments
+    /// * `event_type` - Event type string ("click", "hover", "focus")
+    /// * `callback` - JavaScript callback function (currently stored for future use)
+    ///
+    /// # Example
+    /// ```javascript
+    /// await widget.on("click", () => { console.log("Clicked!"); });
+    /// ```
+    ///
+    /// # Note
+    /// Currently this subscribes to the event in the graphic engine.
+    /// Event dispatch to the callback will be implemented when the event system is complete.
+    #[qjs(rename = "on")]
+    pub async fn on<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        event_type: String,
+        _callback: Function<'js>,
+    ) -> rquickjs::Result<()> {
+        use crate::api::WidgetEventType;
+
+        // Parse event type string to enum
+        let event = match event_type.to_lowercase().as_str() {
+            "click" => WidgetEventType::Click,
+            "hover" => WidgetEventType::Hover,
+            "focus" => WidgetEventType::Focus,
+            _ => {
+                return Err(throw_error(
+                    &ctx,
+                    &format!(
+                        "Invalid event type: '{}'. Valid types are: 'click', 'hover', 'focus'",
+                        event_type
+                    ),
+                ));
+            }
+        };
+
+        // Subscribe to the event in the graphic engine
+        self.graphic_proxy
+            .subscribe_widget_events(self.id, vec![event])
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))?;
+
+        // TODO: Store callback for later dispatch when event occurs
+        // For now, we just subscribe to the event but don't dispatch callbacks yet
+        tracing::warn!("TODO: Widget event callbacks not yet dispatched to JavaScript");
+
+        Ok(())
+    }
+
+    /// Unsubscribe from widget events
+    ///
+    /// # Arguments
+    /// * `event_type` - Event type string ("click", "hover", "focus")
+    ///
+    /// # Example
+    /// ```javascript
+    /// await widget.off("click");
+    /// ```
+    #[qjs(rename = "off")]
+    pub async fn off<'js>(&self, ctx: Ctx<'js>, event_type: String) -> rquickjs::Result<()> {
+        use crate::api::WidgetEventType;
+
+        // Parse event type string to enum
+        let event = match event_type.to_lowercase().as_str() {
+            "click" => WidgetEventType::Click,
+            "hover" => WidgetEventType::Hover,
+            "focus" => WidgetEventType::Focus,
+            _ => {
+                return Err(throw_error(
+                    &ctx,
+                    &format!(
+                        "Invalid event type: '{}'. Valid types are: 'click', 'hover', 'focus'",
+                        event_type
+                    ),
+                ));
+            }
+        };
+
+        // Unsubscribe from the event
+        self.graphic_proxy
+            .unsubscribe_widget_events(self.id, vec![event])
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
 }
 
 // ============================================================================
@@ -1887,6 +2073,81 @@ fn parse_color<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::Result<Colo
     Err(throw_error(
         ctx,
         "Color must be a string ('#RGB', '#RRGGBB', 'rgba(r,g,b,a)') or object { r, g, b, a }",
+    ))
+}
+
+/// Parse a property value from JavaScript based on property name
+///
+/// This function intelligently converts JavaScript values to PropertyValue
+/// based on the property name and the type of value provided.
+fn parse_property_value<'js>(
+    ctx: &Ctx<'js>,
+    property: &str,
+    value: &Value<'js>,
+) -> rquickjs::Result<PropertyValue> {
+    // Boolean properties
+    if property == "disabled" {
+        if let Some(b) = value.as_bool() {
+            return Ok(PropertyValue::Bool(b));
+        }
+        return Err(throw_error(ctx, "Property 'disabled' expects a boolean value"));
+    }
+
+    // Color properties
+    let color_props = [
+        "backgroundColor",
+        "fontColor",
+        "borderColor",
+        "hoverColor",
+        "pressedColor",
+        "disabledColor",
+    ];
+    if color_props.contains(&property) {
+        let color = parse_color(ctx, value)?;
+        return Ok(PropertyValue::Color(color));
+    }
+
+    // Size properties
+    let size_props = ["width", "height", "minWidth", "maxWidth", "minHeight", "maxHeight"];
+    if size_props.contains(&property) {
+        let size = parse_size_value(ctx, value)?;
+        return Ok(PropertyValue::Size(size));
+    }
+
+    // Number properties
+    let number_props = ["opacity", "borderRadius", "gap"];
+    if number_props.contains(&property) {
+        if let Some(n) = value.as_number() {
+            return Ok(PropertyValue::Number(n));
+        }
+        return Err(throw_error(
+            ctx,
+            &format!("Property '{}' expects a number value", property),
+        ));
+    }
+
+    // String properties (content, label, etc.)
+    // Also used as fallback for unknown properties
+    if let Some(s) = value.as_string() {
+        return Ok(PropertyValue::String(s.to_string()?));
+    }
+
+    // If it's a number and not handled above, convert to Number
+    if let Some(n) = value.as_number() {
+        return Ok(PropertyValue::Number(n));
+    }
+
+    // If it's a boolean and not handled above, convert to Bool
+    if let Some(b) = value.as_bool() {
+        return Ok(PropertyValue::Bool(b));
+    }
+
+    Err(throw_error(
+        ctx,
+        &format!(
+            "Cannot convert value to property '{}'. Expected string, number, or boolean.",
+            property
+        ),
     ))
 }
 

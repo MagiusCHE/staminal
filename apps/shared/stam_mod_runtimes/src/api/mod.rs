@@ -23,10 +23,10 @@ pub use graphic::{
     WindowPositionMode, EnableEngineRequest,
 };
 pub use locale::LocaleApi;
-pub use network::{NetworkApi, NetworkConfig, DownloadResponse, parse_stam_uri, sanitize_uri};
+pub use network::{NetworkApi, NetworkConfig, DownloadResponse, ProgressCallback, parse_stam_uri, sanitize_uri};
 pub use path_security::{PathSecurityConfig, PathValidationResult, validate_path, validate_and_resolve_path, is_path_permitted, make_absolute};
 pub use process::{ProcessApi, AppApi};
-pub use system::{SystemApi, ModInfo, ModSide, ModPackageInfo, ModPackageManifest, ModPackagesRegistry, extract_mod_zip, AttachModRequest, ShutdownRequest, GameInfo};
+pub use system::{SystemApi, ModInfo, ModSide, ModPackageInfo, ModPackageManifest, ModPackagesRegistry, extract_mod_archive, extract_mod_zip, AttachModRequest, ShutdownRequest, GameInfo};
 
 use std::collections::HashMap;
 use std::any::Any;

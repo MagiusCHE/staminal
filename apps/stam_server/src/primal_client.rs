@@ -278,8 +278,11 @@ impl PrimalClient {
             stam_mod_runtimes::api::UriResponse::default()
         };
 
+        // Chunk size for streaming large files (512 KB)
+        const CHUNK_SIZE: usize = 512 * 1024;
+
         // Check if we need to read file content
-        let (buffer, file_size, resolved_filepath) = if !response.filepath.is_empty() {
+        if !response.filepath.is_empty() {
             // Handler specified a file path - resolve it relative to STAM_HOME
             // and verify it doesn't escape the allowed directory (security check)
             let home_dir = self.game_runtimes.get(&game_id)
@@ -320,25 +323,98 @@ impl PrimalClient {
             };
 
             if let Some(ref path) = resolved_path {
-                match std::fs::read(path) {
-                    Ok(content) => {
-                        let size = content.len() as u64;
-                        // Log file transfers at INFO level, especially for mod downloads (ZIP files)
-                        if path.to_string_lossy().ends_with(".zip") {
-                            debug!("Sending ZIP file '{}' ({} bytes) to user '{}' for URI '{}'",
-                                path.display(), size, username, uri);
-                        } else {
-                            debug!("Sending file '{}' ({} bytes) for URI '{}'", path.display(), size, uri);
-                        }
-                        (Some(content), Some(size), resolved_path)
-                    }
+                // Get file metadata
+                let file_size = match std::fs::metadata(path) {
+                    Ok(meta) => meta.len(),
                     Err(e) => {
-                        error!("Failed to read file '{}': {}", path.display(), e);
-                        (None, None, None)
+                        error!("Failed to get file metadata '{}': {}", path.display(), e);
+                        let _ = self.stream.write_primal_message(&PrimalMessage::UriResponse {
+                            status: 500,
+                            buffer: None,
+                            file_name: None,
+                            file_size: None,
+                        }).await;
+                        return;
+                    }
+                };
+
+                // Extract filename
+                let file_name = path.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|s| s.to_string());
+
+                debug!("Sending file '{}' ({} bytes) in chunks for URI '{}'", path.display(), file_size, uri);
+
+                // Send initial UriResponse with metadata (buffer is None for chunked transfer)
+                if let Err(e) = self.stream.write_primal_message(&PrimalMessage::UriResponse {
+                    status: response.status,
+                    buffer: None,
+                    file_name,
+                    file_size: Some(file_size),
+                }).await {
+                    error!("Failed to send UriResponse header: {}", e);
+                    return;
+                }
+
+                // Stream file content in chunks
+                use tokio::io::AsyncReadExt;
+                let file = match tokio::fs::File::open(path).await {
+                    Ok(f) => f,
+                    Err(e) => {
+                        error!("Failed to open file '{}': {}", path.display(), e);
+                        // Send empty final chunk to signal error
+                        let _ = self.stream.write_primal_message(&PrimalMessage::UriResponseChunk {
+                            data: Vec::new(),
+                            is_final: true,
+                        }).await;
+                        return;
+                    }
+                };
+
+                let mut reader = tokio::io::BufReader::new(file);
+                let mut buffer = vec![0u8; CHUNK_SIZE];
+                let mut total_sent: u64 = 0;
+
+                loop {
+                    let bytes_read = match reader.read(&mut buffer).await {
+                        Ok(0) => break, // EOF
+                        Ok(n) => n,
+                        Err(e) => {
+                            error!("Failed to read file '{}': {}", path.display(), e);
+                            // Send empty final chunk to signal error
+                            let _ = self.stream.write_primal_message(&PrimalMessage::UriResponseChunk {
+                                data: Vec::new(),
+                                is_final: true,
+                            }).await;
+                            return;
+                        }
+                    };
+
+                    total_sent += bytes_read as u64;
+                    let is_final = total_sent >= file_size;
+
+                    if let Err(e) = self.stream.write_primal_message(&PrimalMessage::UriResponseChunk {
+                        data: buffer[..bytes_read].to_vec(),
+                        is_final,
+                    }).await {
+                        error!("Failed to send file chunk: {}", e);
+                        return;
+                    }
+
+                    if is_final {
+                        break;
                     }
                 }
+
+                debug!("Finished sending file '{}' ({} bytes sent)", path.display(), total_sent);
             } else {
-                (None, None, None)
+                // Path resolution failed
+                let _ = self.stream.write_primal_message(&PrimalMessage::UriResponse {
+                    status: 404,
+                    buffer: None,
+                    file_name: None,
+                    file_size: None,
+                }).await;
             }
         } else if !response.buffer.is_empty() {
             // Handler provided buffer directly
@@ -349,25 +425,26 @@ impl PrimalClient {
                 response.buffer.len()
             };
             let truncated_buffer = response.buffer[..effective_size].to_vec();
-            (Some(truncated_buffer), Some(effective_size as u64), None)
+
+            debug!("RequestUri response: status={}, buffer_size={}", response.status, effective_size);
+
+            let _ = self.stream.write_primal_message(&PrimalMessage::UriResponse {
+                status: response.status,
+                buffer: Some(truncated_buffer),
+                file_name: None,
+                file_size: Some(effective_size as u64),
+            }).await;
         } else {
-            (None, None, None)
-        };
+            // No content
+            debug!("RequestUri response: status={}, no content", response.status);
 
-        // Extract filename from resolved filepath if present
-        let file_name = resolved_filepath.as_ref()
-            .and_then(|p| p.file_name())
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_string());
-
-        debug!("RequestUri response: status={}, file_name={:?}, file_size={:?}", response.status, file_name, file_size);
-
-        let _ = self.stream.write_primal_message(&PrimalMessage::UriResponse {
-            status: response.status,
-            buffer,
-            file_name,
-            file_size,
-        }).await;
+            let _ = self.stream.write_primal_message(&PrimalMessage::UriResponse {
+                status: response.status,
+                buffer: None,
+                file_name: None,
+                file_size: None,
+            }).await;
+        }
     }
 
     /// Authenticate user credentials based on intent type

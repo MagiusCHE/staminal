@@ -41,6 +41,7 @@ export class Manager {
     async handle_mod_download(req, res, mod_info) {
         console.log("Handling mod download for:", mod_info);
         res.filepath = "mod-packages/" + mod_info.path;
+        //res.buffer = mod_info.archive_bytes.toString();
         res.status = 200;
     }
 }

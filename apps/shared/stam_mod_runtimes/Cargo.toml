@@ -18,8 +18,9 @@ fluent = "0.16"
 fluent-bundle = "0.15"
 unic-langid = "0.9"
 
-# ZIP file extraction
-zip = "2.2"
+# tar.gz file extraction
+tar = "0.4"
+flate2 = "1.0"
 
 # Terminal input handling (raw mode, key events)
 crossterm = "0.28"

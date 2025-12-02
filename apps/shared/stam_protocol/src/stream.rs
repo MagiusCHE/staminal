@@ -5,8 +5,8 @@ use crate::error::{ProtocolError, Result};
 use crate::primal_message::PrimalMessage;
 use crate::game_message::GameMessage;
 
-/// Maximum message size: 1MB
-const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+/// Maximum message size: 2MB (to accommodate 512KB chunks with serialization overhead)
+const MAX_MESSAGE_SIZE: usize = 2 * 1024 * 1024;
 
 /// Extension trait for TcpStream to read/write PrimalMessages
 pub trait PrimalStream {

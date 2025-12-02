@@ -1,0 +1,16 @@
+{
+    "name": "probe2",
+    "version": "0.1.0",
+    "description": "Simple script used as example",
+    "entry_point": "index.js",
+    "execute_on": [
+        "server",
+        "client"
+    ],
+    "type": "library",
+    "priority": 0,
+    "requires": {
+        "@client": "0.1.0",
+        "@server": "0.1.0"
+    }
+}

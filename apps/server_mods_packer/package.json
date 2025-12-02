@@ -9,6 +9,6 @@
     "pack:purge": "node mods-packer.mjs --purge"
   },
   "dependencies": {
-    "archiver": "^7.0.1"
+    "tar-stream": "^3.1.7"
   }
 }

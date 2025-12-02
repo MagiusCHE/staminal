@@ -55,10 +55,14 @@ pub struct NetworkConfig {
     pub client_version: String,
 }
 
-/// Callback type for performing the actual download operation
+/// Progress callback type for download operations
+/// Arguments: (percentage: f64, received_bytes: u64, total_bytes: u64)
+pub type ProgressCallback = Arc<dyn Fn(f64, u64, u64) + Send + Sync>;
+
+/// Callback type for performing the actual download operation with optional progress callback
 /// This is provided by the client/server to implement the actual network logic
 pub type DownloadCallback = Arc<
-    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = DownloadResponse> + Send>>
+    dyn Fn(String, Option<ProgressCallback>) -> std::pin::Pin<Box<dyn std::future::Future<Output = DownloadResponse> + Send>>
         + Send
         + Sync,
 >;
@@ -108,11 +112,23 @@ impl NetworkApi {
     /// # Returns
     /// A DownloadResponse with the result
     pub async fn download(&self, uri: &str) -> DownloadResponse {
+        self.download_with_progress(uri, None).await
+    }
+
+    /// Download a resource from the given URI with progress callback
+    ///
+    /// # Arguments
+    /// * `uri` - The URI to download from (stam://, http://, https://)
+    /// * `progress_callback` - Optional callback for progress updates (percentage, received, total)
+    ///
+    /// # Returns
+    /// A DownloadResponse with the result
+    pub async fn download_with_progress(&self, uri: &str, progress_callback: Option<ProgressCallback>) -> DownloadResponse {
         // Check protocol
         if uri.starts_with("stam://") {
             // Use the callback if available
             if let Some(callback) = &self.download_callback {
-                return callback(uri.to_string()).await;
+                return callback(uri.to_string(), progress_callback).await;
             }
             // No callback available
             DownloadResponse {

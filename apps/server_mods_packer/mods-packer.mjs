@@ -2,25 +2,27 @@
 /**
  * Mods Packer for Staminal Engine
  *
- * Packages game mods into ZIP files based on manifest.json configuration.
+ * Packages game mods into tar.gz files based on manifest.json configuration.
  * Recursively scans input directory for directories containing manifest.json files.
- * Output ZIP files are placed in the specified output directory.
+ * Output tar.gz files are placed in the specified output directory.
  *
  * Usage:
  *   node mods-packer.mjs <input-dir> <output-dir> [--purge]
  *
  * Arguments:
  *   input-dir   Directory to scan for mods (contains manifest.json files)
- *   output-dir  Directory where ZIP files will be created
+ *   output-dir  Directory where tar.gz files will be created
  *
  * Options:
- *   --purge     Remove obsolete ZIP files after packing
+ *   --purge     Remove obsolete tar.gz files after packing
  */
 
 import { createHash } from 'crypto';
-import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'fs';
+import { createReadStream, createWriteStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'fs';
 import { basename, join, relative, resolve } from 'path';
-import archiver from 'archiver';
+import { createGzip } from 'zlib';
+import { pack } from 'tar-stream';
+import { pipeline } from 'stream/promises';
 
 // Valid characters for mod id and platform names
 const VALID_CHARS_REGEX = /^[a-zA-Z0-9_\-\.]+$/;
@@ -57,7 +59,7 @@ function validateChars(value, fieldName) {
 }
 
 /**
- * Parse manifest.json and generate ZIP filename
+ * Parse manifest.json and generate archive filename
  */
 function parseManifest(manifestPath) {
     const content = readFileSync(manifestPath, 'utf-8');
@@ -98,9 +100,9 @@ function parseManifest(manifestPath) {
         throw new Error(`Invalid 'execute_on' type in ${manifestPath}: expected string or array`);
     }
 
-    const zipName = `${name}-v${version}-${platforms}.zip`;
+    const archiveName = `${name}-v${version}-${platforms}.tar.gz`;
 
-    return { id: name, version, platforms, zipName, manifest };
+    return { id: name, version, platforms, archiveName, manifest };
 }
 
 /**
@@ -153,35 +155,106 @@ function findModRoots(dir, results = []) {
 }
 
 /**
- * Create a ZIP archive of a mod directory
+ * Recursively get all files in a directory
+ * Returns array of { relativePath, absolutePath, size } sorted by relativePath
  */
-async function createModZip(modDir, outputPath) {
-    return new Promise((resolve, reject) => {
-        const output = createWriteStream(outputPath);
-        const archive = archiver('zip', { zlib: { level: 9 } });
+function getAllFiles(dir, baseDir = dir, results = []) {
+    const entries = readdirSync(dir, { withFileTypes: true });
 
-        output.on('close', () => resolve(archive.pointer()));
-        output.on('error', reject);
-        archive.on('error', reject);
-        archive.on('warning', (err) => {
-            if (err.code !== 'ENOENT') {
-                reject(err);
-            }
-        });
+    for (const entry of entries) {
+        const absolutePath = join(dir, entry.name);
+        const relativePath = relative(baseDir, absolutePath);
 
-        archive.pipe(output);
+        if (entry.isDirectory()) {
+            getAllFiles(absolutePath, baseDir, results);
+        } else if (entry.isFile()) {
+            const stat = statSync(absolutePath);
+            results.push({ relativePath, absolutePath, size: stat.size });
+        }
+    }
 
-        // Add all files from mod directory, placing them at root of ZIP
-        archive.directory(modDir, false);
-
-        archive.finalize();
-    });
+    return results.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
 }
 
 /**
- * Purge obsolete ZIP files from output directory
+ * Calculate SHA512 hash based on file paths and modification dates
+ * This creates a fast hash for change detection based on:
+ * - All file paths (sorted)
+ * - All file modification dates in ISO format
  */
-function purgeObsolete(outputDir, validZips) {
+function calculateDateSha512(modDir) {
+    const files = getAllFiles(modDir);
+
+    // Build a string with all file paths and their modification dates
+    const lines = [];
+    for (const { relativePath, absolutePath } of files) {
+        const stat = statSync(absolutePath);
+        const mtime = stat.mtime.toISOString();
+        lines.push(`${relativePath}\t${mtime}`);
+    }
+
+    // Join all lines and calculate SHA512
+    const content = lines.join('\n');
+    return createHash('sha512').update(content).digest('hex');
+}
+
+/**
+ * Create a tar.gz archive of a mod directory (streaming version for large files)
+ * Returns { archiveBytes, uncompressedBytes }
+ */
+async function createModArchive(modDir, outputPath) {
+    const files = getAllFiles(modDir);
+    const tarPack = pack();
+
+    // Calculate uncompressed size
+    const uncompressedBytes = files.reduce((total, file) => total + file.size, 0);
+
+    // Create output stream with gzip compression
+    const output = createWriteStream(outputPath);
+    const gzip = createGzip({ level: 9 });
+
+    // Start the pipeline
+    const pipelinePromise = pipeline(tarPack, gzip, output);
+
+    // Add all files to the tar archive using streaming
+    for (const { relativePath, absolutePath, size } of files) {
+        const stat = statSync(absolutePath);
+
+        // Create entry stream for this file
+        const entry = tarPack.entry({
+            name: relativePath,
+            size: size,
+            mode: stat.mode,
+            mtime: stat.mtime
+        });
+
+        // Stream the file content into the tar entry
+        await new Promise((resolve, reject) => {
+            const fileStream = createReadStream(absolutePath);
+            fileStream.on('data', (chunk) => entry.write(chunk));
+            fileStream.on('end', () => {
+                entry.end();
+                resolve();
+            });
+            fileStream.on('error', reject);
+        });
+    }
+
+    // Finalize the tar archive
+    tarPack.finalize();
+
+    // Wait for the pipeline to complete
+    await pipelinePromise;
+
+    // Return archive size and uncompressed size
+    const archiveStat = statSync(outputPath);
+    return { archiveBytes: archiveStat.size, uncompressedBytes };
+}
+
+/**
+ * Purge obsolete archive files from output directory
+ */
+function purgeObsolete(outputDir, validArchives) {
     if (!existsSync(outputDir)) return [];
 
     const purged = [];
@@ -189,9 +262,9 @@ function purgeObsolete(outputDir, validZips) {
 
     for (const entry of entries) {
         if (!entry.isFile()) continue;
-        if (!entry.name.endsWith('.zip')) continue;
+        if (!entry.name.endsWith('.tar.gz')) continue;
 
-        if (!validZips.includes(entry.name)) {
+        if (!validArchives.includes(entry.name)) {
             const filePath = join(outputDir, entry.name);
             try {
                 rmSync(filePath);
@@ -207,9 +280,9 @@ function purgeObsolete(outputDir, validZips) {
 }
 
 /**
- * Calculate SHA512 hash of a file
+ * Calculate SHA512 hash of a file (for archive files)
  */
-async function calculateSha512(filePath) {
+async function calculateFileSha512(filePath) {
     return new Promise((resolve, reject) => {
         const hash = createHash('sha512');
         const stream = createReadStream(filePath);
@@ -225,7 +298,8 @@ async function calculateSha512(filePath) {
 function formatBytes(bytes) {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 /**
@@ -238,14 +312,43 @@ function printUsage() {
     console.error('');
     console.error('Arguments:');
     console.error('  input-dir   Directory to scan for mods (contains manifest.json files)');
-    console.error('  output-dir  Directory where ZIP files will be created');
+    console.error('  output-dir  Directory where tar.gz files will be created');
     console.error('');
     console.error('Options:');
-    console.error('  --purge     Remove obsolete ZIP files after packing');
+    console.error('  --purge     Remove obsolete tar.gz files after packing');
     console.error('');
     console.error('Example:');
     console.error('  node mods-packer.mjs ./mods ./mod-packages');
     console.error('  node mods-packer.mjs ./mods ./mod-packages --purge');
+}
+
+/**
+ * Load existing mod-packages.json if it exists
+ * Returns a map of archive path -> package info for quick lookup
+ * Uses archive path as key since the same mod ID can have different versions for client/server
+ */
+function loadExistingPackages(outputDir) {
+    const modPackagesPath = join(outputDir, 'mod-packages.json');
+    const existingPackages = new Map();
+
+    if (existsSync(modPackagesPath)) {
+        try {
+            const content = readFileSync(modPackagesPath, 'utf-8');
+            const data = JSON.parse(content);
+
+            // Index by archive path for quick lookup (handles same mod ID with different platforms)
+            for (const pkg of data.client || []) {
+                existingPackages.set(pkg.path, pkg);
+            }
+            for (const pkg of data.server || []) {
+                existingPackages.set(pkg.path, pkg);
+            }
+        } catch (e) {
+            console.warn(`Warning: Could not read existing mod-packages.json: ${e.message}`);
+        }
+    }
+
+    return existingPackages;
 }
 
 /**
@@ -279,6 +382,9 @@ async function main() {
         console.log(`Created: ${resolvedOutput}`);
     }
 
+    // Load existing packages for comparison
+    const existingPackages = loadExistingPackages(resolvedOutput);
+
     // Find all mod roots recursively
     console.log('Scanning for mods...');
     const modRoots = findModRoots(resolvedInput);
@@ -286,6 +392,7 @@ async function main() {
     console.log('');
 
     const packed = [];
+    const skipped = [];
     const errors = [];
     // Collect mod package info grouped by platform
     const modPackages = {
@@ -295,25 +402,63 @@ async function main() {
 
     for (const { modDir, manifestPath } of modRoots) {
         try {
-            const { id, version, platforms, zipName, manifest } = parseManifest(manifestPath);
-            const outputPath = join(resolvedOutput, zipName);
+            const { id, version, platforms, archiveName, manifest } = parseManifest(manifestPath);
+            const outputPath = join(resolvedOutput, archiveName);
 
             const relPath = relative(resolvedInput, modDir);
-            console.log(`Packing: ${id} v${version} (${platforms})`);
-            console.log(`  From: ${relPath}`);
 
-            const size = await createModZip(modDir, outputPath);
-            console.log(`  -> ${zipName} (${formatBytes(size)})`);
+            // Calculate date-based SHA512 (hash of file paths + modification dates for fast change detection)
+            const date_sha512 = calculateDateSha512(modDir);
 
-            // Calculate SHA512 hash
-            const sha512 = await calculateSha512(outputPath);
+            // Check if we need to repack (use archiveName as key since same mod ID can have different platforms)
+            const existingPkg = existingPackages.get(archiveName);
+            const needsRepack = !existingPkg ||
+                existingPkg.date_sha512 !== date_sha512 ||
+                existingPkg.path !== archiveName ||
+                !existsSync(outputPath);
+
+            let archive_sha512;
+            let archive_bytes;
+            let uncompressed_bytes;
+
+            if (needsRepack) {
+                console.log(`Packing: ${id} v${version} (${platforms})`);
+                console.log(`  From: ${relPath}`);
+
+                // Create archive with _temp suffix first, then rename when complete
+                const tempPath = outputPath + '_temp';
+                const { archiveBytes, uncompressedBytes } = await createModArchive(modDir, tempPath);
+
+                // Calculate archive file SHA512 from temp file
+                archive_sha512 = await calculateFileSha512(tempPath);
+                archive_bytes = archiveBytes;
+                uncompressed_bytes = uncompressedBytes;
+
+                // Atomically replace the old archive with the new one
+                renameSync(tempPath, outputPath);
+                console.log(`  -> ${archiveName} (${formatBytes(archiveBytes)}, uncompressed: ${formatBytes(uncompressedBytes)})`);
+
+                packed.push(archiveName);
+            } else {
+                console.log(`Skipping: ${id} v${version} (${platforms}) - unchanged`);
+
+                // Use existing values
+                archive_sha512 = existingPkg.archive_sha512;
+                archive_bytes = existingPkg.archive_bytes;
+                uncompressed_bytes = existingPkg.uncompressed_bytes;
+
+                skipped.push(archiveName);
+            }
 
             // Create package info
             const packageInfo = {
                 id,
                 manifest,
-                sha512,
-                path: zipName
+                date_sha512,        // Hash of file paths + dates (for fast change detection)
+                archive_sha512,     // Hash of archive file (for integrity verification)
+                archive_bytes,      // Size of compressed archive in bytes
+                uncompressed_bytes, // Sum of all uncompressed file sizes in bytes
+                path: archiveName
             };
 
             // Add to appropriate platform lists
@@ -324,8 +469,6 @@ async function main() {
             if (platformList.includes('server')) {
                 modPackages.server.push(packageInfo);
             }
-
-            packed.push(zipName);
         } catch (e) {
             const modName = basename(modDir);
             console.error(`ERROR [${modName}]: ${e.message}`);
@@ -338,7 +481,8 @@ async function main() {
     // Purge obsolete files if requested
     if (purge) {
         console.log('Purging obsolete packages...');
-        const purged = purgeObsolete(resolvedOutput, packed);
+        const allArchives = [...packed, ...skipped];
+        const purged = purgeObsolete(resolvedOutput, allArchives);
         console.log(`Purged: ${purged.length} file(s)`);
         console.log('');
     }
@@ -353,8 +497,9 @@ async function main() {
 
     // Summary
     console.log('Summary:');
-    console.log(`  Packed: ${packed.length} mod(s)`);
-    console.log(`  Errors: ${errors.length}`);
+    console.log(`  Packed:  ${packed.length} mod(s)`);
+    console.log(`  Skipped: ${skipped.length} mod(s) (unchanged)`);
+    console.log(`  Errors:  ${errors.length}`);
 
     if (errors.length > 0) {
         process.exit(1);

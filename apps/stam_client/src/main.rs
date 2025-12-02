@@ -10,7 +10,7 @@ use tracing::{Level, debug, error, info, warn};
 use stam_mod_runtimes::api::{
     DownloadResponse, EnableEngineRequest, GraphicCommand, GraphicEngineReadyRequest,
     GraphicEngineWindowClosedRequest, GraphicEngines, GraphicEvent, GraphicProxy, LocaleApi,
-    NetworkApi, NetworkConfig, extract_mod_zip, parse_stam_uri, sanitize_uri,
+    NetworkApi, NetworkConfig, extract_mod_archive, parse_stam_uri, sanitize_uri,
 };
 use stam_log::{LogConfig, init_logging};
 use stam_protocol::{GameMessage, GameStream, IntentType, PrimalMessage, PrimalStream};
@@ -78,6 +78,7 @@ fn sha512_hash(input: &str) -> String {
 /// * `client_version` - Client version string
 /// * `default_server` - Default server address (host:port) to use if URI has no host
 /// * `tmp_dir` - Optional temp directory for saving file downloads
+/// * `progress_callback` - Optional callback for progress updates (percentage, received, total)
 async fn perform_stam_request(
     uri: &str,
     username: &str,
@@ -86,6 +87,7 @@ async fn perform_stam_request(
     client_version: &str,
     default_server: &str,
     tmp_dir: Option<&std::path::Path>,
+    progress_callback: Option<stam_mod_runtimes::api::ProgressCallback>,
 ) -> DownloadResponse {
     // Parse the URI to extract host:port
     let (mut host_port, path, uri_username, uri_password) = match parse_stam_uri(uri) {
@@ -183,36 +185,21 @@ async fn perform_stam_request(
         };
     }
 
-    // Wait for UriResponse
+    // Wait for UriResponse header
     match stream.read_primal_message().await {
-        Ok(PrimalMessage::UriResponse { status, buffer, file_name, file_size: _ }) => {
-            debug!("Received UriResponse: status={}, file_name={:?}, buffer_len={:?}", status, file_name, buffer.as_ref().map(|b| b.len()));
-            // If file_name is present, this is a file download -> put data in file_content only
-            // Otherwise, it's a simple response -> put data in buffer only
-            if file_name.is_some() {
-                // If tmp_dir is provided, save file content to temp file
-                if let (Some(tmp_dir), Some(content)) = (tmp_dir, &buffer) {
-                    // Generate unique temp file name
-                    let timestamp = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_millis())
-                        .unwrap_or(0);
-                    let unique_id = std::process::id();
+        Ok(PrimalMessage::UriResponse { status, buffer, file_name, file_size }) => {
+            debug!("Received UriResponse: status={}, file_name={:?}, file_size={:?}, buffer_len={:?}",
+                status, file_name, file_size, buffer.as_ref().map(|b| b.len()));
 
-                    let temp_file_name = if let Some(ref name) = file_name {
-                        // Preserve original extension
-                        let ext = std::path::Path::new(name)
-                            .extension()
-                            .and_then(|e| e.to_str())
-                            .unwrap_or("tmp");
-                        format!("download_{}_{}.{}", timestamp, unique_id, ext)
-                    } else {
-                        format!("download_{}_{}.tmp", timestamp, unique_id)
-                    };
-
+            // If buffer is present in response, this is a non-chunked transfer (small data or simple response)
+            if let Some(content) = buffer {
+                // Data was sent directly in the response
+                if file_name.is_some() && tmp_dir.is_some() {
+                    // Save to temp file
+                    let tmp_dir = tmp_dir.unwrap();
+                    let temp_file_name = generate_temp_filename(file_name.as_deref());
                     let temp_path = tmp_dir.join(&temp_file_name);
 
-                    // Ensure tmp directory exists
                     if !tmp_dir.exists() {
                         if let Err(e) = std::fs::create_dir_all(tmp_dir) {
                             error!("Failed to create temp directory: {}", e);
@@ -220,48 +207,167 @@ async fn perform_stam_request(
                                 status,
                                 buffer: None,
                                 file_name,
-                                file_content: buffer,
+                                file_content: Some(content),
                                 temp_file_path: None,
                             };
                         }
                     }
 
-                    // Write to temp file
-                    match std::fs::write(&temp_path, content) {
+                    match std::fs::write(&temp_path, &content) {
                         Ok(_) => {
-                            DownloadResponse {
+                            return DownloadResponse {
                                 status,
                                 buffer: None,
                                 file_name,
-                                file_content: None, // Don't keep in memory
+                                file_content: None,
                                 temp_file_path: Some(temp_path.to_string_lossy().to_string()),
-                            }
+                            };
                         }
                         Err(e) => {
                             error!("Failed to write temp file: {}", e);
-                            DownloadResponse {
+                            return DownloadResponse {
                                 status,
                                 buffer: None,
                                 file_name,
-                                file_content: buffer,
+                                file_content: Some(content),
                                 temp_file_path: None,
-                            }
+                            };
                         }
                     }
-                } else {
-                    // No tmp_dir provided, return file_content as-is
-                    DownloadResponse {
+                } else if file_name.is_some() {
+                    // Return as file_content
+                    return DownloadResponse {
                         status,
                         buffer: None,
                         file_name,
-                        file_content: buffer,
+                        file_content: Some(content),
                         temp_file_path: None,
+                    };
+                } else {
+                    // Return as buffer
+                    return DownloadResponse {
+                        status,
+                        buffer: Some(content),
+                        file_name: None,
+                        file_content: None,
+                        temp_file_path: None,
+                    };
+                }
+            }
+
+            // No buffer means chunked transfer - read chunks until final
+            let total_size = file_size.unwrap_or(0);
+            let mut received_bytes: u64 = 0;
+            let mut all_data: Vec<u8> = Vec::with_capacity(total_size as usize);
+
+            loop {
+                match stream.read_primal_message().await {
+                    Ok(PrimalMessage::UriResponseChunk { data, is_final }) => {
+                        received_bytes += data.len() as u64;
+                        all_data.extend_from_slice(&data);
+
+                        // Call progress callback if provided
+                        if let Some(ref callback) = progress_callback {
+                            let percentage = if total_size > 0 {
+                                (received_bytes as f64 / total_size as f64) * 100.0
+                            } else {
+                                0.0
+                            };
+                            callback(percentage, received_bytes, total_size);
+                        }
+
+                        if is_final {
+                            debug!("Received final chunk, total {} bytes", received_bytes);
+                            break;
+                        }
+                    }
+                    Ok(PrimalMessage::Error { message }) => {
+                        error!("Server error during chunk transfer: {}", message);
+                        return DownloadResponse {
+                            status: 500,
+                            buffer: None,
+                            file_name: None,
+                            file_content: None,
+                            temp_file_path: None,
+                        };
+                    }
+                    Ok(msg) => {
+                        error!("Unexpected message during chunk transfer: {:?}", msg);
+                        return DownloadResponse {
+                            status: 500,
+                            buffer: None,
+                            file_name: None,
+                            file_content: None,
+                            temp_file_path: None,
+                        };
+                    }
+                    Err(e) => {
+                        error!("Failed to read chunk: {}", e);
+                        return DownloadResponse {
+                            status: 500,
+                            buffer: None,
+                            file_name: None,
+                            file_content: None,
+                            temp_file_path: None,
+                        };
                     }
                 }
-            } else {
+            }
+
+            // Save to temp file if tmp_dir is provided and file_name is present
+            if file_name.is_some() && tmp_dir.is_some() {
+                let tmp_dir = tmp_dir.unwrap();
+                let temp_file_name = generate_temp_filename(file_name.as_deref());
+                let temp_path = tmp_dir.join(&temp_file_name);
+
+                if !tmp_dir.exists() {
+                    if let Err(e) = std::fs::create_dir_all(tmp_dir) {
+                        error!("Failed to create temp directory: {}", e);
+                        return DownloadResponse {
+                            status,
+                            buffer: None,
+                            file_name,
+                            file_content: Some(all_data),
+                            temp_file_path: None,
+                        };
+                    }
+                }
+
+                match std::fs::write(&temp_path, &all_data) {
+                    Ok(_) => {
+                        DownloadResponse {
+                            status,
+                            buffer: None,
+                            file_name,
+                            file_content: None,
+                            temp_file_path: Some(temp_path.to_string_lossy().to_string()),
+                        }
+                    }
+                    Err(e) => {
+                        error!("Failed to write temp file: {}", e);
+                        DownloadResponse {
+                            status,
+                            buffer: None,
+                            file_name,
+                            file_content: Some(all_data),
+                            temp_file_path: None,
+                        }
+                    }
+                }
+            } else if file_name.is_some() {
+                // Return as file_content
                 DownloadResponse {
                     status,
-                    buffer,
+                    buffer: None,
+                    file_name,
+                    file_content: Some(all_data),
+                    temp_file_path: None,
+                }
+            } else {
+                // Return as buffer
+                DownloadResponse {
+                    status,
+                    buffer: Some(all_data),
                     file_name: None,
                     file_content: None,
                     temp_file_path: None,
@@ -298,6 +404,25 @@ async fn perform_stam_request(
                 temp_file_path: None,
             }
         }
+    }
+}
+
+/// Generate a unique temp filename with optional extension from original name
+fn generate_temp_filename(original_name: Option<&str>) -> String {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let unique_id = std::process::id();
+
+    if let Some(name) = original_name {
+        let ext = std::path::Path::new(name)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("tmp");
+        format!("download_{}_{}.{}", timestamp, unique_id, ext)
+    } else {
+        format!("download_{}_{}.tmp", timestamp, unique_id)
     }
 }
 
@@ -619,6 +744,7 @@ async fn connect_to_game_server(
                             VERSION,
                             host_port,
                             Some(&tmp_dir),
+                            None, // No progress callback for initial mod download
                         ).await;
 
                         if response.status != 200 {
@@ -631,27 +757,27 @@ async fn connect_to_game_server(
                         }
 
                         // Get the temp file path (file was already saved by perform_stam_request)
-                        let zip_path = std::path::PathBuf::from(response.temp_file_path.ok_or_else(|| {
+                        let archive_path = std::path::PathBuf::from(response.temp_file_path.ok_or_else(|| {
                             format!("Server returned empty content for mod '{}'", mod_info.mod_id)
                         })?);
 
-                        let zip_filename = response.file_name.unwrap_or_else(|| format!("{}.zip", mod_info.mod_id));
+                        let archive_filename = response.file_name.unwrap_or_else(|| format!("{}.tar.gz", mod_info.mod_id));
 
                         // Get file size for logging
-                        let file_size = std::fs::metadata(&zip_path).map(|m| m.len()).unwrap_or(0);
-                        debug!("  Saved {} ({} bytes)", zip_filename, file_size);
+                        let file_size = std::fs::metadata(&archive_path).map(|m| m.len()).unwrap_or(0);
+                        debug!("  Saved {} ({} bytes)", archive_filename, file_size);
 
-                        // Extract ZIP to mods directory
+                        // Extract tar.gz archive to mods directory
                         let mod_target_dir = mods_dir.join(&mod_info.mod_id);
                         debug!("  Extracting to {}...", mod_target_dir.display());
 
-                        extract_mod_zip(&zip_path, &mod_target_dir)
+                        extract_mod_archive(&archive_path, &mod_target_dir)
                             .map_err(|e| format!("Failed to extract mod '{}': {}", mod_info.mod_id, e))?;
 
                         debug!("  ✓ Mod '{}' installed successfully", mod_info.mod_id);
 
-                        // Clean up ZIP file
-                        std::fs::remove_file(&zip_path)?;
+                        // Clean up archive file
+                        std::fs::remove_file(&archive_path)?;
 
                         // Immediately load the manifest of the newly downloaded mod
                         // so that its dependencies can be discovered in the next iteration
@@ -767,7 +893,7 @@ async fn connect_to_game_server(
                 // Set the download callback that performs stam:// requests
                 // Note: We pass None for tmp_dir because the JS runtime's TempFileManager
                 // handles temp file creation after this callback returns
-                network_api.set_download_callback(Arc::new(move |uri: String| {
+                network_api.set_download_callback(Arc::new(move |uri: String, progress_callback| {
                     let username = network_username.clone();
                     let password_hash = network_password_hash.clone();
                     let game_id = network_game_id.clone();
@@ -775,7 +901,7 @@ async fn connect_to_game_server(
                     let default_server = network_server.clone();
 
                     Box::pin(async move {
-                        perform_stam_request(&uri, &username, &password_hash, &game_id, &client_version, &default_server, None).await
+                        perform_stam_request(&uri, &username, &password_hash, &game_id, &client_version, &default_server, None, progress_callback).await
                     })
                 }));
                 js_adapter.set_network_api(network_api);

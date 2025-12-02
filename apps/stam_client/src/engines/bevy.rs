@@ -470,6 +470,8 @@ fn process_commands(
     mut text_query: Query<&mut Text>,
     mut bg_color_query: Query<&mut BackgroundColor>,
     mut node_query: Query<&mut Node>,
+    mut text_color_query: Query<&mut TextColor>,
+    mut button_query: Query<(&mut ButtonColors, Option<&Children>)>,
     ui_camera: Option<Res<UiCamera>>,
 ) {
     // Lock the receiver and process all available commands (non-blocking)
@@ -751,6 +753,8 @@ fn process_commands(
                         &mut text_query,
                         &mut bg_color_query,
                         &mut node_query,
+                        &mut text_color_query,
+                        &mut button_query,
                     );
                     let _ = response_tx.send(result);
                 } else {
@@ -775,6 +779,8 @@ fn process_commands(
                             &mut text_query,
                             &mut bg_color_query,
                             &mut node_query,
+                            &mut text_color_query,
+                            &mut button_query,
                         ) {
                             errors.push(e);
                         }
@@ -788,6 +794,8 @@ fn process_commands(
                             &mut text_query,
                             &mut bg_color_query,
                             &mut node_query,
+                            &mut text_color_query,
+                            &mut button_query,
                         ) {
                             errors.push(e);
                         }
@@ -1114,7 +1122,7 @@ fn create_widget_entity(
                 }
             };
 
-            let text_cmd = commands.spawn((
+            let mut entity_cmd = commands.spawn((
                 text_node,
                 Text::new(content),
                 TextColor(color),
@@ -1128,7 +1136,12 @@ fn create_widget_entity(
                 widget_font_config.clone(), // Store for child inheritance
             ));
 
-            let entity = text_cmd.id();
+            // Add background color if specified (transparent by default in Bevy 0.17)
+            if let Some(ref bg_color) = config.background_color {
+                entity_cmd.insert(BackgroundColor(color_value_to_bevy(bg_color)));
+            }
+
+            let entity = entity_cmd.id();
             commands.entity(entity).insert(ChildOf(parent_entity));
 
             tracing::debug!("Text widget entity {:?} created and parented", entity);
@@ -1272,13 +1285,25 @@ fn update_widget_property(
     text_query: &mut Query<&mut Text>,
     bg_color_query: &mut Query<&mut BackgroundColor>,
     node_query: &mut Query<&mut Node>,
+    text_color_query: &mut Query<&mut TextColor>,
+    button_query: &mut Query<(&mut ButtonColors, Option<&Children>)>,
 ) -> Result<(), String> {
     match property {
         "content" | "label" => {
             if let PropertyValue::String(text) = value {
+                // First try direct text component
                 if let Ok(mut text_component) = text_query.get_mut(entity) {
                     *text_component = Text::new(text.clone());
                     return Ok(());
+                }
+                // For buttons, the text is on a child entity
+                if let Ok((_, Some(children))) = button_query.get(entity) {
+                    for child in children.iter() {
+                        if let Ok(mut text_component) = text_query.get_mut(child) {
+                            *text_component = Text::new(text.clone());
+                            return Ok(());
+                        }
+                    }
                 }
             }
             Err(format!("Cannot update {} on this widget", property))
@@ -1288,6 +1313,25 @@ fn update_widget_property(
                 if let Ok(mut bg) = bg_color_query.get_mut(entity) {
                     *bg = BackgroundColor(color_value_to_bevy(color));
                     return Ok(());
+                }
+            }
+            Err(format!("Cannot update {} on this widget", property))
+        }
+        "fontColor" => {
+            if let PropertyValue::Color(color) = value {
+                // First try direct text color component
+                if let Ok(mut text_color) = text_color_query.get_mut(entity) {
+                    *text_color = TextColor(color_value_to_bevy(color));
+                    return Ok(());
+                }
+                // For buttons, the text color is on a child entity
+                if let Ok((_, Some(children))) = button_query.get(entity) {
+                    for child in children.iter() {
+                        if let Ok(mut text_color) = text_color_query.get_mut(child) {
+                            *text_color = TextColor(color_value_to_bevy(color));
+                            return Ok(());
+                        }
+                    }
                 }
             }
             Err(format!("Cannot update {} on this widget", property))
@@ -1305,6 +1349,50 @@ fn update_widget_property(
             if let PropertyValue::Size(size) = value {
                 if let Ok(mut node) = node_query.get_mut(entity) {
                     node.height = size_value_to_val(size);
+                    return Ok(());
+                }
+            }
+            Err(format!("Cannot update {} on this widget", property))
+        }
+        "disabled" => {
+            if let PropertyValue::Bool(disabled) = value {
+                // For buttons, update the background color based on disabled state
+                if let Ok((button_colors, _)) = button_query.get(entity) {
+                    let new_color = if *disabled {
+                        button_colors.disabled
+                    } else {
+                        button_colors.normal
+                    };
+                    if let Ok(mut bg) = bg_color_query.get_mut(entity) {
+                        *bg = BackgroundColor(new_color);
+                        return Ok(());
+                    }
+                }
+            }
+            Err(format!("Cannot update {} on this widget", property))
+        }
+        "hoverColor" => {
+            if let PropertyValue::Color(color) = value {
+                if let Ok((mut button_colors, _)) = button_query.get_mut(entity) {
+                    button_colors.hovered = color_value_to_bevy(color);
+                    return Ok(());
+                }
+            }
+            Err(format!("Cannot update {} on this widget", property))
+        }
+        "pressedColor" => {
+            if let PropertyValue::Color(color) = value {
+                if let Ok((mut button_colors, _)) = button_query.get_mut(entity) {
+                    button_colors.pressed = color_value_to_bevy(color);
+                    return Ok(());
+                }
+            }
+            Err(format!("Cannot update {} on this widget", property))
+        }
+        "disabledColor" => {
+            if let PropertyValue::Color(color) = value {
+                if let Ok((mut button_colors, _)) = button_query.get_mut(entity) {
+                    button_colors.disabled = color_value_to_bevy(color);
                     return Ok(());
                 }
             }

@@ -13,5 +13,5 @@ stam_schema = { path = "../shared/stam_schema" }
 stam_protocol = { path = "../shared/stam_protocol" }
 stam_mod_runtimes = { path = "../shared/stam_mod_runtimes", features = ["js"] }
 stam_log = { path = "../shared/stam_log" }
-tokio = { version = "1.0", features = ["rt-multi-thread", "signal", "time", "sync", "macros", "net", "io-util"] }
+tokio = { version = "1.0", features = ["rt-multi-thread", "signal", "time", "sync", "macros", "net", "io-util", "fs"] }
 crossterm = "0.28"
