@@ -9,6 +9,7 @@ pub mod events;
 pub mod graphic;
 pub mod locale;
 pub mod network;
+pub mod path_security;
 pub mod process;
 pub mod system;
 
@@ -23,6 +24,7 @@ pub use graphic::{
 };
 pub use locale::LocaleApi;
 pub use network::{NetworkApi, NetworkConfig, DownloadResponse, parse_stam_uri, sanitize_uri};
+pub use path_security::{PathSecurityConfig, PathValidationResult, validate_path, validate_and_resolve_path, is_path_permitted, make_absolute};
 pub use process::{ProcessApi, AppApi};
 pub use system::{SystemApi, ModInfo, ModSide, ModPackageInfo, ModPackageManifest, ModPackagesRegistry, extract_mod_zip, AttachModRequest, ShutdownRequest, GameInfo};
 

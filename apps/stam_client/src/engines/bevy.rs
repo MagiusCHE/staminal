@@ -45,6 +45,7 @@ impl GraphicEngine for BevyEngine {
         &mut self,
         command_rx: Receiver<GraphicCommand>,
         initial_window_config: Option<InitialWindowConfig>,
+        asset_root: Option<std::path::PathBuf>,
     ) {
         let event_tx = self.event_tx.clone();
 
@@ -72,6 +73,14 @@ impl GraphicEngine for BevyEngine {
         // Build window with initial configuration
         // The window is created with the proper settings from the start
         // This is important because some settings (like position) cannot be changed after creation on Wayland
+        // Configure AssetPlugin to use asset_root as the base path for loading assets
+        let asset_file_path = asset_root
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| "assets".to_string());
+
+        tracing::debug!("Bevy AssetPlugin file_path: {}", asset_file_path);
+
         app.add_plugins(
             DefaultPlugins
                 .build()
@@ -86,6 +95,10 @@ impl GraphicEngine for BevyEngine {
                         ..default()
                     }),
                     ..default()
+                })
+                .set(bevy::asset::AssetPlugin {
+                    file_path: asset_file_path,
+                    ..default()
                 }),
         );
 
@@ -94,6 +107,7 @@ impl GraphicEngine for BevyEngine {
         app.insert_resource(EventSenderRes(event_tx.clone()));
         app.insert_resource(WindowRegistry::default());
         app.insert_resource(WidgetRegistry::default());
+        app.insert_resource(FontRegistry::default());
         app.insert_resource(EngineReadySent::default());
 
         // Force continuous updates even without windows or when unfocused
@@ -337,6 +351,82 @@ impl Default for ButtonColors {
     }
 }
 
+/// Font configuration for inheritance
+#[derive(Clone, Debug)]
+struct InheritedFontConfig {
+    /// Font family alias
+    family: String,
+    /// Font size
+    size: f32,
+}
+
+impl Default for InheritedFontConfig {
+    fn default() -> Self {
+        Self {
+            family: "default".to_string(),
+            size: 16.0,
+        }
+    }
+}
+
+/// Registry for loaded fonts and window default fonts
+#[derive(Resource, Default)]
+struct FontRegistry {
+    /// Loaded font handles by alias
+    loaded_fonts: HashMap<String, Handle<Font>>,
+    /// Default font for each window (window_id -> font config)
+    window_fonts: HashMap<u64, InheritedFontConfig>,
+}
+
+impl FontRegistry {
+    /// Get the font handle for an alias, or None if not loaded
+    fn get_font(&self, alias: &str) -> Option<Handle<Font>> {
+        self.loaded_fonts.get(alias).cloned()
+    }
+
+    /// Get the default font config for a window
+    fn get_window_font(&self, window_id: u64) -> InheritedFontConfig {
+        self.window_fonts
+            .get(&window_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    /// Set the default font for a window
+    fn set_window_font(&mut self, window_id: u64, family: String, size: f32) {
+        self.window_fonts.insert(window_id, InheritedFontConfig { family, size });
+    }
+
+    /// Register a loaded font
+    fn register_font(&mut self, alias: String, handle: Handle<Font>) {
+        self.loaded_fonts.insert(alias, handle);
+    }
+
+    /// Unregister a font
+    fn unregister_font(&mut self, alias: &str) {
+        self.loaded_fonts.remove(alias);
+    }
+}
+
+/// Component to store inherited font config on widgets
+#[derive(Component, Clone, Default)]
+struct WidgetFontConfig {
+    /// Font family alias (if set by this widget, overrides parent)
+    family: Option<String>,
+    /// Font size (if set by this widget, overrides parent)
+    size: Option<f32>,
+}
+
+impl WidgetFontConfig {
+    /// Merge with parent font config to get effective font
+    fn resolve(&self, parent: &InheritedFontConfig) -> InheritedFontConfig {
+        InheritedFontConfig {
+            family: self.family.clone().unwrap_or_else(|| parent.family.clone()),
+            size: self.size.unwrap_or(parent.size),
+        }
+    }
+}
+
 /// Component to track previous interaction state for detecting changes
 #[derive(Component, Default)]
 struct PreviousInteraction(Interaction);
@@ -372,6 +462,8 @@ fn process_commands(
     mut commands: Commands,
     mut registry: ResMut<WindowRegistry>,
     mut widget_registry: ResMut<WidgetRegistry>,
+    mut font_registry: ResMut<FontRegistry>,
+    asset_server: Res<AssetServer>,
     mut windows: Query<&mut Window>,
     mut app_exit: EventWriter<bevy::app::AppExit>,
     primary_window_query: Query<Entity, With<PrimaryWindow>>,
@@ -621,6 +713,8 @@ fn process_commands(
                 };
 
                 // Create widget entity based on type
+                // For now, we pass None for parent_font since we don't track parent widget's font
+                // A full implementation would query the parent entity's WidgetFontConfig
                 let widget_entity = create_widget_entity(
                     &mut commands,
                     widget_id,
@@ -628,6 +722,8 @@ fn process_commands(
                     widget_type,
                     &config,
                     parent_entity,
+                    &font_registry,
+                    None, // TODO: Get parent widget's effective font config
                 );
 
                 widget_registry.register(widget_id, widget_entity);
@@ -787,7 +883,21 @@ fn process_commands(
             }
 
             // ================================================================
-            // Asset Commands (Placeholder implementations)
+            // Window Font Command
+            // ================================================================
+            GraphicCommand::SetWindowFont {
+                id,
+                family,
+                size,
+                response_tx,
+            } => {
+                tracing::debug!("Setting window {} font: {} size {}", id, family, size);
+                font_registry.set_window_font(id, family, size);
+                let _ = response_tx.send(Ok(()));
+            }
+
+            // ================================================================
+            // Asset Commands
             // ================================================================
             GraphicCommand::LoadFont {
                 path,
@@ -802,20 +912,25 @@ fn process_commands(
                         .unwrap_or("font")
                         .to_string()
                 });
-                // TODO: Actually load font via AssetServer
-                tracing::debug!("Font loading requested: {} as {}", path, assigned_alias);
+
+                // Load font via AssetServer
+                let font_handle: Handle<Font> = asset_server.load(&path);
+                font_registry.register_font(assigned_alias.clone(), font_handle);
+
+                tracing::debug!("Font registered: {} as \"{}\"", path, assigned_alias);
                 let _ = response_tx.send(Ok(assigned_alias));
             }
 
             GraphicCommand::UnloadFont { alias, response_tx } => {
-                // TODO: Actually unload font
-                tracing::debug!("Font unloading requested: {}", alias);
+                font_registry.unregister_font(&alias);
+                tracing::debug!("Font unloaded: \"{}\"", alias);
                 let _ = response_tx.send(Ok(()));
             }
 
             GraphicCommand::PreloadImage { path, response_tx } => {
-                // TODO: Actually preload image via AssetServer
-                tracing::debug!("Image preloading requested: {}", path);
+                // Preload image via AssetServer
+                let _: Handle<Image> = asset_server.load(&path);
+                tracing::debug!("Image preloaded: {}", path);
                 let _ = response_tx.send(Ok(()));
             }
         }
@@ -830,7 +945,32 @@ fn create_widget_entity(
     widget_type: WidgetType,
     config: &WidgetConfig,
     parent_entity: Entity,
+    font_registry: &FontRegistry,
+    parent_font: Option<&InheritedFontConfig>,
 ) -> Entity {
+    // Resolve font configuration with inheritance
+    // Priority: widget config > parent widget > window default > global default
+    let window_font = font_registry.get_window_font(window_id);
+    let base_font = parent_font.unwrap_or(&window_font);
+
+    // Build widget's font config from config.font
+    let widget_font_config = WidgetFontConfig {
+        family: config.font.as_ref().and_then(|f| {
+            if f.family.is_empty() || f.family == "default" {
+                None
+            } else {
+                Some(f.family.clone())
+            }
+        }),
+        size: config.font.as_ref().map(|f| f.size),
+    };
+
+    // Resolve the effective font for this widget
+    let effective_font = widget_font_config.resolve(base_font);
+
+    // Get the font handle (if loaded), or None for default
+    let font_handle = font_registry.get_font(&effective_font.family);
+
     // Build base Node component from config
     let mut node = Node::default();
 
@@ -932,11 +1072,8 @@ fn create_widget_entity(
 
         WidgetType::Text => {
             let content = config.content.clone().unwrap_or_default();
-            let font_size = config
-                .font
-                .as_ref()
-                .map(|f| f.size)
-                .unwrap_or(16.0);
+            // Use effective_font which has inheritance applied
+            let font_size = effective_font.size;
             let color = config
                 .font_color
                 .as_ref()
@@ -944,8 +1081,9 @@ fn create_widget_entity(
                 .unwrap_or(Color::WHITE);
 
             tracing::debug!(
-                "Creating Text widget: content='{}', font_size={}, color={:?}, parent={:?}",
+                "Creating Text widget: content='{}', font='{}', font_size={}, color={:?}, parent={:?}",
                 content,
+                effective_font.family,
                 font_size,
                 color,
                 parent_entity
@@ -962,20 +1100,32 @@ fn create_widget_entity(
                 text_node.height = Val::Auto;
             }
 
+            // Build TextFont with the appropriate font handle
+            let text_font = if let Some(ref handle) = font_handle {
+                TextFont {
+                    font: handle.clone(),
+                    font_size,
+                    ..default()
+                }
+            } else {
+                TextFont {
+                    font_size,
+                    ..default()
+                }
+            };
+
             let text_cmd = commands.spawn((
                 text_node,
                 Text::new(content),
                 TextColor(color),
-                TextFont {
-                    font_size,
-                    ..default()
-                },
+                text_font,
                 StamWidget {
                     id: widget_id,
                     window_id,
                     widget_type,
                 },
                 WidgetEventSubscriptions::default(),
+                widget_font_config.clone(), // Store for child inheritance
             ));
 
             let entity = text_cmd.id();
@@ -987,11 +1137,6 @@ fn create_widget_entity(
 
         WidgetType::Button => {
             let label = config.label.clone().unwrap_or_default();
-            let font_size = config
-                .font
-                .as_ref()
-                .map(|f| f.size)
-                .unwrap_or(16.0);
 
             let normal = config
                 .background_color
@@ -1020,6 +1165,20 @@ fn create_widget_entity(
             button_node.justify_content = bevy::ui::JustifyContent::Center;
             button_node.align_items = bevy::ui::AlignItems::Center;
 
+            // Build TextFont with inherited font configuration
+            let text_font = if let Some(handle) = font_handle.clone() {
+                TextFont {
+                    font: handle,
+                    font_size: effective_font.size,
+                    ..default()
+                }
+            } else {
+                TextFont {
+                    font_size: effective_font.size,
+                    ..default()
+                }
+            };
+
             let button_entity = commands
                 .spawn((
                     button_node,
@@ -1042,15 +1201,13 @@ fn create_widget_entity(
                         ..default()
                     },
                     PreviousInteraction::default(),
+                    widget_font_config.clone(), // Store for child inheritance
                 ))
                 .with_children(|parent| {
                     parent.spawn((
                         Text::new(label),
                         TextColor(Color::WHITE),
-                        TextFont {
-                            font_size,
-                            ..default()
-                        },
+                        text_font,
                     ));
                 })
                 .insert(ChildOf(parent_entity))

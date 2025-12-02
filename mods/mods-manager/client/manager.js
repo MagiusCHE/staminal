@@ -59,6 +59,10 @@ export class Manager {
     async prepareUi() {
         console.log("Preparing UI for game %o", this.#gameInfo.id);
 
+        const assetTestPath = system.getAssetsPath("fonts/PerfectDOSVGA437.ttf");
+
+        await graphic.loadFont("default", assetTestPath);
+
         await this.#window.setTitle("Staminal: " + this.#gameInfo.name);
 
         // await graphic.createWindow({
@@ -69,10 +73,13 @@ export class Manager {
         //     positionMode: WindowPositionModes.Centered
         // })
 
+        this.#window.setFont("default", 16);         
+
         // Create a container with flexbox layout
         const container = await this.#window.createWidget(WidgetTypes.Container, {
             width: "100%",
             height: "100%",
+            // font: { family: "default", size: 32 },
             direction: FlexDirection.Column,
             justifyContent: JustifyContent.Center,
             alignItems: AlignItems.Center,
@@ -82,13 +89,14 @@ export class Manager {
         // Create a text widget
         const text = await container.createChild(WidgetTypes.Text, {
             content: "Hello, World!",
-            fontSize: 32,
+            font: { /*family: "default",*/ size: 32 },
             fontColor: "#ffffff"
         });
 
         //Create a button
         const button = await container.createChild(WidgetTypes.Button, {
             label: "Click Me",
+            font: { /*family: "default",*/ size: 24 },
             backgroundColor: "#0077cc",
             hoverColor: "#0099ff",
             pressedColor: "#005599"

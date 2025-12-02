@@ -721,7 +721,8 @@ async fn connect_to_game_server(
                 js_adapter.system_api().set_game_info(game_id, &game_name, &game_version);
 
                 // Setup graphic proxy for graphic engine operations (client-only)
-                let graphic_proxy = Arc::new(GraphicProxy::new_client(engine_request_tx.clone()));
+                // Pass game_root as asset_root so Bevy can load assets from mods directory
+                let graphic_proxy = Arc::new(GraphicProxy::new_client(engine_request_tx.clone(), Some(game_root.clone())));
                 js_adapter.set_graphic_proxy(graphic_proxy.clone());
                 // Save for main loop to poll graphic events
                 graphic_proxy_opt = Some(graphic_proxy.clone());
@@ -1758,10 +1759,10 @@ fn main() {
                     }
 
                     // Create and run Bevy engine on main thread (blocks until shutdown)
-                    // Pass the initial window config from the request
+                    // Pass the initial window config and asset_root from the request
                     let mut engine = BevyEngine::new(event_tx);
                     use stam_mod_runtimes::api::GraphicEngine;
-                    engine.run(cmd_rx, request.initial_window_config);
+                    engine.run(cmd_rx, request.initial_window_config, request.asset_root);
 
                     info!("Bevy engine has shut down");
                     // Engine has exited, continue to check for worker termination

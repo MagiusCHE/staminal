@@ -496,6 +496,99 @@ impl SystemApi {
 
         Ok(mod_target_dir)
     }
+
+    /// Resolve an asset path for a mod
+    ///
+    /// This method resolves relative asset paths to actual file paths, checking:
+    /// 1. If path starts with "@modid/", looks in that mod's assets folder
+    /// 2. Otherwise, checks current mod's assets folder first
+    /// 3. Falls back to client's global assets directory
+    ///
+    /// # Arguments
+    /// * `current_mod_id` - The ID of the mod making the request
+    /// * `relative_path` - The relative asset path (e.g., "fonts/MyFont.ttf" or "@other-mod/icons/icon.png")
+    ///
+    /// # Returns
+    /// * `Ok(String)` - The resolved path relative to home_dir (e.g., "mods/my-mod/assets/fonts/MyFont.ttf")
+    /// * `Err(String)` - Error message if the asset or mod is not found
+    pub fn get_assets_path(&self, current_mod_id: &str, relative_path: &str) -> Result<String, String> {
+        let home_dir = self.get_home_dir()
+            .ok_or_else(|| "Home directory not configured".to_string())?;
+
+        // Canonicalize to get absolute path
+        let home_dir = home_dir.canonicalize()
+            .map_err(|e| format!("Failed to canonicalize home directory: {}", e))?;
+
+        // Check if path references another mod (@modid/...)
+        if relative_path.starts_with('@') {
+            // Parse @modid/path format
+            let without_at = &relative_path[1..];
+            let parts: Vec<&str> = without_at.splitn(2, '/').collect();
+
+            if parts.len() < 2 {
+                return Err(format!(
+                    "Invalid asset path format: '{}'. Expected '@modid/path/to/asset'",
+                    relative_path
+                ));
+            }
+
+            let target_mod_id = parts[0];
+            let asset_path = parts[1];
+
+            // Check if the target mod exists
+            let mod_exists = {
+                let mods = self.mods.read().unwrap();
+                mods.iter().any(|m| m.id == target_mod_id)
+            };
+
+            if !mod_exists {
+                return Err(format!(
+                    "Mod '{}' not found. Cannot resolve asset path '{}'",
+                    target_mod_id, relative_path
+                ));
+            }
+
+            // Build path to target mod's assets folder
+            let mod_assets_path = home_dir.join("mods").join(target_mod_id).join("assets").join(asset_path);
+
+            if mod_assets_path.exists() {
+                // Return path relative to home_dir (for Bevy's AssetServer)
+                let relative = format!("mods/{}/assets/{}", target_mod_id, asset_path);
+                return Ok(relative);
+            } else {
+                return Err(format!(
+                    "Asset '{}' not found in mod '{}' (looked at: {})",
+                    asset_path, target_mod_id, mod_assets_path.display()
+                ));
+            }
+        }
+
+        // Path doesn't start with @, so check current mod first, then global assets
+
+        // 1. Check current mod's assets folder
+        let mod_assets_path = home_dir.join("mods").join(current_mod_id).join("assets").join(relative_path);
+        if mod_assets_path.exists() {
+            // Return path relative to home_dir (for Bevy's AssetServer)
+            let relative = format!("mods/{}/assets/{}", current_mod_id, relative_path);
+            return Ok(relative);
+        }
+
+        // 2. Check global assets directory (home_dir/assets)
+        let global_assets_path = home_dir.join("assets").join(relative_path);
+        if global_assets_path.exists() {
+            // Return path relative to home_dir (for Bevy's AssetServer)
+            let relative = format!("assets/{}", relative_path);
+            return Ok(relative);
+        }
+
+        // Asset not found anywhere
+        Err(format!(
+            "Asset '{}' not found. Searched in:\n  - {}\n  - {}",
+            relative_path,
+            mod_assets_path.display(),
+            global_assets_path.display()
+        ))
+    }
 }
 
 impl Default for SystemApi {

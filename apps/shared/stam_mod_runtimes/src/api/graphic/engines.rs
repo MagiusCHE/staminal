@@ -4,6 +4,7 @@
 
 use super::{GraphicCommand, InitialWindowConfig};
 use serde::Serialize;
+use std::path::PathBuf;
 
 /// Information about a graphic engine
 ///
@@ -106,10 +107,12 @@ pub trait GraphicEngine: Send + 'static {
     /// # Arguments
     /// * `command_rx` - Channel to receive commands from the proxy
     /// * `initial_window_config` - Optional configuration for the initial/main window
+    /// * `asset_root` - Root directory for loading assets (e.g., data_dir containing mods)
     fn run(
         &mut self,
         command_rx: std::sync::mpsc::Receiver<GraphicCommand>,
         initial_window_config: Option<InitialWindowConfig>,
+        asset_root: Option<PathBuf>,
     );
 
     /// Get the engine type

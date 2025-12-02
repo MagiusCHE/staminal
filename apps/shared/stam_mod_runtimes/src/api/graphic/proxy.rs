@@ -14,6 +14,7 @@ use super::{
     InitialWindowConfig, PropertyValue, WidgetConfig, WidgetEventType, WidgetInfo,
     WidgetSubscriptions, WidgetType, WindowConfig, WindowInfo,
 };
+use super::super::path_security::{PathSecurityConfig, validate_and_resolve_path};
 
 /// Request to enable a graphic engine
 ///
@@ -25,6 +26,8 @@ pub struct EnableEngineRequest {
     pub engine_type: GraphicEngines,
     /// Initial window configuration (applied at engine startup)
     pub initial_window_config: Option<InitialWindowConfig>,
+    /// Root directory for loading assets (e.g., data_dir containing mods)
+    pub asset_root: Option<std::path::PathBuf>,
     /// Channel to send back the command sender and event receiver
     pub response_tx: oneshot::Sender<
         Result<
@@ -85,15 +88,20 @@ pub struct GraphicProxy {
 
     /// Flag: graphic proxy is available (client-only)
     available: bool,
+
+    /// Root directory for loading assets (e.g., data_dir containing mods)
+    asset_root: Option<std::path::PathBuf>,
 }
 
 impl GraphicProxy {
     /// Create a new GraphicProxy for the client
     ///
-    /// The `enable_request_tx` channel is used to request engine enablement
-    /// from the main thread.
+    /// # Arguments
+    /// * `enable_request_tx` - Channel to request engine enablement from the main thread
+    /// * `asset_root` - Root directory for loading assets (e.g., data_dir containing mods)
     pub fn new_client(
         enable_request_tx: std::sync::mpsc::Sender<EnableEngineRequest>,
+        asset_root: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
             active_engine: Arc::new(RwLock::new(None)),
@@ -107,6 +115,7 @@ impl GraphicProxy {
             widget_subscriptions: Arc::new(RwLock::new(WidgetSubscriptions::new())),
             loaded_fonts: Arc::new(RwLock::new(HashMap::new())),
             available: true,
+            asset_root,
         }
     }
 
@@ -126,6 +135,7 @@ impl GraphicProxy {
             widget_subscriptions: Arc::new(RwLock::new(WidgetSubscriptions::new())),
             loaded_fonts: Arc::new(RwLock::new(HashMap::new())),
             available: false,
+            asset_root: None,
         }
     }
 
@@ -234,6 +244,7 @@ impl GraphicProxy {
             .send(EnableEngineRequest {
                 engine_type,
                 initial_window_config,
+                asset_root: self.asset_root.clone(),
                 response_tx,
             })
             .map_err(|_| "Failed to send enable request to main thread")?;
@@ -477,6 +488,48 @@ impl GraphicProxy {
         if let Some(info) = self.windows.write().unwrap().get_mut(&window_id) {
             info.config.visible = visible;
         }
+
+        Ok(())
+    }
+
+    /// Set the default font for a window
+    ///
+    /// All widgets in this window will inherit this font configuration
+    /// unless they override it with their own font settings.
+    ///
+    /// # Arguments
+    /// * `window_id` - The window to set the font for
+    /// * `family` - Font family alias (must be loaded via graphic.loadFont())
+    /// * `size` - Font size in pixels
+    pub async fn set_window_font(
+        &self,
+        window_id: u64,
+        family: String,
+        size: f32,
+    ) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "window.setFont() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::SetWindowFont {
+            id: window_id,
+            family,
+            size,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")??;
 
         Ok(())
     }
@@ -1011,10 +1064,32 @@ impl GraphicProxy {
             .as_ref()
             .ok_or("No graphic engine enabled. Call graphic.enableEngine() first.")?;
 
+        // Get asset_root for path validation and canonicalize it
+        // (asset_root may be relative like "./workspace_data/demo")
+        let asset_root = self.asset_root.as_ref()
+            .ok_or("Asset root not configured. This is a client configuration error.")?;
+        let canonical_asset_root = asset_root.canonicalize()
+            .map_err(|e| format!("Failed to canonicalize asset_root '{}': {}", asset_root.display(), e))?;
+
+        // The path from system.getAssetsPath() is already relative to asset_root
+        // (e.g., "mods/mod-id/assets/fonts/X.ttf")
+        // We need to validate it's within permitted directories (security check)
+        let security_config = PathSecurityConfig::new(&canonical_asset_root);
+
+        // Build the full absolute path for validation
+        let full_path = canonical_asset_root.join(&path);
+        let validated_path = validate_and_resolve_path(&full_path, &security_config)?;
+
+        // For Bevy's AssetServer, we need the path relative to asset_root
+        let relative_path = validated_path
+            .strip_prefix(&canonical_asset_root)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.clone());
+
         let (response_tx, response_rx) = oneshot::channel();
 
         tx.send(GraphicCommand::LoadFont {
-            path: path.clone(),
+            path: relative_path.clone(),
             alias: alias.clone(),
             response_tx,
         })
@@ -1027,7 +1102,7 @@ impl GraphicProxy {
         // Track loaded font
         let font_info = FontInfo {
             alias: assigned_alias.clone(),
-            path,
+            path: path.clone(),
             family_name: None,
         };
         self.loaded_fonts
@@ -1035,7 +1110,7 @@ impl GraphicProxy {
             .unwrap()
             .insert(assigned_alias.clone(), font_info);
 
-        tracing::debug!("Font loaded with alias: {}", assigned_alias);
+        tracing::debug!("Query Font loaded {} with alias: \"{}\"", path, assigned_alias);
 
         Ok(assigned_alias)
     }

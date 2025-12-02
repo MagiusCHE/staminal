@@ -938,6 +938,49 @@ impl SystemJS {
             }
         }
     }
+
+    /// Resolve an asset path for the current mod
+    ///
+    /// This method resolves relative asset paths to actual file paths.
+    /// The path resolution follows these rules:
+    ///
+    /// 1. If the path starts with "@modid/", it looks in that mod's assets folder.
+    ///    If the mod doesn't exist, an error is thrown.
+    /// 2. Otherwise, it first checks the current mod's assets folder.
+    /// 3. If not found there, it checks the client's global assets directory.
+    ///
+    /// # Arguments
+    /// * `relative_path` - The relative asset path (e.g., "fonts/MyFont.ttf" or "@other-mod/icons/icon.png")
+    ///
+    /// # Returns
+    /// The resolved path relative to the client's data root (e.g., "mods/my-mod/assets/fonts/MyFont.ttf")
+    ///
+    /// # Throws
+    /// Error if the asset is not found or if the referenced mod doesn't exist
+    ///
+    /// # Examples
+    /// ```javascript
+    /// // Look in current mod's assets folder, fallback to global assets
+    /// const fontPath = system.getAssetsPath("fonts/PerfectDOSVGA437.ttf");
+    ///
+    /// // Look in another mod's assets folder
+    /// const iconPath = system.getAssetsPath("@ui-toolkit/icons/close.png");
+    /// ```
+    #[qjs(rename = "getAssetsPath")]
+    pub fn get_assets_path<'js>(&self, ctx: Ctx<'js>, relative_path: String) -> rquickjs::Result<String> {
+        // Get the current mod_id from context globals
+        let mod_id: String = ctx
+            .globals()
+            .get("__MOD_ID__")
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        match self.system_api.get_assets_path(&mod_id, &relative_path) {
+            Ok(resolved_path) => Ok(resolved_path),
+            Err(error_msg) => {
+                Err(ctx.throw(rquickjs::String::from_str(ctx.clone(), &error_msg)?.into()))
+            }
+        }
+    }
 }
 
 /// Setup system API in the JavaScript context
@@ -1444,6 +1487,49 @@ impl GraphicJS {
             },
         )
     }
+
+    /// Load a custom font from a file
+    ///
+    /// # Arguments
+    /// * `alias` - Name to reference this font by (e.g., "default", "title-font")
+    /// * `path` - Path to the font file, relative to the client's data directory
+    ///            Use system.getAssetsPath() to resolve mod asset paths
+    ///
+    /// # Returns
+    /// Promise that resolves to the assigned alias
+    ///
+    /// # Example
+    /// ```javascript
+    /// const fontPath = system.getAssetsPath("fonts/MyFont.ttf");
+    /// await graphic.loadFont("my-font", fontPath);
+    /// ```
+    #[qjs(rename = "loadFont")]
+    pub async fn load_font<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        alias: String,
+        path: String,
+    ) -> rquickjs::Result<String> {
+        self.graphic_proxy
+            .load_font(path, Some(alias))
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+
+    /// Unload a previously loaded font
+    ///
+    /// # Arguments
+    /// * `alias` - The font alias to unload
+    ///
+    /// # Returns
+    /// Promise that resolves when the font is unloaded
+    #[qjs(rename = "unloadFont")]
+    pub async fn unload_font<'js>(&self, ctx: Ctx<'js>, alias: String) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .unload_font(alias)
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
 }
 
 /// JavaScript Window class
@@ -1591,6 +1677,31 @@ impl WindowJS {
     pub async fn clear_widgets(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
         self.graphic_proxy
             .clear_window_widgets(self.id)
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+
+    /// Set the default font for this window
+    ///
+    /// All widgets in this window will inherit this font configuration
+    /// unless they override it with their own font settings.
+    ///
+    /// # Arguments
+    /// * `family` - Font family alias (must be loaded via graphic.loadFont())
+    /// * `size` - Font size in pixels
+    ///
+    /// # Returns
+    /// Promise that resolves when the font is set
+    ///
+    /// # Example
+    /// ```javascript
+    /// await graphic.loadFont("my-font", "assets/fonts/MyFont.ttf");
+    /// window.setFont("my-font", 16);
+    /// ```
+    #[qjs(rename = "setFont")]
+    pub async fn set_font(&self, ctx: Ctx<'_>, family: String, size: f32) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .set_window_font(self.id, family, size)
             .await
             .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
     }

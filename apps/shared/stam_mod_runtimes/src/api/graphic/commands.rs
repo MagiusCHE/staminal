@@ -75,6 +75,22 @@ pub enum GraphicCommand {
         response_tx: oneshot::Sender<Result<(), String>>,
     },
 
+    /// Set the default font for a window
+    ///
+    /// All widgets in this window will inherit this font configuration
+    /// unless they override it. This font configuration is also inherited
+    /// by child widgets when a parent widget sets a font.
+    SetWindowFont {
+        /// Window ID
+        id: u64,
+        /// Font family alias (must be loaded via graphic.loadFont())
+        family: String,
+        /// Font size in pixels
+        size: f32,
+        /// Channel to send the result back
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+
     // Note: SetWindowResizable was removed - resizable must be set at window creation time
 
     /// Shutdown the graphic engine
@@ -251,6 +267,12 @@ impl std::fmt::Debug for GraphicCommand {
                 .debug_struct("SetWindowVisible")
                 .field("id", id)
                 .field("visible", visible)
+                .finish(),
+            Self::SetWindowFont { id, family, size, .. } => f
+                .debug_struct("SetWindowFont")
+                .field("id", id)
+                .field("family", family)
+                .field("size", size)
                 .finish(),
             Self::Shutdown { .. } => f.debug_struct("Shutdown").finish(),
             Self::GetEngineInfo { .. } => f.debug_struct("GetEngineInfo").finish(),

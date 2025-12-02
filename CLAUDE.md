@@ -144,6 +144,41 @@ When developing features for the mod system (`stam_mod_runtimes`):
    - `set_resizable` → `setResizable`
    - `enable_graphic_engine` → `enableGraphicEngine`
 
+### Path Security (CRITICAL)
+**ALL file access from mods MUST be validated through the path security module.**
+
+Mods are sandboxed and can only access files within permitted directories:
+- `data_dir` - The game data directory (contains mods, assets, saves, etc.)
+- `config_dir` - The configuration directory (optional, for config files)
+
+**Implementation Requirements:**
+1. **Use `path_security` module**: Located at `apps/shared/stam_mod_runtimes/src/api/path_security.rs`
+2. **Validate BEFORE any file operation**: Always call `validate_and_resolve_path()` or `is_path_permitted()` before reading, writing, or loading any file
+3. **Handle relative paths**: Use `make_absolute()` to convert relative paths to absolute using `data_dir` as base
+4. **Return relative paths to Bevy**: When passing paths to Bevy's `AssetServer`, strip the `data_dir` prefix to get relative paths
+
+**Example usage:**
+```rust
+use crate::api::path_security::{PathSecurityConfig, validate_and_resolve_path, make_absolute};
+
+// Get absolute path
+let absolute_path = make_absolute(&user_provided_path, &data_dir);
+
+// Validate the path is within permitted directories
+let security_config = PathSecurityConfig::new(&data_dir);
+let validated_path = validate_and_resolve_path(&absolute_path, &security_config)?;
+
+// For Bevy assets, get relative path
+let relative_path = validated_path.strip_prefix(&data_dir)
+    .map(|p| p.to_string_lossy().to_string())
+    .unwrap_or_else(|_| validated_path.to_string_lossy().to_string());
+```
+
+**Security guarantees:**
+- Path traversal attacks (../) are blocked by canonicalization
+- Symlinks are followed and the real path is validated
+- Absolute paths outside permitted directories are rejected
+
 ### Logging Hygiene
 - Ensure ANSI color codes are disabled when logs are redirected to files or piped (respect TTY detection and `NO_COLOR`), so log files stay plain and readable with correct mod identifiers.
 - **Always check for TTY before using colors**: When implementing any logging or console output that uses colors (including in scripting runtimes), always verify that stdout/stderr is connected to a TTY. Never output ANSI escape codes to files or pipes.
