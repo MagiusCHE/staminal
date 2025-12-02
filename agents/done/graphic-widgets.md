@@ -1,25 +1,25 @@
-# Piano di Implementazione: Widget UI per GraphicEngine
+# Implementation Plan: UI Widgets for GraphicEngine
 
-## Sommario Esecutivo
+## Executive Summary
 
-Questo documento descrive l'implementazione del sistema di widget UI per Staminal, permettendo agli script dei mod di creare, modificare e gestire widget grafici all'interno delle finestre del GraphicEngine Bevy.
+This document describes the implementation of the UI widget system for Staminal, allowing mod scripts to create, modify, and manage graphical widgets within GraphicEngine Bevy windows.
 
-**Principio chiave**: Il sistema è **language-agnostic**. L'API core è definita in Rust e ogni runtime (JavaScript, Lua, C#, Rust, C++) implementa i propri binding verso questa API comune.
+**Key principle**: The system is **language-agnostic**. The core API is defined in Rust and each runtime (JavaScript, Lua, C#, Rust, C++) implements its own bindings to this common API.
 
-## Indice
+## Table of Contents
 
-1. [Analisi Architettura Attuale](#1-analisi-architettura-attuale)
-2. [Scelta della Strategia UI](#2-scelta-della-strategia-ui)
-3. [Design del Sistema Widget](#3-design-del-sistema-widget)
-4. [API Core (Language-Agnostic)](#4-api-core-language-agnostic)
-5. [Binding per Runtime Specifici](#5-binding-per-runtime-specifici)
-6. [Implementazione Rust Core](#6-implementazione-rust-core)
-7. [Sistema di Eventi e Callback](#7-sistema-di-eventi-e-callback)
-8. [Piano di Implementazione](#8-piano-di-implementazione)
+1. [Current Architecture Analysis](#1-current-architecture-analysis)
+2. [UI Strategy Choice](#2-ui-strategy-choice)
+3. [Widget System Design](#3-widget-system-design)
+4. [Core API (Language-Agnostic)](#4-core-api-language-agnostic)
+5. [Runtime-Specific Bindings](#5-runtime-specific-bindings)
+6. [Rust Core Implementation](#6-rust-core-implementation)
+7. [Event and Callback System](#7-event-and-callback-system)
+8. [Implementation Plan](#8-implementation-plan)
 
 ---
 
-## 1. Analisi Architettura Attuale
+## 1. Current Architecture Analysis
 
 ### 1.1 Threading Model
 
@@ -44,63 +44,63 @@ Questo documento descrive l'implementazione del sistema di widget UI per Stamina
 │  └──────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────┐  │
 │  │ Runtime Adapters (one per language)          │  │
-│  │  ├── JavaScript (QuickJS) ← attuale          │  │
-│  │  ├── Lua (mlua) ← futuro                     │  │
-│  │  ├── C# (dotnet) ← futuro                    │  │
-│  │  ├── Rust (native) ← futuro                  │  │
-│  │  └── C++ (FFI) ← futuro                      │  │
+│  │  ├── JavaScript (QuickJS) ← current          │  │
+│  │  ├── Lua (mlua) ← future                     │  │
+│  │  ├── C# (dotnet) ← future                    │  │
+│  │  ├── Rust (native) ← future                  │  │
+│  │  └── C++ (FFI) ← future                      │  │
 │  └──────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────┘
 ```
 
-### 1.2 Flusso Comandi Esistente
+### 1.2 Existing Command Flow
 
-1. **Script (qualsiasi linguaggio)** chiama l'API widget (es. `window.createWidget()`)
-2. **Runtime Adapter** traduce la chiamata verso `GraphicProxy`
-3. **GraphicProxy** genera un ID, invia `GraphicCommand::CreateWidget`
-4. **Bevy** riceve il comando, crea l'entità widget, risponde
-5. **GraphicProxy** memorizza `WidgetInfo`, restituisce ID al Runtime Adapter
-6. **Runtime Adapter** crea l'oggetto Widget nel linguaggio specifico
+1. **Script (any language)** calls the widget API (e.g., `window.createWidget()`)
+2. **Runtime Adapter** translates the call to `GraphicProxy`
+3. **GraphicProxy** generates an ID, sends `GraphicCommand::CreateWidget`
+4. **Bevy** receives the command, creates the widget entity, responds
+5. **GraphicProxy** stores `WidgetInfo`, returns ID to Runtime Adapter
+6. **Runtime Adapter** creates the Widget object in the specific language
 
-### 1.3 File Chiave
+### 1.3 Key Files
 
-| File | Descrizione |
+| File | Description |
 |------|-------------|
-| `apps/stam_client/src/engines/bevy.rs` | Implementazione BevyEngine |
+| `apps/stam_client/src/engines/bevy.rs` | BevyEngine implementation |
 | `apps/shared/stam_mod_runtimes/src/api/graphic/proxy.rs` | GraphicProxy |
-| `apps/shared/stam_mod_runtimes/src/api/graphic/commands.rs` | Comandi |
-| `apps/shared/stam_mod_runtimes/src/api/graphic/events.rs` | Eventi |
-| `apps/shared/stam_mod_runtimes/src/adapters/js/bindings.rs` | Binding JS |
+| `apps/shared/stam_mod_runtimes/src/api/graphic/commands.rs` | Commands |
+| `apps/shared/stam_mod_runtimes/src/api/graphic/events.rs` | Events |
+| `apps/shared/stam_mod_runtimes/src/adapters/js/bindings.rs` | JS Bindings |
 
 ---
 
-## 2. Scelta della Strategia UI
+## 2. UI Strategy Choice
 
-### 2.1 Opzioni Analizzate
+### 2.1 Analyzed Options
 
-| Opzione | Pro | Contro |
-|---------|-----|--------|
-| **bevy_ui nativo** | Integrazione perfetta ECS, nessuna dipendenza extra, futuro di Bevy | Verboso, API in evoluzione |
-| **bevy_egui** | API immediate mode, facile da usare, documentazione | Dipendenza extra, stile diverso da Bevy |
-| **Sickle UI** | Ergonomico, riduce boilerplate | Dipendenza extra, meno maturo |
+| Option | Pros | Cons |
+|--------|------|------|
+| **native bevy_ui** | Perfect ECS integration, no extra dependencies, Bevy's future | Verbose, evolving API |
+| **bevy_egui** | Immediate mode API, easy to use, documentation | Extra dependency, different style from Bevy |
+| **Sickle UI** | Ergonomic, reduces boilerplate | Extra dependency, less mature |
 
-### 2.2 Decisione: bevy_ui Nativo
+### 2.2 Decision: Native bevy_ui
 
-**Motivazione:**
-1. **Compatibilità Bevy**: Segue la direzione ufficiale del motore
-2. **ECS Integration**: I widget sono entità, query native
-3. **No dipendenze extra**: Riduce complessità e conflitti versioni
-4. **Future-proof**: Bevy sta attivamente migliorando il sistema UI
+**Motivation:**
+1. **Bevy Compatibility**: Follows the engine's official direction
+2. **ECS Integration**: Widgets are entities, native queries
+3. **No extra dependencies**: Reduces complexity and version conflicts
+4. **Future-proof**: Bevy is actively improving the UI system
 
-**Trade-off accettato:**
-- Maggiore verbosità lato Rust (non visibile agli script)
-- Necessità di costruire astrazione per gli script
+**Accepted trade-off:**
+- More verbosity on the Rust side (not visible to scripts)
+- Need to build abstraction for scripts
 
 ---
 
-## 3. Design del Sistema Widget
+## 3. Widget System Design
 
-### 3.1 Gerarchia Widget
+### 3.1 Widget Hierarchy
 
 ```
 Window (Bevy Entity)
@@ -114,20 +114,20 @@ Window (Bevy Entity)
                 └── ... (nested widgets)
 ```
 
-### 3.2 Widget Supportati (Fase 1)
+### 3.2 Supported Widgets (Phase 1)
 
-| Widget | Componenti Bevy | Descrizione |
+| Widget | Bevy Components | Description |
 |--------|-----------------|-------------|
-| `Container` | `Node` | Layout flexbox/grid |
-| `Text` | `Node`, `Text`, `TextColor` | Testo statico o dinamico |
-| `Button` | `Node`, `Button`, `BackgroundColor`, `BorderColor` | Pulsante cliccabile |
-| `Image` | `Node`, `UiImage` | Immagine da asset |
-| `Panel` | `Node`, `BackgroundColor` | Contenitore con sfondo |
+| `Container` | `Node` | Flexbox/grid layout |
+| `Text` | `Node`, `Text`, `TextColor` | Static or dynamic text |
+| `Button` | `Node`, `Button`, `BackgroundColor`, `BorderColor` | Clickable button |
+| `Image` | `Node`, `UiImage` | Image from asset |
+| `Panel` | `Node`, `BackgroundColor` | Container with background |
 
-### 3.3 Sistema di ID Widget
+### 3.3 Widget ID System
 
 ```rust
-// Ogni widget ha un ID univoco generato da Staminal
+// Each widget has a unique ID generated by Staminal
 pub struct WidgetId(u64);
 
 // Registry in BevyEngine
@@ -137,10 +137,10 @@ pub struct WidgetRegistry {
 }
 ```
 
-### 3.4 Componente Marker
+### 3.4 Marker Component
 
 ```rust
-/// Marca un'entità come widget Staminal
+/// Marks an entity as a Staminal widget
 #[derive(Component)]
 pub struct StamWidget {
     pub id: u64,
@@ -160,24 +160,24 @@ pub enum WidgetType {
 
 ---
 
-## 4. API Core (Language-Agnostic)
+## 4. Core API (Language-Agnostic)
 
-L'API core è definita in Rust nel modulo `stam_mod_runtimes::api::graphic`. Ogni runtime adapter traduce queste strutture nel proprio linguaggio.
+The core API is defined in Rust in the `stam_mod_runtimes::api::graphic` module. Each runtime adapter translates these structures into its own language.
 
-### 4.1 Principi di Design
+### 4.1 Design Principles
 
-1. **Strutture dati semplici**: Solo tipi primitivi e struct serializzabili
-2. **ID-based references**: Widget referenziati tramite `u64` ID, non puntatori
-3. **Async by default**: Tutte le operazioni che comunicano con Bevy sono async
-4. **Eventi via channel**: Callback implementate come eventi, non come function pointers
-5. **No language-specific types**: Nessun `Function`, `Closure`, o tipo specifico del linguaggio
+1. **Simple data structures**: Only primitive types and serializable structs
+2. **ID-based references**: Widgets referenced via `u64` ID, not pointers
+3. **Async by default**: All operations communicating with Bevy are async
+4. **Events via channel**: Callbacks implemented as events, not as function pointers
+5. **No language-specific types**: No `Function`, `Closure`, or language-specific types
 
-### 4.2 Tipi Core Rust
+### 4.2 Core Rust Types
 
 ```rust
 // In apps/shared/stam_mod_runtimes/src/api/graphic/widget.rs
 
-/// Tipi di widget supportati
+/// Supported widget types
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum WidgetType {
     Container,
@@ -187,10 +187,10 @@ pub enum WidgetType {
     Panel,
 }
 
-/// Configurazione widget (serializzabile per tutti i runtime)
+/// Widget configuration (serializable for all runtimes)
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct WidgetConfig {
-    /// ID del widget padre (None = root della finestra)
+    /// Parent widget ID (None = window root)
     pub parent_id: Option<u64>,
 
     // === Layout ===
@@ -200,7 +200,7 @@ pub struct WidgetConfig {
     pub align_items: Option<AlignItems>,
     pub gap: Option<f32>,
 
-    // === Dimensioni ===
+    // === Dimensions ===
     pub width: Option<SizeValue>,
     pub height: Option<SizeValue>,
     pub min_width: Option<SizeValue>,
@@ -212,81 +212,81 @@ pub struct WidgetConfig {
     pub margin: Option<EdgeInsets>,
     pub padding: Option<EdgeInsets>,
 
-    // === Aspetto e Trasparenza ===
-    pub background_color: Option<ColorValue>,    // RGBA con alpha
-    pub border_color: Option<ColorValue>,        // RGBA con alpha
+    // === Appearance and Transparency ===
+    pub background_color: Option<ColorValue>,    // RGBA with alpha
+    pub border_color: Option<ColorValue>,        // RGBA with alpha
     pub border_width: Option<EdgeInsets>,
     pub border_radius: Option<f32>,
-    pub opacity: Option<f32>,                    // 0.0-1.0, opacità globale del widget
-    pub blend_mode: Option<BlendMode>,           // Modalità di fusione
+    pub opacity: Option<f32>,                    // 0.0-1.0, global widget opacity
+    pub blend_mode: Option<BlendMode>,           // Blend mode
 
     // === Background Image ===
-    pub background_image: Option<ImageConfig>,   // Immagine di sfondo (alternativa a background_color)
+    pub background_image: Option<ImageConfig>,   // Background image (alternative to background_color)
 
-    // === Text e Font ===
+    // === Text and Font ===
     pub content: Option<String>,
-    pub font: Option<FontConfig>,                // Configurazione font completa
-    pub font_color: Option<ColorValue>,          // RGBA con alpha
+    pub font: Option<FontConfig>,                // Complete font configuration
+    pub font_color: Option<ColorValue>,          // RGBA with alpha
     pub text_align: Option<TextAlign>,
-    pub text_shadow: Option<ShadowConfig>,       // Ombra del testo
+    pub text_shadow: Option<ShadowConfig>,       // Text shadow
 
     // === Button ===
     pub label: Option<String>,
-    pub hover_color: Option<ColorValue>,         // RGBA con alpha
-    pub pressed_color: Option<ColorValue>,       // RGBA con alpha
+    pub hover_color: Option<ColorValue>,         // RGBA with alpha
+    pub pressed_color: Option<ColorValue>,       // RGBA with alpha
     pub disabled: Option<bool>,
-    pub disabled_color: Option<ColorValue>,      // Colore quando disabilitato
+    pub disabled_color: Option<ColorValue>,      // Color when disabled
 
     // === Image Widget ===
-    pub image: Option<ImageConfig>,              // Per widget di tipo Image
+    pub image: Option<ImageConfig>,              // For Image type widgets
 }
 
-/// Configurazione immagine (per background o widget Image)
+/// Image configuration (for background or Image widget)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImageConfig {
-    /// Percorso dell'asset immagine (relativo alla cartella mod o asset)
+    /// Image asset path (relative to mod or asset folder)
     pub path: String,
-    /// Modalità di scala
+    /// Scale mode
     pub scale_mode: Option<ImageScaleMode>,
-    /// Tint color (moltiplicato con i pixel dell'immagine)
+    /// Tint color (multiplied with image pixels)
     pub tint: Option<ColorValue>,
-    /// Opacità dell'immagine (0.0-1.0)
+    /// Image opacity (0.0-1.0)
     pub opacity: Option<f32>,
-    /// Flip orizzontale
+    /// Horizontal flip
     pub flip_x: Option<bool>,
-    /// Flip verticale
+    /// Vertical flip
     pub flip_y: Option<bool>,
-    /// Regione dell'immagine da mostrare (per sprite sheets)
+    /// Image region to show (for sprite sheets)
     pub source_rect: Option<RectValue>,
 }
 
-/// Configurazione font
+/// Font configuration
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FontConfig {
-    /// Nome o percorso del font (es. "Roboto", "fonts/custom.ttf")
+    /// Font name or path (e.g., "Roboto", "fonts/custom.ttf")
     pub family: String,
-    /// Dimensione in pixel
+    /// Size in pixels
     pub size: f32,
-    /// Peso del font
+    /// Font weight
     pub weight: Option<FontWeight>,
-    /// Stile (normale, italico)
+    /// Style (normal, italic)
     pub style: Option<FontStyle>,
-    /// Spaziatura tra caratteri
+    /// Letter spacing
     pub letter_spacing: Option<f32>,
-    /// Altezza della linea (moltiplicatore)
+    /// Line height (multiplier)
     pub line_height: Option<f32>,
 }
 
-/// Configurazione ombra (per testo o widget)
+/// Shadow configuration (for text or widgets)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ShadowConfig {
-    pub color: ColorValue,           // RGBA con alpha
+    pub color: ColorValue,           // RGBA with alpha
     pub offset_x: f32,
     pub offset_y: f32,
     pub blur_radius: Option<f32>,
 }
 
-/// Rettangolo (per source_rect delle immagini)
+/// Rectangle (for image source_rect)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RectValue {
     pub x: f32,
@@ -295,7 +295,7 @@ pub struct RectValue {
     pub height: f32,
 }
 
-/// Valore di dimensione (supporta px, %, auto)
+/// Size value (supports px, %, auto)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum SizeValue {
     Px(f32),
@@ -303,7 +303,7 @@ pub enum SizeValue {
     Auto,
 }
 
-/// Insets per margin/padding/border (top, right, bottom, left)
+/// Insets for margin/padding/border (top, right, bottom, left)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct EdgeInsets {
     pub top: f32,
@@ -312,61 +312,61 @@ pub struct EdgeInsets {
     pub left: f32,
 }
 
-/// Colore (RGBA 0.0-1.0) con supporto completo per trasparenza
+/// Color (RGBA 0.0-1.0) with full transparency support
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ColorValue {
     pub r: f32,    // 0.0-1.0
     pub g: f32,    // 0.0-1.0
     pub b: f32,    // 0.0-1.0
-    pub a: f32,    // 0.0-1.0 (0 = trasparente, 1 = opaco)
+    pub a: f32,    // 0.0-1.0 (0 = transparent, 1 = opaque)
 }
 
 impl ColorValue {
-    /// Crea colore da hex string (es. "#FF0000", "#FF0000FF", "rgba(255,0,0,0.5)")
+    /// Create color from hex string (e.g., "#FF0000", "#FF0000FF", "rgba(255,0,0,0.5)")
     pub fn from_hex(hex: &str) -> Result<Self, ColorParseError>;
 
-    /// Crea colore con alpha specifico
+    /// Create color with specific alpha
     pub fn with_alpha(self, alpha: f32) -> Self;
 
-    /// Crea colore completamente trasparente
+    /// Create fully transparent color
     pub fn transparent() -> Self { Self { r: 0.0, g: 0.0, b: 0.0, a: 0.0 } }
 
-    /// Colori predefiniti
+    /// Predefined colors
     pub fn white() -> Self { Self { r: 1.0, g: 1.0, b: 1.0, a: 1.0 } }
     pub fn black() -> Self { Self { r: 0.0, g: 0.0, b: 0.0, a: 1.0 } }
 }
 
-/// Modalità di fusione per effetti grafici avanzati
+/// Blend mode for advanced graphic effects
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BlendMode {
-    /// Normale (default) - alpha blending standard
+    /// Normal (default) - standard alpha blending
     Normal,
-    /// Moltiplica i colori (scurisce)
+    /// Multiply colors (darkens)
     Multiply,
-    /// Schermo (schiarisce)
+    /// Screen (lightens)
     Screen,
-    /// Overlay (combinazione di multiply e screen)
+    /// Overlay (combination of multiply and screen)
     Overlay,
-    /// Additivo (aggiunge luminosità)
+    /// Additive (adds brightness)
     Add,
-    /// Sottrae colore
+    /// Subtract color
     Subtract,
 }
 
-/// Modalità di scala per immagini
+/// Scale mode for images
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ImageScaleMode {
-    /// Scala per riempire mantenendo aspect ratio (può tagliare)
+    /// Scale to fill maintaining aspect ratio (may crop)
     Fill,
-    /// Scala per contenere mantenendo aspect ratio (può lasciare spazi)
+    /// Scale to contain maintaining aspect ratio (may leave gaps)
     Fit,
-    /// Scala per riempire ignorando aspect ratio
+    /// Scale to fill ignoring aspect ratio
     Stretch,
-    /// Nessuna scala, dimensione originale
+    /// No scaling, original size
     None,
-    /// Ripete l'immagine come pattern (tile)
+    /// Repeat image as pattern (tile)
     Tile,
-    /// 9-slice scaling per UI (preserva bordi)
+    /// 9-slice scaling for UI (preserves borders)
     NineSlice {
         top: f32,
         right: f32,
@@ -375,7 +375,7 @@ pub enum ImageScaleMode {
     },
 }
 
-/// Peso del font
+/// Font weight
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FontWeight {
     Thin,       // 100
@@ -388,7 +388,7 @@ pub enum FontWeight {
     Black,      // 900
 }
 
-/// Stile del font
+/// Font style
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FontStyle {
     Normal,
@@ -396,7 +396,7 @@ pub enum FontStyle {
     Oblique,
 }
 
-/// Informazioni su un widget (restituito da query)
+/// Widget information (returned from queries)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WidgetInfo {
     pub id: u64,
@@ -406,7 +406,7 @@ pub struct WidgetInfo {
     pub children_ids: Vec<u64>,
 }
 
-/// Valore di proprietà dinamico (per update)
+/// Dynamic property value (for updates)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum PropertyValue {
     String(String),
@@ -417,7 +417,7 @@ pub enum PropertyValue {
 }
 ```
 
-### 4.3 API GraphicProxy (estesa per Widget)
+### 4.3 GraphicProxy API (Extended for Widgets)
 
 ```rust
 // In apps/shared/stam_mod_runtimes/src/api/graphic/proxy.rs
@@ -425,7 +425,7 @@ pub enum PropertyValue {
 impl GraphicProxy {
     // === Widget Creation ===
 
-    /// Crea un nuovo widget nella finestra specificata
+    /// Create a new widget in the specified window
     pub async fn create_widget(
         &self,
         window_id: u64,
@@ -435,7 +435,7 @@ impl GraphicProxy {
 
     // === Widget Modification ===
 
-    /// Aggiorna una proprietà del widget
+    /// Update a widget property
     pub async fn update_widget_property(
         &self,
         widget_id: u64,
@@ -443,7 +443,7 @@ impl GraphicProxy {
         value: PropertyValue,
     ) -> Result<(), GraphicError>;
 
-    /// Aggiorna più proprietà in una sola chiamata
+    /// Update multiple properties in a single call
     pub async fn update_widget_config(
         &self,
         widget_id: u64,
@@ -452,40 +452,40 @@ impl GraphicProxy {
 
     // === Widget Hierarchy ===
 
-    /// Sposta un widget sotto un nuovo parent
+    /// Move a widget under a new parent
     pub async fn reparent_widget(
         &self,
         widget_id: u64,
         new_parent_id: Option<u64>,
     ) -> Result<(), GraphicError>;
 
-    /// Distrugge un widget e tutti i suoi figli
+    /// Destroy a widget and all its children
     pub async fn destroy_widget(&self, widget_id: u64) -> Result<(), GraphicError>;
 
-    /// Distrugge tutti i widget di una finestra
+    /// Destroy all widgets in a window
     pub async fn clear_window_widgets(&self, window_id: u64) -> Result<(), GraphicError>;
 
     // === Widget Query ===
 
-    /// Ottiene informazioni su un widget
+    /// Get information about a widget
     pub fn get_widget_info(&self, widget_id: u64) -> Option<WidgetInfo>;
 
-    /// Ottiene tutti i widget di una finestra
+    /// Get all widgets in a window
     pub fn get_window_widgets(&self, window_id: u64) -> Vec<WidgetInfo>;
 
-    /// Ottiene il root widget di una finestra
+    /// Get the root widget of a window
     pub fn get_window_root_widget(&self, window_id: u64) -> Option<u64>;
 
     // === Event Subscription ===
 
-    /// Registra interesse per eventi di un widget (click, hover, etc.)
+    /// Register interest in widget events (click, hover, etc.)
     pub async fn subscribe_widget_events(
         &self,
         widget_id: u64,
         event_types: Vec<WidgetEventType>,
     ) -> Result<(), GraphicError>;
 
-    /// Rimuove interesse per eventi di un widget
+    /// Remove interest in widget events
     pub async fn unsubscribe_widget_events(
         &self,
         widget_id: u64,
@@ -494,33 +494,33 @@ impl GraphicProxy {
 
     // === Asset Management (Font & Images) ===
 
-    /// Carica un font custom da file
-    /// Restituisce un handle che può essere usato in FontConfig.family
+    /// Load a custom font from file
+    /// Returns a handle that can be used in FontConfig.family
     pub async fn load_font(
         &self,
-        path: &str,           // Percorso relativo alla cartella mod/assets
-        alias: Option<&str>,  // Nome da usare per riferirsi al font (default: nome file)
+        path: &str,           // Path relative to mod/assets folder
+        alias: Option<&str>,  // Name to use for referencing the font (default: filename)
     ) -> Result<String, GraphicError>;
 
-    /// Precarica un'immagine (opzionale, per evitare lag al primo uso)
+    /// Preload an image (optional, to avoid lag on first use)
     pub async fn preload_image(
         &self,
         path: &str,
     ) -> Result<(), GraphicError>;
 
-    /// Ottiene la lista dei font caricati
+    /// Get list of loaded fonts
     pub fn get_loaded_fonts(&self) -> Vec<FontInfo>;
 
-    /// Scarica un font dalla memoria
+    /// Unload a font from memory
     pub async fn unload_font(&self, alias: &str) -> Result<(), GraphicError>;
 }
 
-/// Informazioni su un font caricato
+/// Information about a loaded font
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct FontInfo {
     pub alias: String,
     pub path: String,
-    pub family_name: Option<String>,  // Nome interno del font se disponibile
+    pub family_name: Option<String>,  // Internal font name if available
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -531,12 +531,12 @@ pub enum WidgetEventType {
 }
 ```
 
-### 4.4 Eventi Widget
+### 4.4 Widget Events
 
 ```rust
 // In apps/shared/stam_mod_runtimes/src/api/graphic/events.rs
 
-/// Eventi widget (inviati da Bevy al worker thread)
+/// Widget events (sent from Bevy to worker thread)
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum WidgetEvent {
     Created {
@@ -572,17 +572,17 @@ pub enum WidgetEvent {
 
 ---
 
-## 5. Binding per Runtime Specifici
+## 5. Runtime-Specific Bindings
 
-Ogni runtime adapter implementa i binding verso l'API core. La logica core rimane in Rust, i binding traducono solo i tipi.
+Each runtime adapter implements bindings to the core API. The core logic remains in Rust, bindings only translate types.
 
-### 5.1 Architettura Binding
+### 5.1 Binding Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                     GraphicProxy (Rust Core)                     │
 │  • create_widget(), update_widget_property(), destroy_widget()  │
-│  • Nessuna dipendenza da linguaggi specifici                    │
+│  • No dependency on specific languages                          │
 └─────────────────────────────────────────────────────────────────┘
                               ↑
         ┌─────────────────────┼─────────────────────┐
@@ -596,20 +596,20 @@ Ogni runtime adapter implementa i binding verso l'API core. La logica core riman
 └───────────────┘     └───────────────┘     └───────────────┘
 ```
 
-### 5.2 JavaScript Binding (Esempio Attuale)
+### 5.2 JavaScript Binding (Current Example)
 
 ```javascript
-// === Caricamento Font Custom ===
+// === Custom Font Loading ===
 await graphic.loadFont("fonts/Roboto-Bold.ttf", "roboto-bold");
 await graphic.loadFont("fonts/GameFont.otf", "game-font");
 
-// === Creazione UI con trasparenza e immagini ===
+// === UI Creation with transparency and images ===
 const mainPanel = await window.createWidget("panel", {
     width: "100%",
     height: "100%",
-    // Background semitrasparente
-    backgroundColor: "rgba(0, 0, 0, 0.7)",  // Nero con 70% opacità
-    // Oppure immagine di sfondo
+    // Semi-transparent background
+    backgroundColor: "rgba(0, 0, 0, 0.7)",  // Black with 70% opacity
+    // Or background image
     backgroundImage: {
         path: "textures/background.png",
         scaleMode: "fill",
@@ -617,16 +617,16 @@ const mainPanel = await window.createWidget("panel", {
     }
 });
 
-// === Testo con font custom e ombra ===
+// === Text with custom font and shadow ===
 const title = await window.createWidget("text", {
     parent: mainPanel.id,
     content: "Game Title",
     font: {
-        family: "game-font",  // Font caricato sopra
+        family: "game-font",  // Font loaded above
         size: 48,
         weight: "bold"
     },
-    fontColor: "rgba(255, 255, 255, 0.9)",  // Bianco quasi opaco
+    fontColor: "rgba(255, 255, 255, 0.9)",  // Almost opaque white
     textShadow: {
         color: "rgba(0, 0, 0, 0.5)",
         offsetX: 2,
@@ -636,31 +636,31 @@ const title = await window.createWidget("text", {
     textAlign: "center"
 });
 
-// === Button con stati trasparenti ===
+// === Button with transparent states ===
 const button = await window.createWidget("button", {
     parent: mainPanel.id,
     label: "Start Game",
     font: { family: "roboto-bold", size: 18 },
-    backgroundColor: "rgba(74, 144, 217, 0.8)",    // Blu semitrasparente
-    hoverColor: "rgba(91, 160, 233, 0.9)",         // Più luminoso al hover
-    pressedColor: "rgba(58, 128, 201, 1.0)",       // Opaco quando premuto
+    backgroundColor: "rgba(74, 144, 217, 0.8)",    // Semi-transparent blue
+    hoverColor: "rgba(91, 160, 233, 0.9)",         // Brighter on hover
+    pressedColor: "rgba(58, 128, 201, 1.0)",       // Opaque when pressed
     borderRadius: 8,
     padding: [12, 24, 12, 24]
 });
 
-// === Widget Image per icone/sprite ===
+// === Image widget for icons/sprites ===
 const icon = await window.createWidget("image", {
     parent: button.id,
     image: {
         path: "icons/play.png",
-        tint: "rgba(255, 255, 255, 0.9)",  // Tinta bianca
+        tint: "rgba(255, 255, 255, 0.9)",  // White tint
         scaleMode: "fit"
     },
     width: 24,
     height: 24
 });
 
-// === Panel con 9-slice per bordi ===
+// === Panel with 9-slice for borders ===
 const dialogBox = await window.createWidget("panel", {
     backgroundImage: {
         path: "ui/dialog-frame.png",
@@ -669,7 +669,7 @@ const dialogBox = await window.createWidget("panel", {
             top: 16, right: 16, bottom: 16, left: 16
         }
     },
-    opacity: 0.95  // Opacità globale del widget
+    opacity: 0.95  // Global widget opacity
 });
 
 button.onClick((event) => {
@@ -680,10 +680,10 @@ await button.setProperty("label", "Clicked!");
 await button.destroy();
 ```
 
-### 5.3 Lua Binding (Esempio Futuro)
+### 5.3 Lua Binding (Future Example)
 
 ```lua
--- Uso in Lua
+-- Usage in Lua
 local button = window:createWidget("button", {
     label = "Click Me",
     backgroundColor = "#4A90D9"
@@ -697,10 +697,10 @@ button:setProperty("label", "Clicked!")
 button:destroy()
 ```
 
-### 5.4 C# Binding (Esempio Futuro)
+### 5.4 C# Binding (Future Example)
 
 ```csharp
-// Uso in C#
+// Usage in C#
 var button = await window.CreateWidget("button", new WidgetConfig {
     Label = "Click Me",
     BackgroundColor = "#4A90D9"
@@ -714,17 +714,17 @@ await button.SetProperty("label", "Clicked!");
 await button.Destroy();
 ```
 
-### 5.5 Rust Native Mod (Esempio Futuro)
+### 5.5 Rust Native Mod (Future Example)
 
 ```rust
-// Uso in Rust (mod nativo)
+// Usage in Rust (native mod)
 let button = window.create_widget(WidgetType::Button, WidgetConfig {
     label: Some("Click Me".into()),
     background_color: Some(ColorValue::from_hex("#4A90D9")),
     ..Default::default()
 }).await?;
 
-// Callback via evento
+// Callback via event
 system.on_widget_event(button.id, |event| {
     if let WidgetEvent::Clicked { x, y, .. } = event {
         println!("Clicked at {}, {}", x, y);
@@ -735,21 +735,21 @@ button.set_property("label", PropertyValue::String("Clicked!".into())).await?;
 button.destroy().await?;
 ```
 
-### 5.6 Gestione Callback Cross-Language
+### 5.6 Cross-Language Callback Handling
 
-Le callback sono gestite tramite il sistema eventi esistente, non come function pointers:
+Callbacks are handled through the existing event system, not as function pointers:
 
 ```rust
-// Nel runtime adapter (es. JS)
+// In runtime adapter (e.g., JS)
 impl WidgetJS {
     pub fn on_click(&self, ctx: Ctx, handler: Function) -> Result<()> {
-        // 1. Registra interesse presso GraphicProxy
+        // 1. Register interest with GraphicProxy
         self.graphic_proxy.subscribe_widget_events(
             self.widget_id,
             vec![WidgetEventType::Click]
         );
 
-        // 2. Memorizza handler nel registry locale del runtime
+        // 2. Store handler in the runtime's local registry
         self.callback_registry.register(
             self.widget_id,
             "click",
@@ -760,7 +760,7 @@ impl WidgetJS {
     }
 }
 
-// Quando arriva l'evento da Bevy:
+// When event arrives from Bevy:
 fn dispatch_widget_event(event: WidgetEvent, runtime: &mut JsRuntime) {
     match event {
         WidgetEvent::Clicked { widget_id, x, y, button } => {
@@ -776,15 +776,15 @@ fn dispatch_widget_event(event: WidgetEvent, runtime: &mut JsRuntime) {
 
 ---
 
-## 6. Implementazione Rust Core
+## 6. Rust Core Implementation
 
-### 6.1 Nuovi Comandi GraphicCommand
+### 6.1 New GraphicCommand Types
 
 ```rust
 // In apps/shared/stam_mod_runtimes/src/api/graphic/commands.rs
 
 pub enum GraphicCommand {
-    // ... comandi esistenti ...
+    // ... existing commands ...
 
     // Widget commands
     CreateWidget {
@@ -826,7 +826,7 @@ pub struct WidgetConfig {
     pub align_items: Option<AlignItems>,
     pub gap: Option<f32>,
 
-    // Dimensioni
+    // Dimensions
     pub width: Option<Val>,
     pub height: Option<Val>,
     pub min_width: Option<Val>,
@@ -838,7 +838,7 @@ pub struct WidgetConfig {
     pub margin: Option<UiRect>,
     pub padding: Option<UiRect>,
 
-    // Aspetto
+    // Appearance
     pub background_color: Option<Color>,
     pub border_color: Option<Color>,
     pub border_width: Option<UiRect>,
@@ -871,13 +871,13 @@ pub enum PropertyValue {
 }
 ```
 
-### 6.2 Nuovi Eventi GraphicEvent
+### 6.2 New GraphicEvent Types
 
 ```rust
 // In apps/shared/stam_mod_runtimes/src/api/graphic/events.rs
 
 pub enum GraphicEvent {
-    // ... eventi esistenti ...
+    // ... existing events ...
 
     // Widget events
     WidgetCreated {
@@ -916,12 +916,12 @@ pub enum GraphicEvent {
 }
 ```
 
-### 6.3 Sistema Bevy per Widget
+### 6.3 Bevy Widget System
 
 ```rust
 // In apps/stam_client/src/engines/bevy.rs
 
-/// Registry dei widget per window
+/// Widget registry per window
 #[derive(Resource, Default)]
 pub struct WidgetRegistry {
     widgets: HashMap<u64, Entity>,
@@ -929,7 +929,7 @@ pub struct WidgetRegistry {
     window_root_nodes: HashMap<u64, Entity>,
 }
 
-/// Marker component per widget Staminal
+/// Marker component for Staminal widgets
 #[derive(Component)]
 pub struct StamWidget {
     pub id: u64,
@@ -937,7 +937,7 @@ pub struct StamWidget {
     pub widget_type: WidgetType,
 }
 
-/// Component per tracciare callback registrate
+/// Component for tracking registered callbacks
 #[derive(Component, Default)]
 pub struct WidgetCallbacks {
     pub on_click: bool,
@@ -945,7 +945,7 @@ pub struct WidgetCallbacks {
     pub on_focus: bool,
 }
 
-/// Component per colori hover/pressed dei button
+/// Component for button hover/pressed colors
 #[derive(Component)]
 pub struct ButtonColors {
     pub normal: Color,
@@ -953,7 +953,7 @@ pub struct ButtonColors {
     pub pressed: Color,
 }
 
-/// Sistema per processare comandi widget
+/// System for processing widget commands
 fn process_widget_commands(
     mut commands: Commands,
     mut widget_registry: ResMut<WidgetRegistry>,
@@ -961,14 +961,14 @@ fn process_widget_commands(
     cmd_rx: Res<CommandReceiverRes>,
     event_tx: Res<EventSenderRes>,
     mut query: Query<&mut Node>,
-    // ... altre query necessarie
+    // ... other necessary queries
 ) {
     while let Ok(cmd) = cmd_rx.0.try_recv() {
         match cmd {
             GraphicCommand::CreateWidget {
                 window_id, widget_id, parent_id, widget_type, config, response_tx
             } => {
-                // Creare l'entità widget appropriata
+                // Create the appropriate widget entity
                 let entity = create_widget_entity(
                     &mut commands,
                     &widget_registry,
@@ -990,12 +990,12 @@ fn process_widget_commands(
                     widget_type,
                 });
             }
-            // ... altri comandi
+            // ... other commands
         }
     }
 }
 
-/// Sistema per gestire interazioni widget
+/// System for handling widget interactions
 fn handle_widget_interactions(
     mut interaction_query: Query<
         (&Interaction, &StamWidget, &WidgetCallbacks, Option<&ButtonColors>, &mut BackgroundColor),
@@ -1004,7 +1004,7 @@ fn handle_widget_interactions(
     event_tx: Res<EventSenderRes>,
 ) {
     for (interaction, stam_widget, callbacks, button_colors, mut bg_color) in interaction_query.iter_mut() {
-        // Aggiornare colore per button
+        // Update color for button
         if let Some(colors) = button_colors {
             *bg_color = match *interaction {
                 Interaction::Pressed => BackgroundColor(colors.pressed),
@@ -1013,12 +1013,12 @@ fn handle_widget_interactions(
             };
         }
 
-        // Inviare evento al worker thread
+        // Send event to worker thread
         if callbacks.on_click && *interaction == Interaction::Pressed {
             let _ = event_tx.0.try_send(GraphicEvent::WidgetClicked {
                 window_id: stam_widget.window_id,
                 widget_id: stam_widget.id,
-                x: 0.0, // TODO: ottenere posizione reale
+                x: 0.0, // TODO: get actual position
                 y: 0.0,
                 button: MouseButton::Left,
             });
@@ -1037,7 +1037,7 @@ fn handle_widget_interactions(
     }
 }
 
-/// Funzione helper per creare entità widget
+/// Helper function to create widget entities
 fn create_widget_entity(
     commands: &mut Commands,
     widget_registry: &WidgetRegistry,
@@ -1048,16 +1048,16 @@ fn create_widget_entity(
     widget_type: WidgetType,
     config: WidgetConfig,
 ) -> Entity {
-    // Determinare parent entity
+    // Determine parent entity
     let parent_entity = match parent_id {
         Some(pid) => widget_registry.widgets.get(&pid).copied(),
         None => widget_registry.window_root_nodes.get(&window_id).copied(),
     };
 
-    // Costruire Node base
+    // Build base Node
     let node = build_node_from_config(&config);
 
-    // Creare entità in base al tipo
+    // Create entity based on type
     match widget_type {
         WidgetType::Container => {
             let mut entity_commands = commands.spawn((
@@ -1111,7 +1111,7 @@ fn create_widget_entity(
                 WidgetCallbacks { on_click: true, on_hover: true, ..default() },
             ));
 
-            // Aggiungere label come figlio
+            // Add label as child
             entity_commands.with_children(|parent| {
                 parent.spawn((
                     Text::new(label),
@@ -1126,18 +1126,18 @@ fn create_widget_entity(
 
             entity_commands.id()
         }
-        // ... altri tipi
+        // ... other types
     }
 }
 ```
 
-### 6.4 Estensione GraphicProxy
+### 6.4 GraphicProxy Extension
 
 ```rust
 // In apps/shared/stam_mod_runtimes/src/api/graphic/proxy.rs
 
 impl GraphicProxy {
-    // ... metodi esistenti ...
+    // ... existing methods ...
 
     pub async fn create_widget(
         &self,
@@ -1180,16 +1180,16 @@ impl GraphicProxy {
         property: String,
         value: PropertyValue,
     ) -> Result<(), GraphicError> {
-        // ... implementazione simile ...
+        // ... similar implementation ...
     }
 
     pub async fn destroy_widget(&self, widget_id: u64) -> Result<(), GraphicError> {
-        // ... implementazione simile ...
+        // ... similar implementation ...
     }
 }
 ```
 
-### 6.5 Binding JavaScript per Widget (Esempio)
+### 6.5 JavaScript Widget Binding (Example)
 
 ```rust
 // In apps/shared/stam_mod_runtimes/src/adapters/js/bindings.rs
@@ -1252,20 +1252,20 @@ impl WidgetJS {
         Ok(())
     }
 
-    // Callback methods - registrano l'interesse nel GraphicProxy
+    // Callback methods - register interest in GraphicProxy
     #[qjs(rename = "onClick")]
     pub fn on_click<'js>(&self, ctx: Ctx<'js>, handler: Function<'js>) -> rquickjs::Result<()> {
-        // Registrare callback nel sistema eventi JavaScript
+        // Register callback in JavaScript event system
         let event_name = format!("widget:{}:click", self.widget_id);
-        // ... registrazione handler ...
+        // ... handler registration ...
         Ok(())
     }
 }
 
-// Estensione WindowJS per widget
+// WindowJS extension for widgets
 #[rquickjs::methods]
 impl WindowJS {
-    // ... metodi esistenti ...
+    // ... existing methods ...
 
     #[qjs(rename = "createWidget")]
     pub async fn create_widget<'js>(
@@ -1297,29 +1297,29 @@ impl WindowJS {
 
     #[qjs(rename = "getWidget")]
     pub fn get_widget(&self, widget_id: u64) -> Option<WidgetJS> {
-        // ... implementazione ...
+        // ... implementation ...
     }
 
     #[qjs(rename = "clearWidgets")]
     pub async fn clear_widgets<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<()> {
-        // ... implementazione ...
+        // ... implementation ...
     }
 }
 ```
 
 ---
 
-## 7. Sistema di Eventi e Callback
+## 7. Event and Callback System
 
-### 7.1 Flusso Eventi Widget (Language-Agnostic)
+### 7.1 Widget Event Flow (Language-Agnostic)
 
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   Bevy Main Thread                  │
 │  ┌──────────────────────────────────────────────┐  │
 │  │ handle_widget_interactions()                 │  │
-│  │  • Detecta Interaction changes               │  │
-│  │  • Invia WidgetEvent::Clicked                │  │
+│  │  • Detects Interaction changes               │  │
+│  │  • Sends WidgetEvent::Clicked                │  │
 │  └──────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────┘
            ↓ event_tx (tokio::mpsc)
@@ -1327,41 +1327,41 @@ impl WindowJS {
 │                  Worker Thread                      │
 │  ┌──────────────────────────────────────────────┐  │
 │  │ Main Event Loop                              │  │
-│  │  • Riceve WidgetEvent                        │  │
-│  │  • Chiama RuntimeManager::dispatch_event()   │  │
+│  │  • Receives WidgetEvent                      │  │
+│  │  • Calls RuntimeManager::dispatch_event()   │  │
 │  └──────────────────────────────────────────────┘  │
 │           ↓                                         │
 │  ┌──────────────────────────────────────────────┐  │
 │  │ Runtime Adapter (JS, Lua, C#, etc.)          │  │
-│  │  • Trova callback registrate per widget_id   │  │
-│  │  • Esegue handler nel linguaggio specifico   │  │
+│  │  • Finds registered callbacks for widget_id  │  │
+│  │  • Executes handler in specific language     │  │
 │  └──────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────┘
 ```
 
-### 7.2 Trait per Callback Registry (Language-Agnostic)
+### 7.2 Callback Registry Trait (Language-Agnostic)
 
-Ogni runtime adapter implementa un proprio callback registry, ma tutti seguono lo stesso pattern:
+Each runtime adapter implements its own callback registry, but all follow the same pattern:
 
 ```rust
 // In stam_mod_runtimes/src/api/graphic/callbacks.rs
 
-/// Trait che ogni runtime adapter deve implementare per gestire callback widget
+/// Trait that each runtime adapter must implement to handle widget callbacks
 pub trait WidgetCallbackDispatcher: Send + Sync {
-    /// Registra interesse per un tipo di evento su un widget
+    /// Register interest in an event type for a widget
     fn subscribe(&mut self, widget_id: u64, event_type: WidgetEventType);
 
-    /// Rimuove interesse per un tipo di evento
+    /// Remove interest in an event type
     fn unsubscribe(&mut self, widget_id: u64, event_type: WidgetEventType);
 
-    /// Dispatch di un evento widget - il runtime specifico gestisce la callback
+    /// Dispatch a widget event - the specific runtime handles the callback
     fn dispatch(&self, event: &WidgetEvent);
 
-    /// Pulisce tutte le callback per un widget (chiamato quando il widget viene distrutto)
+    /// Clean up all callbacks for a widget (called when widget is destroyed)
     fn cleanup_widget(&mut self, widget_id: u64);
 }
 
-/// Registry base condiviso (solo tracking delle subscription, no callbacks)
+/// Shared base registry (only subscription tracking, no callbacks)
 #[derive(Default)]
 pub struct WidgetSubscriptionRegistry {
     subscriptions: HashMap<u64, HashSet<WidgetEventType>>,
@@ -1384,7 +1384,7 @@ impl WidgetSubscriptionRegistry {
 }
 ```
 
-### 7.3 Dispatch Eventi nel Main Loop
+### 7.3 Event Dispatch in Main Loop
 
 ```rust
 // In apps/stam_client/src/main.rs
@@ -1398,7 +1398,7 @@ fn handle_graphic_event(
         GraphicEvent::WidgetClicked { window_id, widget_id, x, y, button } => {
             let click_event = ClickEvent { widget_id, window_id, x, y, button };
 
-            // Dispatch al JavaScript runtime
+            // Dispatch to JavaScript runtime
             runtime_manager.dispatch_widget_event(
                 "click",
                 widget_id,
@@ -1414,36 +1414,36 @@ fn handle_graphic_event(
                 hover_event,
             );
         }
-        // ... altri eventi
+        // ... other events
     }
 }
 ```
 
 ---
 
-## 8. Piano di Implementazione
+## 8. Implementation Plan
 
-### Fase 1: Core API (Language-Agnostic) - Priorità Alta
+### Phase 1: Core API (Language-Agnostic) - High Priority
 
-#### 1.1 Definizione Tipi Core
-- [ ] Creare `widget.rs` in `stam_mod_runtimes/src/api/graphic/`
+#### 1.1 Core Type Definitions
+- [ ] Create `widget.rs` in `stam_mod_runtimes/src/api/graphic/`
   - [ ] `WidgetType` enum
-  - [ ] `WidgetConfig` struct (serializzabile)
-  - [ ] `SizeValue`, `EdgeInsets` (tipi layout)
-  - [ ] `ColorValue` con supporto RGBA e parsing hex/rgba()
-  - [ ] `BlendMode` enum per effetti di fusione
+  - [ ] `WidgetConfig` struct (serializable)
+  - [ ] `SizeValue`, `EdgeInsets` (layout types)
+  - [ ] `ColorValue` with RGBA support and hex/rgba() parsing
+  - [ ] `BlendMode` enum for blend effects
   - [ ] `ImageConfig` struct (path, scaleMode, tint, opacity, flip, sourceRect)
   - [ ] `ImageScaleMode` enum (Fill, Fit, Stretch, None, Tile, NineSlice)
   - [ ] `FontConfig` struct (family, size, weight, style, letterSpacing, lineHeight)
-  - [ ] `FontWeight`, `FontStyle` enum
-  - [ ] `ShadowConfig` struct per ombre testo/widget
-  - [ ] `RectValue` per sprite sheet regions
-  - [ ] `PropertyValue` enum per aggiornamenti dinamici
-  - [ ] `WidgetInfo` struct per query
+  - [ ] `FontWeight`, `FontStyle` enums
+  - [ ] `ShadowConfig` struct for text/widget shadows
+  - [ ] `RectValue` for sprite sheet regions
+  - [ ] `PropertyValue` enum for dynamic updates
+  - [ ] `WidgetInfo` struct for queries
   - [ ] `WidgetEventType` enum
 
-#### 1.2 Comandi e Eventi
-- [ ] Estendere `GraphicCommand` in `commands.rs`
+#### 1.2 Commands and Events
+- [ ] Extend `GraphicCommand` in `commands.rs`
   - [ ] `CreateWidget`
   - [ ] `UpdateWidgetProperty`
   - [ ] `UpdateWidgetConfig`
@@ -1455,188 +1455,188 @@ fn handle_graphic_event(
   - [ ] `LoadFont` (path, alias)
   - [ ] `UnloadFont` (alias)
   - [ ] `PreloadImage` (path)
-- [ ] Creare `WidgetEvent` enum in `events.rs`
+- [ ] Create `WidgetEvent` enum in `events.rs`
   - [ ] `Created`, `Destroyed`
   - [ ] `Clicked`, `Hovered`, `Focused`
 
-#### 1.3 Estensione GraphicProxy
-- [ ] Metodi async per widget in `proxy.rs`
+#### 1.3 GraphicProxy Extension
+- [ ] Async widget methods in `proxy.rs`
   - [ ] `create_widget()`
   - [ ] `update_widget_property()`, `update_widget_config()`
   - [ ] `destroy_widget()`, `clear_window_widgets()`
   - [ ] `reparent_widget()`
   - [ ] `subscribe_widget_events()`, `unsubscribe_widget_events()`
-- [ ] Metodi per asset management
+- [ ] Asset management methods
   - [ ] `load_font()`, `unload_font()`, `get_loaded_fonts()`
   - [ ] `preload_image()`
-- [ ] Metodi sync per query
+- [ ] Sync query methods
   - [ ] `get_widget_info()`, `get_window_widgets()`
   - [ ] `get_window_root_widget()`
-- [ ] Aggiungere `next_widget_id: AtomicU64`
-- [ ] Aggiungere `widgets: Arc<RwLock<HashMap<u64, WidgetInfo>>>`
-- [ ] Aggiungere `loaded_fonts: Arc<RwLock<HashMap<String, FontInfo>>>`
+- [ ] Add `next_widget_id: AtomicU64`
+- [ ] Add `widgets: Arc<RwLock<HashMap<u64, WidgetInfo>>>`
+- [ ] Add `loaded_fonts: Arc<RwLock<HashMap<String, FontInfo>>>`
 
-### Fase 2: Implementazione Bevy - Priorità Alta
+### Phase 2: Bevy Implementation - High Priority
 
-#### 2.1 Widget Registry e Asset Registry
-- [ ] Creare `WidgetRegistry` resource
-- [ ] Creare `FontRegistry` resource (alias → Handle<Font>)
-- [ ] Creare `ImageCache` resource (path → Handle<Image>)
-- [ ] Creare `StamWidget` component (marker)
-- [ ] Creare `WidgetEventSubscriptions` component
-- [ ] Creare `ButtonColors` component (normal, hover, pressed, disabled)
-- [ ] Creare `WidgetOpacity` component (per gestione trasparenza gerarchica)
+#### 2.1 Widget Registry and Asset Registry
+- [ ] Create `WidgetRegistry` resource
+- [ ] Create `FontRegistry` resource (alias → Handle<Font>)
+- [ ] Create `ImageCache` resource (path → Handle<Image>)
+- [ ] Create `StamWidget` component (marker)
+- [ ] Create `WidgetEventSubscriptions` component
+- [ ] Create `ButtonColors` component (normal, hover, pressed, disabled)
+- [ ] Create `WidgetOpacity` component (for hierarchical transparency management)
 
-#### 2.2 Sistema Comandi Widget
-- [ ] Implementare handling in `process_commands` o nuovo system
-- [ ] `create_widget_entity()` helper per ogni `WidgetType`
-- [ ] Gestione gerarchia parent-child con Bevy relations
-- [ ] Handling comandi `LoadFont`, `UnloadFont`, `PreloadImage`
+#### 2.2 Widget Command System
+- [ ] Implement handling in `process_commands` or new system
+- [ ] `create_widget_entity()` helper for each `WidgetType`
+- [ ] Parent-child hierarchy management with Bevy relations
+- [ ] Handling `LoadFont`, `UnloadFont`, `PreloadImage` commands
 
-#### 2.3 Sistema Rendering Avanzato
-- [ ] Sistema per applicare `opacity` a widget e figli
-- [ ] Sistema per applicare `BlendMode` (richiede shader custom o bevy_blend_modes)
-- [ ] Sistema per rendering `background_image` con tutte le opzioni
-- [ ] Sistema per 9-slice scaling
+#### 2.3 Advanced Rendering System
+- [ ] System for applying `opacity` to widgets and children
+- [ ] System for applying `BlendMode` (requires custom shader or bevy_blend_modes)
+- [ ] System for rendering `background_image` with all options
+- [ ] System for 9-slice scaling
 
-#### 2.4 Sistema Interazioni
+#### 2.4 Interaction System
 - [ ] `handle_widget_interactions` system
-- [ ] Query su `Changed<Interaction>` per widget
-- [ ] Invio eventi solo per widget con subscription attive
-- [ ] Gestione automatica colori button (incluso disabled)
+- [ ] Query on `Changed<Interaction>` for widgets
+- [ ] Send events only for widgets with active subscriptions
+- [ ] Automatic button color management (including disabled)
 
-### Fase 3: Binding JavaScript - Priorità Alta
+### Phase 3: JavaScript Binding - High Priority
 
-#### 3.1 Callback Registry JS-specific
-- [ ] Creare `JsWidgetCallbackRegistry` in `adapters/js/`
-- [ ] Implementare `WidgetCallbackDispatcher` trait
-- [ ] Gestire `PersistentFunction` per callback
+#### 3.1 JS-specific Callback Registry
+- [ ] Create `JsWidgetCallbackRegistry` in `adapters/js/`
+- [ ] Implement `WidgetCallbackDispatcher` trait
+- [ ] Handle `PersistentFunction` for callbacks
 
 #### 3.2 WidgetJS Class
-- [ ] Proprietà: `id`, `type`, `windowId`
-- [ ] Metodi: `setProperty()`, `destroy()`
-- [ ] Callback: `onClick()`, `onHover()`, `onFocus()`
-- [ ] Rimozione: `removeOnClick()`, `removeOnHover()`, `removeOnFocus()`
+- [ ] Properties: `id`, `type`, `windowId`
+- [ ] Methods: `setProperty()`, `destroy()`
+- [ ] Callbacks: `onClick()`, `onHover()`, `onFocus()`
+- [ ] Removal: `removeOnClick()`, `removeOnHover()`, `removeOnFocus()`
 
-#### 3.3 Estensione WindowJS
+#### 3.3 WindowJS Extension
 - [ ] `createWidget(type, config)`
 - [ ] `getWidget(id)`, `getWidgetsByType(type)`
 - [ ] `getRootWidget()`, `clearWidgets()`
 
-#### 3.4 Estensione GraphicJS
-- [ ] `loadFont(path, alias)` - carica font custom
-- [ ] `unloadFont(alias)` - scarica font
-- [ ] `getLoadedFonts()` - lista font caricati
-- [ ] `preloadImage(path)` - precarica immagine
+#### 3.4 GraphicJS Extension
+- [ ] `loadFont(path, alias)` - load custom font
+- [ ] `unloadFont(alias)` - unload font
+- [ ] `getLoadedFonts()` - list loaded fonts
+- [ ] `preloadImage(path)` - preload image
 
-#### 3.5 Parsing Colori e Config
-- [ ] Parser per colori: "#RGB", "#RGBA", "#RRGGBB", "#RRGGBBAA", "rgba(r,g,b,a)"
-- [ ] Parser per `FontConfig` da oggetto JS
-- [ ] Parser per `ImageConfig` da oggetto JS
-- [ ] Parser per `ShadowConfig` da oggetto JS
+#### 3.5 Color and Config Parsing
+- [ ] Parser for colors: "#RGB", "#RGBA", "#RRGGBB", "#RRGGBBAA", "rgba(r,g,b,a)"
+- [ ] Parser for `FontConfig` from JS object
+- [ ] Parser for `ImageConfig` from JS object
+- [ ] Parser for `ShadowConfig` from JS object
 
-### Fase 4: Widget Specifici - Priorità Media
+### Phase 4: Specific Widgets - Medium Priority
 
 #### 4.1 Container Widget
 - [ ] Flex layout (direction, justify, align, gap)
-- [ ] Grid layout base (rows, columns)
-- [ ] Background color con alpha
-- [ ] Background image con tutte le opzioni
-- [ ] Opacity globale
+- [ ] Basic grid layout (rows, columns)
+- [ ] Background color with alpha
+- [ ] Background image with all options
+- [ ] Global opacity
 
 #### 4.2 Text Widget
-- [ ] Content, fontColor con alpha
-- [ ] FontConfig completo (family, size, weight, style)
-- [ ] Letter spacing e line height
+- [ ] Content, fontColor with alpha
+- [ ] Complete FontConfig (family, size, weight, style)
+- [ ] Letter spacing and line height
 - [ ] TextAlign
-- [ ] Text shadow con blur
-- [ ] Update dinamico content
+- [ ] Text shadow with blur
+- [ ] Dynamic content update
 
 #### 4.3 Button Widget
-- [ ] Label con FontConfig
-- [ ] Colori con alpha: normal, hover, pressed, disabled
-- [ ] Background image per stati
+- [ ] Label with FontConfig
+- [ ] Colors with alpha: normal, hover, pressed, disabled
+- [ ] Background image for states
 - [ ] Disabled state
-- [ ] Interazione automatica
+- [ ] Automatic interaction
 - [ ] Border radius
 
 #### 4.4 Panel Widget
-- [ ] Background color con alpha
+- [ ] Background color with alpha
 - [ ] Background image (fill, tile, 9-slice)
-- [ ] Border (color con alpha, width, radius)
-- [ ] Opacity globale
+- [ ] Border (color with alpha, width, radius)
+- [ ] Global opacity
 
 #### 4.5 Image Widget
-- [ ] Caricamento da asset path
+- [ ] Loading from asset path
 - [ ] Scale modes (Fill, Fit, Stretch, None, Tile, NineSlice)
-- [ ] Tint color con alpha
+- [ ] Tint color with alpha
 - [ ] Opacity
 - [ ] Flip X/Y
-- [ ] Source rect per sprite sheets
+- [ ] Source rect for sprite sheets
 
-### Fase 5: Predisposizione Altri Runtime - Priorità Bassa
+### Phase 5: Other Runtime Preparation - Low Priority
 
-#### 5.1 Documentazione Binding
-- [ ] Documentare come implementare `WidgetCallbackDispatcher`
-- [ ] Template per nuovo runtime adapter
+#### 5.1 Binding Documentation
+- [ ] Document how to implement `WidgetCallbackDispatcher`
+- [ ] Template for new runtime adapter
 
 #### 5.2 Trait Bounds
-- [ ] Verificare che tutti i tipi core siano `Serialize + Deserialize`
-- [ ] Verificare thread-safety (`Send + Sync`)
+- [ ] Verify all core types are `Serialize + Deserialize`
+- [ ] Verify thread-safety (`Send + Sync`)
 
-### Fase 6: Testing e Documentazione - Priorità Media
+### Phase 6: Testing and Documentation - Medium Priority
 
-#### 6.1 Test Manuali
-- [ ] Creare mod demo con UI complessa
-- [ ] Test creazione/distruzione widget
-- [ ] Test callback su tutti i tipi
-- [ ] Test gerarchia (parent-child, reparent)
+#### 6.1 Manual Testing
+- [ ] Create demo mod with complex UI
+- [ ] Test widget creation/destruction
+- [ ] Test callbacks on all types
+- [ ] Test hierarchy (parent-child, reparent)
 
-#### 6.2 Documentazione
-- [ ] API reference per tipi core
-- [ ] Esempi per JavaScript
-- [ ] Guida per implementare binding in altri linguaggi
+#### 6.2 Documentation
+- [ ] API reference for core types
+- [ ] Examples for JavaScript
+- [ ] Guide for implementing bindings in other languages
 
 ---
 
-## Riferimenti
+## References
 
-### Documentazione Bevy UI
+### Bevy UI Documentation
 - [Bevy Window Struct](https://docs.rs/bevy/latest/bevy/window/struct.Window.html)
 - [Bevy UI Overview](https://taintedcoders.com/bevy/ui)
 - [Bevy Widgets Discussion](https://github.com/bevyengine/bevy/discussions/5604)
 
-### Librerie Alternative (per riferimento futuro)
-- [bevy_egui](https://docs.rs/bevy_egui/latest/bevy_egui/) - Integrazione Egui
-- [Sickle UI](https://github.com/UmbraLuminworksai/sickle_ui) - UI ergonomica per Bevy
+### Alternative Libraries (for future reference)
+- [bevy_egui](https://docs.rs/bevy_egui/latest/bevy_egui/) - Egui Integration
+- [Sickle UI](https://github.com/UmbraLuminworksai/sickle_ui) - Ergonomic UI for Bevy
 
-### Pattern Architetturali
-- **Language-agnostic core**: API definita in Rust, binding per ogni linguaggio
-- **Entity-based widgets**: Widget sono entità ECS con component marker
-- **Command-Event pattern**: Comunicazione asincrona tra thread
-- **Proxy pattern**: GraphicProxy media tra tutti i runtime e Bevy
-- **ID-based references**: Widget referenziati tramite ID, non puntatori
-- **Subscription-based events**: Callback registrate come interesse per eventi
-- **Asset caching**: Font e immagini caricati una volta, referenziati per alias/path
+### Architectural Patterns
+- **Language-agnostic core**: API defined in Rust, bindings for each language
+- **Entity-based widgets**: Widgets are ECS entities with marker components
+- **Command-Event pattern**: Asynchronous communication between threads
+- **Proxy pattern**: GraphicProxy mediates between all runtimes and Bevy
+- **ID-based references**: Widgets referenced via ID, not pointers
+- **Subscription-based events**: Callbacks registered as interest in events
+- **Asset caching**: Fonts and images loaded once, referenced by alias/path
 
-### Note Tecniche su Trasparenza e Rendering
+### Technical Notes on Transparency and Rendering
 
 #### Alpha Blending
-- Tutti i colori supportano canale alpha (0.0 = trasparente, 1.0 = opaco)
-- `opacity` widget si moltiplica con alpha dei colori figli
-- Bevy usa premultiplied alpha per default
+- All colors support alpha channel (0.0 = transparent, 1.0 = opaque)
+- Widget `opacity` multiplies with child colors' alpha
+- Bevy uses premultiplied alpha by default
 
 #### BlendMode
-- Richiede shader custom o integrazione con `bevy_blend_modes`
-- `Normal` è l'unico mode supportato nativamente da Bevy UI
-- Altri mode potrebbero richiedere render-to-texture
+- Requires custom shader or integration with `bevy_blend_modes`
+- `Normal` is the only mode natively supported by Bevy UI
+- Other modes might require render-to-texture
 
 #### Font Loading
-- Bevy supporta .ttf e .otf
-- Font caricati tramite AssetServer
-- Alias permette riferimento semplice nei widget
+- Bevy supports .ttf and .otf
+- Fonts loaded via AssetServer
+- Alias allows simple reference in widgets
 
 #### 9-Slice Scaling
-- Bevy 0.15+ supporta `ImageScaleMode::Sliced` per UI
-- Preserva angoli e bordi durante il ridimensionamento
-- Ideale per dialog box, pannelli, bottoni stilizzati
+- Bevy 0.15+ supports `ImageScaleMode::Sliced` for UI
+- Preserves corners and borders during resizing
+- Ideal for dialog boxes, panels, styled buttons

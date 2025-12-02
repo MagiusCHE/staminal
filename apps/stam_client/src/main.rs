@@ -1609,6 +1609,31 @@ fn handle_graphic_event(
             info!("Graphic engine is shutting down");
             // TODO: Dispatch engine:shuttingDown event to mods
         }
+        // Widget events
+        GraphicEvent::WidgetCreated { window_id, widget_id, widget_type } => {
+            debug!("Widget {} ({:?}) created in window {}", widget_id, widget_type, window_id);
+            // TODO: Dispatch widget:created event to mods
+        }
+        GraphicEvent::WidgetDestroyed { window_id, widget_id } => {
+            debug!("Widget {} destroyed in window {}", widget_id, window_id);
+            // TODO: Dispatch widget:destroyed event to mods
+        }
+        GraphicEvent::WidgetClicked { window_id, widget_id, x, y, button } => {
+            debug!("Widget {} clicked in window {} at ({}, {}) with {:?}", widget_id, window_id, x, y, button);
+            // TODO: Dispatch widget:clicked event to mods
+        }
+        GraphicEvent::WidgetHovered { window_id, widget_id, entered, x, y } => {
+            debug!("Widget {} hover {} in window {} at ({}, {})", widget_id, if entered { "enter" } else { "leave" }, window_id, x, y);
+            // TODO: Dispatch widget:hovered event to mods
+        }
+        GraphicEvent::WidgetFocused { window_id, widget_id, focused } => {
+            debug!("Widget {} focus {} in window {}", widget_id, if focused { "gained" } else { "lost" }, window_id);
+            // TODO: Dispatch widget:focused event to mods
+        }
+        GraphicEvent::WidgetInteractionChanged { window_id, widget_id, interaction } => {
+            debug!("Widget {} interaction changed to '{}' in window {}", widget_id, interaction, window_id);
+            // Internal event for tracking, usually not dispatched
+        }
     }
 }
 

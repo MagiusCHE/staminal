@@ -1228,7 +1228,11 @@ pub fn setup_text_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
 // Graphic API Bindings
 // ============================================================================
 
-use crate::api::{GraphicProxy, GraphicEngines, WindowConfig, WindowPositionMode, InitialWindowConfig};
+use crate::api::{
+    AlignItems, ColorValue, EdgeInsets, FlexDirection, FontConfig, GraphicEngines, GraphicProxy,
+    InitialWindowConfig, JustifyContent, SizeValue, WidgetConfig, WidgetEventType, WidgetType,
+    WindowConfig, WindowPositionMode,
+};
 
 /// JavaScript Graphic API class
 ///
@@ -1537,12 +1541,532 @@ impl WindowJS {
     }
 
     // Note: setResizable was removed - resizable must be set at window creation time via enableEngine()
+
+    /// Create a widget in this window
+    ///
+    /// # Arguments
+    /// * `widget_type` - WidgetTypes enum value (0=container, 1=text, 2=button, 3=image, 4=panel)
+    /// * `config` - Widget configuration object
+    ///
+    /// # Returns
+    /// Promise that resolves to a Widget object
+    #[qjs(rename = "createWidget")]
+    pub async fn create_widget<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        widget_type: u32,
+        config: Opt<Object<'js>>,
+    ) -> rquickjs::Result<rquickjs::Class<'js, WidgetJS>> {
+        let wtype = WidgetType::from_u32(widget_type).ok_or_else(|| {
+            let msg = format!(
+                "Invalid widget type: {}. Use WidgetTypes.Container (0), Text (1), Button (2), Image (3), or Panel (4)",
+                widget_type
+            );
+            ctx.throw(rquickjs::String::from_str(ctx.clone(), &msg).unwrap().into())
+        })?;
+
+        let widget_config = parse_widget_config(&ctx, config.0)?;
+
+        let widget_id = self
+            .graphic_proxy
+            .create_widget(self.id, wtype, widget_config)
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))?;
+
+        rquickjs::Class::<WidgetJS>::instance(
+            ctx,
+            WidgetJS {
+                id: widget_id,
+                window_id: self.id,
+                graphic_proxy: self.graphic_proxy.clone(),
+            },
+        )
+    }
+
+    /// Clear all widgets from this window
+    ///
+    /// # Returns
+    /// Promise that resolves when all widgets are destroyed
+    #[qjs(rename = "clearWidgets")]
+    pub async fn clear_widgets(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .clear_window_widgets(self.id)
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+}
+
+/// JavaScript Widget class
+///
+/// Represents a UI widget created in a window.
+/// Instances are returned by `window.createWidget()`.
+#[rquickjs::class]
+#[derive(Clone, Trace, JsLifetime)]
+pub struct WidgetJS {
+    #[qjs(skip_trace)]
+    id: u64,
+    #[qjs(skip_trace)]
+    window_id: u64,
+    #[qjs(skip_trace)]
+    graphic_proxy: Arc<GraphicProxy>,
+}
+
+#[rquickjs::methods]
+impl WidgetJS {
+    /// Get the widget ID
+    #[qjs(get, rename = "id")]
+    pub fn get_id(&self) -> u64 {
+        self.id
+    }
+
+    /// Get the parent window ID
+    #[qjs(get, rename = "windowId")]
+    pub fn get_window_id(&self) -> u64 {
+        self.window_id
+    }
+
+    /// Set text content (for Text widgets) or label (for Button widgets)
+    ///
+    /// # Arguments
+    /// * `content` - The text content
+    #[qjs(rename = "setContent")]
+    pub async fn set_content(&self, ctx: Ctx<'_>, content: String) -> rquickjs::Result<()> {
+        use crate::api::PropertyValue;
+        self.graphic_proxy
+            .update_widget_property(self.id, "content".to_string(), PropertyValue::String(content))
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+
+    /// Set background color
+    ///
+    /// # Arguments
+    /// * `color` - Color string ("#RGB", "#RRGGBB", "rgba(r,g,b,a)") or color object
+    #[qjs(rename = "setBackgroundColor")]
+    pub async fn set_background_color<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        color: Value<'js>,
+    ) -> rquickjs::Result<()> {
+        use crate::api::PropertyValue;
+        let color_value = parse_color(&ctx, &color)?;
+        self.graphic_proxy
+            .update_widget_property(
+                self.id,
+                "backgroundColor".to_string(),
+                PropertyValue::Color(color_value),
+            )
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+
+    /// Create a child widget
+    ///
+    /// # Arguments
+    /// * `widget_type` - WidgetTypes enum value
+    /// * `config` - Widget configuration object
+    ///
+    /// # Returns
+    /// Promise that resolves to a Widget object
+    #[qjs(rename = "createChild")]
+    pub async fn create_child<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        widget_type: u32,
+        config: Opt<Object<'js>>,
+    ) -> rquickjs::Result<rquickjs::Class<'js, WidgetJS>> {
+        let wtype = WidgetType::from_u32(widget_type).ok_or_else(|| {
+            let msg = format!(
+                "Invalid widget type: {}. Use WidgetTypes.Container (0), Text (1), Button (2), Image (3), or Panel (4)",
+                widget_type
+            );
+            ctx.throw(rquickjs::String::from_str(ctx.clone(), &msg).unwrap().into())
+        })?;
+
+        let mut widget_config = parse_widget_config(&ctx, config.0)?;
+        widget_config.parent_id = Some(self.id);
+
+        let widget_id = self
+            .graphic_proxy
+            .create_widget(self.window_id, wtype, widget_config)
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))?;
+
+        rquickjs::Class::<WidgetJS>::instance(
+            ctx,
+            WidgetJS {
+                id: widget_id,
+                window_id: self.window_id,
+                graphic_proxy: self.graphic_proxy.clone(),
+            },
+        )
+    }
+
+    /// Destroy this widget and all its children
+    #[qjs(rename = "destroy")]
+    pub async fn destroy(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .destroy_widget(self.id)
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+}
+
+// ============================================================================
+// Widget Config Parsing Helpers
+// ============================================================================
+
+/// Helper to throw a JavaScript Error with stack trace
+fn throw_error<'js>(ctx: &Ctx<'js>, message: &str) -> rquickjs::Error {
+    // Create a proper JavaScript Error object which includes stack trace
+    // We use eval to construct the Error since rquickjs Function doesn't expose a direct constructor call API
+    let escaped_message = message.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+    let error_code = format!("new Error(\"{}\")", escaped_message);
+    match ctx.eval::<rquickjs::Value, _>(error_code) {
+        Ok(error_obj) => ctx.throw(error_obj),
+        Err(_) => {
+            // Fallback to string throw if eval fails for some reason
+            ctx.throw(rquickjs::String::from_str(ctx.clone(), message).unwrap().into())
+        }
+    }
+}
+
+impl WidgetType {
+    pub fn from_u32(v: u32) -> Option<Self> {
+        match v {
+            0 => Some(WidgetType::Container),
+            1 => Some(WidgetType::Text),
+            2 => Some(WidgetType::Button),
+            3 => Some(WidgetType::Image),
+            4 => Some(WidgetType::Panel),
+            _ => None,
+        }
+    }
+
+    pub fn to_u32(&self) -> u32 {
+        match self {
+            WidgetType::Container => 0,
+            WidgetType::Text => 1,
+            WidgetType::Button => 2,
+            WidgetType::Image => 3,
+            WidgetType::Panel => 4,
+        }
+    }
+}
+
+/// Parse a color value from JavaScript
+fn parse_color<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::Result<ColorValue> {
+    // Handle string format: "#RGB", "#RRGGBB", "rgba(r,g,b,a)"
+    if let Some(s) = value.as_string() {
+        let color_str = s.to_string()?;
+        return ColorValue::from_hex(&color_str).map_err(|e| {
+            throw_error(ctx, &format!("Invalid color: {}", e))
+        });
+    }
+
+    // Handle object format: { r, g, b, a }
+    if let Some(obj) = value.as_object() {
+        let r = obj.get::<_, f32>("r").unwrap_or(1.0);
+        let g = obj.get::<_, f32>("g").unwrap_or(1.0);
+        let b = obj.get::<_, f32>("b").unwrap_or(1.0);
+        let a = obj.get::<_, f32>("a").unwrap_or(1.0);
+        return Ok(ColorValue::rgba(r, g, b, a));
+    }
+
+    Err(throw_error(
+        ctx,
+        "Color must be a string ('#RGB', '#RRGGBB', 'rgba(r,g,b,a)') or object { r, g, b, a }",
+    ))
+}
+
+/// Parse SizeValue from JavaScript value
+fn parse_size_value<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::Result<SizeValue> {
+    // Handle number (pixels)
+    if let Some(n) = value.as_number() {
+        return Ok(SizeValue::Px(n as f32));
+    }
+
+    // Handle string ("auto", "100%", "50px")
+    if let Some(s) = value.as_string() {
+        let str_val = s.to_string()?;
+        if str_val == "auto" {
+            return Ok(SizeValue::Auto);
+        }
+        if str_val.ends_with('%') {
+            let pct: f32 = str_val
+                .trim_end_matches('%')
+                .parse()
+                .map_err(|_| throw_error(ctx, "Invalid percentage"))?;
+            return Ok(SizeValue::Percent(pct));
+        }
+        if str_val.ends_with("px") {
+            let px: f32 = str_val
+                .trim_end_matches("px")
+                .parse()
+                .map_err(|_| throw_error(ctx, "Invalid pixel value"))?;
+            return Ok(SizeValue::Px(px));
+        }
+        // Try parsing as number
+        if let Ok(n) = str_val.parse::<f32>() {
+            return Ok(SizeValue::Px(n));
+        }
+    }
+
+    Err(throw_error(
+        ctx,
+        "Size must be a number, 'auto', or string like '100%' or '50px'",
+    ))
+}
+
+/// Parse EdgeInsets from JavaScript value (number, array, or object)
+fn parse_edge_insets<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::Result<EdgeInsets> {
+    // Handle number (uniform)
+    if let Some(n) = value.as_number() {
+        return Ok(EdgeInsets::all(n as f32));
+    }
+
+    // Handle string (e.g., "10", "10px")
+    if let Some(str_val) = value.as_string() {
+        let str_val = str_val.to_string().unwrap_or_default();
+        let str_val = str_val.trim();
+
+        // Parse "10px" format
+        if str_val.ends_with("px") {
+            if let Ok(n) = str_val.trim_end_matches("px").trim().parse::<f32>() {
+                return Ok(EdgeInsets::all(n));
+            }
+        }
+        // Parse plain number string
+        if let Ok(n) = str_val.parse::<f32>() {
+            return Ok(EdgeInsets::all(n));
+        }
+    }
+
+    // Handle array [top, right, bottom, left] or [vertical, horizontal] or [all]
+    if let Some(arr) = value.as_array() {
+        let len = arr.len();
+        match len {
+            1 => {
+                let all: f32 = arr.get(0)?;
+                return Ok(EdgeInsets::all(all));
+            }
+            2 => {
+                let vertical: f32 = arr.get(0)?;
+                let horizontal: f32 = arr.get(1)?;
+                return Ok(EdgeInsets::symmetric(vertical, horizontal));
+            }
+            4 => {
+                let top: f32 = arr.get(0)?;
+                let right: f32 = arr.get(1)?;
+                let bottom: f32 = arr.get(2)?;
+                let left: f32 = arr.get(3)?;
+                return Ok(EdgeInsets {
+                    top,
+                    right,
+                    bottom,
+                    left,
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // Handle object { top, right, bottom, left }
+    if let Some(obj) = value.as_object() {
+        return Ok(EdgeInsets {
+            top: obj.get::<_, f32>("top").unwrap_or(0.0),
+            right: obj.get::<_, f32>("right").unwrap_or(0.0),
+            bottom: obj.get::<_, f32>("bottom").unwrap_or(0.0),
+            left: obj.get::<_, f32>("left").unwrap_or(0.0),
+        });
+    }
+
+    // Get type name for better error message
+    let type_name = if value.is_undefined() {
+        "undefined"
+    } else if value.is_null() {
+        "null"
+    } else if value.is_bool() {
+        "boolean"
+    } else if value.is_function() {
+        "function"
+    } else {
+        "unknown"
+    };
+
+    Err(throw_error(
+        ctx,
+        &format!(
+            "Edge insets must be a number, string, array [v, h] or [t, r, b, l], or object {{ top, right, bottom, left }}. Got: {}",
+            type_name
+        ),
+    ))
+}
+
+/// Parse widget configuration from JavaScript object
+fn parse_widget_config<'js>(
+    ctx: &Ctx<'js>,
+    config: Option<Object<'js>>,
+) -> rquickjs::Result<WidgetConfig> {
+    let Some(cfg) = config else {
+        return Ok(WidgetConfig::default());
+    };
+
+    let mut widget_config = WidgetConfig::default();
+
+    // Parent ID
+    if let Ok(pid) = cfg.get::<_, u64>("parentId") {
+        widget_config.parent_id = Some(pid);
+    }
+
+    // Layout
+    if let Ok(dir) = cfg.get::<_, u32>("direction") {
+        widget_config.direction = match dir {
+            0 => Some(FlexDirection::Row),
+            1 => Some(FlexDirection::Column),
+            2 => Some(FlexDirection::RowReverse),
+            3 => Some(FlexDirection::ColumnReverse),
+            _ => None,
+        };
+    }
+
+    if let Ok(jc) = cfg.get::<_, u32>("justifyContent") {
+        widget_config.justify_content = match jc {
+            0 => Some(JustifyContent::FlexStart),
+            1 => Some(JustifyContent::FlexEnd),
+            2 => Some(JustifyContent::Center),
+            3 => Some(JustifyContent::SpaceBetween),
+            4 => Some(JustifyContent::SpaceAround),
+            5 => Some(JustifyContent::SpaceEvenly),
+            _ => None,
+        };
+    }
+
+    if let Ok(ai) = cfg.get::<_, u32>("alignItems") {
+        widget_config.align_items = match ai {
+            0 => Some(AlignItems::Stretch),
+            1 => Some(AlignItems::FlexStart),
+            2 => Some(AlignItems::FlexEnd),
+            3 => Some(AlignItems::Center),
+            4 => Some(AlignItems::Baseline),
+            _ => None,
+        };
+    }
+
+    if let Ok(gap) = cfg.get::<_, f32>("gap") {
+        widget_config.gap = Some(gap);
+    }
+
+    // Dimensions
+    if let Ok(width) = cfg.get::<_, Value>("width") {
+        if !width.is_undefined() && !width.is_null() {
+            widget_config.width = Some(parse_size_value(ctx, &width)?);
+        }
+    }
+
+    if let Ok(height) = cfg.get::<_, Value>("height") {
+        if !height.is_undefined() && !height.is_null() {
+            widget_config.height = Some(parse_size_value(ctx, &height)?);
+        }
+    }
+
+    // Spacing
+    if let Ok(margin) = cfg.get::<_, Value>("margin") {
+        if !margin.is_undefined() && !margin.is_null() {
+            widget_config.margin = Some(parse_edge_insets(ctx, &margin)?);
+        }
+    }
+
+    if let Ok(padding) = cfg.get::<_, Value>("padding") {
+        if !padding.is_undefined() && !padding.is_null() {
+            widget_config.padding = Some(parse_edge_insets(ctx, &padding)?);
+        }
+    }
+
+    // Colors
+    if let Ok(bg_color) = cfg.get::<_, Value>("backgroundColor") {
+        if !bg_color.is_undefined() && !bg_color.is_null() {
+            widget_config.background_color = Some(parse_color(ctx, &bg_color)?);
+        }
+    }
+
+    if let Ok(font_color) = cfg.get::<_, Value>("fontColor") {
+        if !font_color.is_undefined() && !font_color.is_null() {
+            widget_config.font_color = Some(parse_color(ctx, &font_color)?);
+        }
+    }
+
+    if let Ok(hover_color) = cfg.get::<_, Value>("hoverColor") {
+        if !hover_color.is_undefined() && !hover_color.is_null() {
+            widget_config.hover_color = Some(parse_color(ctx, &hover_color)?);
+        }
+    }
+
+    if let Ok(pressed_color) = cfg.get::<_, Value>("pressedColor") {
+        if !pressed_color.is_undefined() && !pressed_color.is_null() {
+            widget_config.pressed_color = Some(parse_color(ctx, &pressed_color)?);
+        }
+    }
+
+    if let Ok(disabled_color) = cfg.get::<_, Value>("disabledColor") {
+        if !disabled_color.is_undefined() && !disabled_color.is_null() {
+            widget_config.disabled_color = Some(parse_color(ctx, &disabled_color)?);
+        }
+    }
+
+    // Text content
+    if let Ok(content) = cfg.get::<_, String>("content") {
+        widget_config.content = Some(content);
+    }
+
+    if let Ok(label) = cfg.get::<_, String>("label") {
+        widget_config.label = Some(label);
+    }
+
+    // Font configuration
+    if let Ok(font_obj) = cfg.get::<_, Object>("font") {
+        let mut font_config = FontConfig::default();
+        if let Ok(family) = font_obj.get::<_, String>("family") {
+            font_config.family = family;
+        }
+        if let Ok(size) = font_obj.get::<_, f32>("size") {
+            font_config.size = size;
+        }
+        widget_config.font = Some(font_config);
+    } else if let Ok(font_size) = cfg.get::<_, f32>("fontSize") {
+        let mut font_config = FontConfig::default();
+        font_config.size = font_size;
+        widget_config.font = Some(font_config);
+    }
+
+    // Opacity
+    if let Ok(opacity) = cfg.get::<_, f32>("opacity") {
+        widget_config.opacity = Some(opacity);
+    }
+
+    // Border
+    if let Ok(border_radius) = cfg.get::<_, f32>("borderRadius") {
+        widget_config.border_radius = Some(border_radius);
+    }
+
+    if let Ok(border_color) = cfg.get::<_, Value>("borderColor") {
+        if !border_color.is_undefined() && !border_color.is_null() {
+            widget_config.border_color = Some(parse_color(ctx, &border_color)?);
+        }
+    }
+
+    // Disabled state
+    if let Ok(disabled) = cfg.get::<_, bool>("disabled") {
+        widget_config.disabled = Some(disabled);
+    }
+
+    Ok(widget_config)
 }
 
 /// Setup graphic API in the JavaScript context
 ///
 /// Creates the `graphic` global object and `GraphicEngines` enum.
-/// Also defines the `WindowJS` class for window instances.
+/// Also defines the `WindowJS` and `WidgetJS` classes for instances.
 ///
 /// # Arguments
 /// * `ctx` - The JavaScript context
@@ -1551,6 +2075,7 @@ pub fn setup_graphic_api(ctx: Ctx, graphic_proxy: Arc<GraphicProxy>) -> Result<(
     // Define classes
     rquickjs::Class::<GraphicJS>::define(&ctx.globals())?;
     rquickjs::Class::<WindowJS>::define(&ctx.globals())?;
+    rquickjs::Class::<WidgetJS>::define(&ctx.globals())?;
 
     // Create graphic instance
     let graphic_obj =
@@ -1569,6 +2094,42 @@ pub fn setup_graphic_api(ctx: Ctx, graphic_proxy: Arc<GraphicProxy>) -> Result<(
     position_modes.set("Default", WindowPositionMode::Default.to_u32())?;
     position_modes.set("Centered", WindowPositionMode::Centered.to_u32())?;
     ctx.globals().set("WindowPositionModes", position_modes)?;
+
+    // Create WidgetTypes enum
+    let widget_types = Object::new(ctx.clone())?;
+    widget_types.set("Container", WidgetType::Container.to_u32())?;
+    widget_types.set("Text", WidgetType::Text.to_u32())?;
+    widget_types.set("Button", WidgetType::Button.to_u32())?;
+    widget_types.set("Image", WidgetType::Image.to_u32())?;
+    widget_types.set("Panel", WidgetType::Panel.to_u32())?;
+    ctx.globals().set("WidgetTypes", widget_types)?;
+
+    // Create FlexDirection enum
+    let flex_dirs = Object::new(ctx.clone())?;
+    flex_dirs.set("Row", 0u32)?;
+    flex_dirs.set("Column", 1u32)?;
+    flex_dirs.set("RowReverse", 2u32)?;
+    flex_dirs.set("ColumnReverse", 3u32)?;
+    ctx.globals().set("FlexDirection", flex_dirs)?;
+
+    // Create JustifyContent enum
+    let justify = Object::new(ctx.clone())?;
+    justify.set("FlexStart", 0u32)?;
+    justify.set("FlexEnd", 1u32)?;
+    justify.set("Center", 2u32)?;
+    justify.set("SpaceBetween", 3u32)?;
+    justify.set("SpaceAround", 4u32)?;
+    justify.set("SpaceEvenly", 5u32)?;
+    ctx.globals().set("JustifyContent", justify)?;
+
+    // Create AlignItems enum
+    let align = Object::new(ctx.clone())?;
+    align.set("Stretch", 0u32)?;
+    align.set("FlexStart", 1u32)?;
+    align.set("FlexEnd", 2u32)?;
+    align.set("Center", 3u32)?;
+    align.set("Baseline", 4u32)?;
+    ctx.globals().set("AlignItems", align)?;
 
     Ok(())
 }

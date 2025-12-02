@@ -9,7 +9,11 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
-use super::{GraphicCommand, GraphicEngineInfo, GraphicEngines, GraphicEvent, InitialWindowConfig, WindowConfig, WindowInfo};
+use super::{
+    FontInfo, GraphicCommand, GraphicEngineInfo, GraphicEngines, GraphicEvent,
+    InitialWindowConfig, PropertyValue, WidgetConfig, WidgetEventType, WidgetInfo,
+    WidgetSubscriptions, WidgetType, WindowConfig, WindowInfo,
+};
 
 /// Request to enable a graphic engine
 ///
@@ -67,6 +71,18 @@ pub struct GraphicProxy {
     /// Next window ID counter
     next_window_id: AtomicU64,
 
+    /// Widget registry - maps widget IDs to their info
+    widgets: Arc<RwLock<HashMap<u64, WidgetInfo>>>,
+
+    /// Next widget ID counter
+    next_widget_id: AtomicU64,
+
+    /// Widget event subscriptions
+    widget_subscriptions: Arc<RwLock<WidgetSubscriptions>>,
+
+    /// Loaded fonts (alias -> FontInfo)
+    loaded_fonts: Arc<RwLock<HashMap<String, FontInfo>>>,
+
     /// Flag: graphic proxy is available (client-only)
     available: bool,
 }
@@ -86,6 +102,10 @@ impl GraphicProxy {
             event_rx: Arc::new(tokio::sync::Mutex::new(None)),
             windows: Arc::new(RwLock::new(HashMap::new())),
             next_window_id: AtomicU64::new(1),
+            widgets: Arc::new(RwLock::new(HashMap::new())),
+            next_widget_id: AtomicU64::new(1),
+            widget_subscriptions: Arc::new(RwLock::new(WidgetSubscriptions::new())),
+            loaded_fonts: Arc::new(RwLock::new(HashMap::new())),
             available: true,
         }
     }
@@ -101,6 +121,10 @@ impl GraphicProxy {
             event_rx: Arc::new(tokio::sync::Mutex::new(None)),
             windows: Arc::new(RwLock::new(HashMap::new())),
             next_window_id: AtomicU64::new(1),
+            widgets: Arc::new(RwLock::new(HashMap::new())),
+            next_widget_id: AtomicU64::new(1),
+            widget_subscriptions: Arc::new(RwLock::new(WidgetSubscriptions::new())),
+            loaded_fonts: Arc::new(RwLock::new(HashMap::new())),
             available: false,
         }
     }
@@ -523,6 +547,565 @@ impl GraphicProxy {
         } else {
             None
         }
+    }
+
+    // ========================================================================
+    // Widget Creation and Modification
+    // ========================================================================
+
+    /// Create a new widget in a window
+    ///
+    /// # Arguments
+    /// * `window_id` - The window to create the widget in
+    /// * `widget_type` - The type of widget to create
+    /// * `config` - Widget configuration
+    ///
+    /// # Returns
+    /// * `Ok(widget_id)` - The ID of the created widget
+    /// * `Err(String)` - Error message if creation failed
+    pub async fn create_widget(
+        &self,
+        window_id: u64,
+        widget_type: WidgetType,
+        config: WidgetConfig,
+    ) -> Result<u64, String> {
+        if !self.available {
+            return Err(
+                "window.createWidget() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx
+            .as_ref()
+            .ok_or("No graphic engine enabled. Call graphic.enableEngine() first.")?;
+
+        let widget_id = self.next_widget_id.fetch_add(1, Ordering::SeqCst);
+        let parent_id = config.parent_id;
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tracing::debug!(
+            "Creating widget {} (type: {:?}) in window {}",
+            widget_id,
+            widget_type,
+            window_id
+        );
+
+        tx.send(GraphicCommand::CreateWidget {
+            window_id,
+            widget_id,
+            parent_id,
+            widget_type,
+            config,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")??;
+
+        // Track widget
+        let widget_info = WidgetInfo {
+            id: widget_id,
+            window_id,
+            widget_type,
+            parent_id,
+            children_ids: Vec::new(),
+        };
+        self.widgets.write().unwrap().insert(widget_id, widget_info);
+
+        // Update parent's children list
+        if let Some(pid) = parent_id {
+            if let Some(parent) = self.widgets.write().unwrap().get_mut(&pid) {
+                parent.children_ids.push(widget_id);
+            }
+        }
+
+        tracing::debug!("Widget {} created", widget_id);
+
+        Ok(widget_id)
+    }
+
+    /// Update a single widget property
+    ///
+    /// # Arguments
+    /// * `widget_id` - The widget to update
+    /// * `property` - The property name
+    /// * `value` - The new property value
+    pub async fn update_widget_property(
+        &self,
+        widget_id: u64,
+        property: String,
+        value: PropertyValue,
+    ) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "widget.setProperty() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::UpdateWidgetProperty {
+            widget_id,
+            property,
+            value,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Update multiple widget properties at once
+    ///
+    /// # Arguments
+    /// * `widget_id` - The widget to update
+    /// * `config` - New configuration (only set fields are updated)
+    pub async fn update_widget_config(
+        &self,
+        widget_id: u64,
+        config: WidgetConfig,
+    ) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "widget.setConfig() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::UpdateWidgetConfig {
+            widget_id,
+            config,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Destroy a widget and all its children
+    pub async fn destroy_widget(&self, widget_id: u64) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "widget.destroy() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::DestroyWidget {
+            widget_id,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")??;
+
+        // Remove widget and its children from tracking
+        self.remove_widget_recursive(widget_id);
+
+        tracing::debug!("Widget {} destroyed", widget_id);
+
+        Ok(())
+    }
+
+    /// Helper to recursively remove widget and children from tracking
+    fn remove_widget_recursive(&self, widget_id: u64) {
+        let mut widgets = self.widgets.write().unwrap();
+
+        // Get children list before removing
+        let children_ids = widgets
+            .get(&widget_id)
+            .map(|w| w.children_ids.clone())
+            .unwrap_or_default();
+
+        // Remove from parent's children list
+        if let Some(widget) = widgets.get(&widget_id) {
+            if let Some(parent_id) = widget.parent_id {
+                if let Some(parent) = widgets.get_mut(&parent_id) {
+                    parent.children_ids.retain(|&id| id != widget_id);
+                }
+            }
+        }
+
+        // Remove from registry
+        widgets.remove(&widget_id);
+
+        // Remove children recursively (release lock first)
+        drop(widgets);
+        for child_id in children_ids {
+            self.remove_widget_recursive(child_id);
+        }
+
+        // Clean up subscriptions
+        self.widget_subscriptions
+            .write()
+            .unwrap()
+            .remove_widget(widget_id);
+    }
+
+    /// Move a widget to a new parent
+    pub async fn reparent_widget(
+        &self,
+        widget_id: u64,
+        new_parent_id: Option<u64>,
+    ) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "widget.reparent() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::ReparentWidget {
+            widget_id,
+            new_parent_id,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")??;
+
+        // Update tracking
+        let mut widgets = self.widgets.write().unwrap();
+
+        // Remove from old parent
+        if let Some(widget) = widgets.get(&widget_id) {
+            if let Some(old_parent_id) = widget.parent_id {
+                if let Some(old_parent) = widgets.get_mut(&old_parent_id) {
+                    old_parent.children_ids.retain(|&id| id != widget_id);
+                }
+            }
+        }
+
+        // Add to new parent
+        if let Some(new_pid) = new_parent_id {
+            if let Some(new_parent) = widgets.get_mut(&new_pid) {
+                new_parent.children_ids.push(widget_id);
+            }
+        }
+
+        // Update widget's parent_id
+        if let Some(widget) = widgets.get_mut(&widget_id) {
+            widget.parent_id = new_parent_id;
+        }
+
+        Ok(())
+    }
+
+    /// Destroy all widgets in a window
+    pub async fn clear_window_widgets(&self, window_id: u64) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "window.clearWidgets() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::ClearWindowWidgets {
+            window_id,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")??;
+
+        // Remove all widgets for this window from tracking
+        let widget_ids: Vec<u64> = self
+            .widgets
+            .read()
+            .unwrap()
+            .iter()
+            .filter(|(_, w)| w.window_id == window_id)
+            .map(|(id, _)| *id)
+            .collect();
+
+        let mut widgets = self.widgets.write().unwrap();
+        for id in widget_ids {
+            widgets.remove(&id);
+            self.widget_subscriptions.write().unwrap().remove_widget(id);
+        }
+
+        tracing::debug!("All widgets cleared from window {}", window_id);
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // Widget Query
+    // ========================================================================
+
+    /// Get information about a widget
+    pub fn get_widget_info(&self, widget_id: u64) -> Option<WidgetInfo> {
+        self.widgets.read().unwrap().get(&widget_id).cloned()
+    }
+
+    /// Get all widgets in a window
+    pub fn get_window_widgets(&self, window_id: u64) -> Vec<WidgetInfo> {
+        self.widgets
+            .read()
+            .unwrap()
+            .values()
+            .filter(|w| w.window_id == window_id)
+            .cloned()
+            .collect()
+    }
+
+    /// Get root widgets of a window (widgets with no parent)
+    pub fn get_window_root_widgets(&self, window_id: u64) -> Vec<u64> {
+        self.widgets
+            .read()
+            .unwrap()
+            .values()
+            .filter(|w| w.window_id == window_id && w.parent_id.is_none())
+            .map(|w| w.id)
+            .collect()
+    }
+
+    // ========================================================================
+    // Widget Event Subscription
+    // ========================================================================
+
+    /// Subscribe to widget events
+    pub async fn subscribe_widget_events(
+        &self,
+        widget_id: u64,
+        event_types: Vec<WidgetEventType>,
+    ) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "widget.on*() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::SubscribeWidgetEvents {
+            widget_id,
+            event_types: event_types.clone(),
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")??;
+
+        // Update local subscriptions
+        let mut subs = self.widget_subscriptions.write().unwrap();
+        for event_type in event_types {
+            subs.subscribe(widget_id, event_type);
+        }
+
+        Ok(())
+    }
+
+    /// Unsubscribe from widget events
+    pub async fn unsubscribe_widget_events(
+        &self,
+        widget_id: u64,
+        event_types: Vec<WidgetEventType>,
+    ) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "widget.off*() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::UnsubscribeWidgetEvents {
+            widget_id,
+            event_types: event_types.clone(),
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")??;
+
+        // Update local subscriptions
+        let mut subs = self.widget_subscriptions.write().unwrap();
+        for event_type in event_types {
+            subs.unsubscribe(widget_id, event_type);
+        }
+
+        Ok(())
+    }
+
+    /// Check if a widget is subscribed to an event type
+    pub fn is_subscribed(&self, widget_id: u64, event_type: WidgetEventType) -> bool {
+        self.widget_subscriptions
+            .read()
+            .unwrap()
+            .is_subscribed(widget_id, event_type)
+    }
+
+    // ========================================================================
+    // Asset Management (Fonts and Images)
+    // ========================================================================
+
+    /// Load a custom font
+    ///
+    /// # Arguments
+    /// * `path` - Font file path (relative to mod/assets folder)
+    /// * `alias` - Optional alias to use for this font (default: file name without extension)
+    ///
+    /// # Returns
+    /// * `Ok(alias)` - The alias assigned to this font
+    pub async fn load_font(&self, path: String, alias: Option<String>) -> Result<String, String> {
+        if !self.available {
+            return Err(
+                "graphic.loadFont() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx
+            .as_ref()
+            .ok_or("No graphic engine enabled. Call graphic.enableEngine() first.")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::LoadFont {
+            path: path.clone(),
+            alias: alias.clone(),
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        let assigned_alias = response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")??;
+
+        // Track loaded font
+        let font_info = FontInfo {
+            alias: assigned_alias.clone(),
+            path,
+            family_name: None,
+        };
+        self.loaded_fonts
+            .write()
+            .unwrap()
+            .insert(assigned_alias.clone(), font_info);
+
+        tracing::debug!("Font loaded with alias: {}", assigned_alias);
+
+        Ok(assigned_alias)
+    }
+
+    /// Unload a font
+    pub async fn unload_font(&self, alias: String) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "graphic.unloadFont() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::UnloadFont {
+            alias: alias.clone(),
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")??;
+
+        // Remove from tracking
+        self.loaded_fonts.write().unwrap().remove(&alias);
+
+        tracing::debug!("Font unloaded: {}", alias);
+
+        Ok(())
+    }
+
+    /// Get list of loaded fonts
+    pub fn get_loaded_fonts(&self) -> Vec<FontInfo> {
+        self.loaded_fonts.read().unwrap().values().cloned().collect()
+    }
+
+    /// Preload an image for faster first use
+    pub async fn preload_image(&self, path: String) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "graphic.preloadImage() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx
+            .as_ref()
+            .ok_or("No graphic engine enabled. Call graphic.enableEngine() first.")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::PreloadImage {
+            path: path.clone(),
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")??;
+
+        tracing::debug!("Image preloaded: {}", path);
+
+        Ok(())
     }
 }
 

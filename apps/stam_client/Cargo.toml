@@ -27,18 +27,19 @@ semver = "1.0"
 crossterm = "0.28"
 
 # Graphic Engine - Bevy
-bevy = { version = "0.15", default-features = false, features = [
+bevy = { version = "0.17", default-features = false, features = [
     "bevy_winit",
     "bevy_render",
     "bevy_core_pipeline",
     "bevy_sprite",
     "bevy_text",
     "bevy_ui",
+    "bevy_ui_render",  # Required in Bevy 0.17+ for UI rendering
+    "default_font",    # Required for text rendering without custom fonts
     "x11",
     "wayland",
     "multi_threaded",
 ] }
-winit = "0.30"
 
 [[bin]]
 name = "stam_client"

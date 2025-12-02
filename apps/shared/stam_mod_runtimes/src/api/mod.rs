@@ -14,7 +14,13 @@ pub mod system;
 
 pub use console::ConsoleApi;
 pub use events::{EventDispatcher, EventHandler, EventKey, SystemEvents, RequestUriProtocol, RequestUri, UriResponse, SendEventRequest, TerminalKeyRequest, TerminalKeyResponse, GraphicEngineReadyRequest, GraphicEngineReadyResponse, GraphicEngineWindowClosedRequest, GraphicEngineWindowClosedResponse};
-pub use graphic::{GraphicProxy, GraphicEngines, GraphicEngine, GraphicEngineInfo, GraphicCommand, GraphicEvent, WindowConfig, WindowInfo, WindowPositionMode, InitialWindowConfig, EnableEngineRequest, KeyModifiers, MouseButton};
+pub use graphic::{
+    AlignItems, ColorValue, EdgeInsets, FlexDirection, FontConfig, FontInfo, GraphicCommand,
+    GraphicEngine, GraphicEngineInfo, GraphicEngines, GraphicEvent, GraphicProxy,
+    InitialWindowConfig, JustifyContent, KeyModifiers, MouseButton, PropertyValue, SizeValue,
+    WidgetConfig, WidgetEventType, WidgetInfo, WidgetType, WindowConfig, WindowInfo,
+    WindowPositionMode, EnableEngineRequest,
+};
 pub use locale::LocaleApi;
 pub use network::{NetworkApi, NetworkConfig, DownloadResponse, parse_stam_uri, sanitize_uri};
 pub use process::{ProcessApi, AppApi};

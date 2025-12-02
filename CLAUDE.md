@@ -125,6 +125,7 @@ When adding new dependencies:
 2. Prefer well-maintained crates with active development
 3. Enable only necessary features to minimize compile time
 4. **Always prefer established crates over custom implementations**: Before implementing any functionality from scratch, search for well-known Rust crates that already solve the problem (e.g., `serde` for serialization, `tokio` for async, `tracing` for logging, `clap` for CLI args). Only implement custom solutions when no suitable crate exists or when there's a specific performance/integration requirement.
+5. **ALWAYS use latest versions**: When adding or updating dependencies, ALWAYS use the latest stable version available. Do not use old versions unless there is a specific compatibility requirement. Regularly check and update dependencies to their latest versions. Use `cargo outdated` or check crates.io to verify you're using the most recent version.
 
 ### Mod Runtime Development
 When developing features for the mod system (`stam_mod_runtimes`):

@@ -69,6 +69,31 @@ export class Manager {
         //     positionMode: WindowPositionModes.Centered
         // })
 
+        // Create a container with flexbox layout
+        const container = await this.#window.createWidget(WidgetTypes.Container, {
+            width: "100%",
+            height: "100%",
+            direction: FlexDirection.Column,
+            justifyContent: JustifyContent.Center,
+            alignItems: AlignItems.Center,
+            backgroundColor: "#1a1a2e"
+        });
+
+        // Create a text widget
+        const text = await container.createChild(WidgetTypes.Text, {
+            content: "Hello, World!",
+            fontSize: 32,
+            fontColor: "#ffffff"
+        });
+
+        //Create a button
+        const button = await container.createChild(WidgetTypes.Button, {
+            label: "Click Me",
+            backgroundColor: "#0077cc",
+            hoverColor: "#0099ff",
+            pressedColor: "#005599"
+        });
+
     }
 
     async ensureMods() {
