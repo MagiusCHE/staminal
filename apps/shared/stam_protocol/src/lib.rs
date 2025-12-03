@@ -6,4 +6,4 @@ pub mod stream;
 pub use error::{ProtocolError, Result};
 pub use game_message::{GameMessage, ModInfo};
 pub use primal_message::{IntentType, PrimalMessage, ServerInfo};
-pub use stream::{GameStream, PrimalStream};
+pub use stream::{GameStream, PrimalStream, DEFAULT_MAX_MESSAGE_SIZE};

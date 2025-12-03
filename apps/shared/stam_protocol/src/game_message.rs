@@ -9,6 +9,12 @@ pub struct ModInfo {
     pub mod_type: String,
     /// Download URL for this mod
     pub download_url: String,
+    /// SHA-512 hash of the mod archive
+    pub archive_sha512: String,
+    /// Size of the mod archive in bytes
+    pub archive_bytes: u64,
+    /// Size of the uncompressed mod contents in bytes
+    pub uncompressed_bytes: u64,
 }
 
 /// Game protocol messages for authenticated game clients

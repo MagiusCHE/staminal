@@ -755,6 +755,7 @@ fn process_commands(
                         &mut node_query,
                         &mut text_color_query,
                         &mut button_query,
+                        &mut commands,
                     );
                     let _ = response_tx.send(result);
                 } else {
@@ -781,6 +782,7 @@ fn process_commands(
                             &mut node_query,
                             &mut text_color_query,
                             &mut button_query,
+                            &mut commands,
                         ) {
                             errors.push(e);
                         }
@@ -796,6 +798,7 @@ fn process_commands(
                             &mut node_query,
                             &mut text_color_query,
                             &mut button_query,
+                            &mut commands,
                         ) {
                             errors.push(e);
                         }
@@ -1074,6 +1077,11 @@ fn create_widget_entity(
                 entity_cmd.insert(BackgroundColor(color_value_to_bevy(color)));
             }
 
+            // Apply border radius if specified
+            if let Some(radius) = config.border_radius {
+                entity_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
+            }
+
             entity_cmd.insert(ChildOf(parent_entity));
             entity_cmd.id()
         }
@@ -1141,6 +1149,11 @@ fn create_widget_entity(
                 entity_cmd.insert(BackgroundColor(color_value_to_bevy(bg_color)));
             }
 
+            // Apply border radius if specified
+            if let Some(radius) = config.border_radius {
+                entity_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
+            }
+
             let entity = entity_cmd.id();
             commands.entity(entity).insert(ChildOf(parent_entity));
 
@@ -1192,30 +1205,36 @@ fn create_widget_entity(
                 }
             };
 
-            let button_entity = commands
-                .spawn((
-                    button_node,
-                    Button,
-                    BackgroundColor(normal),
-                    ButtonColors {
-                        normal,
-                        hovered,
-                        pressed,
-                        disabled,
-                    },
-                    StamWidget {
-                        id: widget_id,
-                        window_id,
-                        widget_type,
-                    },
-                    WidgetEventSubscriptions {
-                        on_click: true,
-                        on_hover: true,
-                        ..default()
-                    },
-                    PreviousInteraction::default(),
-                    widget_font_config.clone(), // Store for child inheritance
-                ))
+            let mut button_cmd = commands.spawn((
+                button_node,
+                Button,
+                BackgroundColor(normal),
+                ButtonColors {
+                    normal,
+                    hovered,
+                    pressed,
+                    disabled,
+                },
+                StamWidget {
+                    id: widget_id,
+                    window_id,
+                    widget_type,
+                },
+                WidgetEventSubscriptions {
+                    on_click: true,
+                    on_hover: true,
+                    ..default()
+                },
+                PreviousInteraction::default(),
+                widget_font_config.clone(), // Store for child inheritance
+            ));
+
+            // Apply border radius if specified
+            if let Some(radius) = config.border_radius {
+                button_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
+            }
+
+            let button_entity = button_cmd
                 .with_children(|parent| {
                     parent.spawn((
                         Text::new(label),
@@ -1236,19 +1255,24 @@ fn create_widget_entity(
                 .map(color_value_to_bevy)
                 .unwrap_or(Color::srgba(0.2, 0.2, 0.2, 0.8));
 
-            commands
-                .spawn((
-                    node,
-                    BackgroundColor(bg_color),
-                    StamWidget {
-                        id: widget_id,
-                        window_id,
-                        widget_type,
-                    },
-                    WidgetEventSubscriptions::default(),
-                    ChildOf(parent_entity),
-                ))
-                .id()
+            let mut entity_cmd = commands.spawn((
+                node,
+                BackgroundColor(bg_color),
+                StamWidget {
+                    id: widget_id,
+                    window_id,
+                    widget_type,
+                },
+                WidgetEventSubscriptions::default(),
+                ChildOf(parent_entity),
+            ));
+
+            // Apply border radius if specified
+            if let Some(radius) = config.border_radius {
+                entity_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
+            }
+
+            entity_cmd.id()
         }
 
         WidgetType::Image => {
@@ -1260,19 +1284,24 @@ fn create_widget_entity(
                 .map(color_value_to_bevy)
                 .unwrap_or(Color::srgba(0.5, 0.5, 0.5, 1.0));
 
-            commands
-                .spawn((
-                    node,
-                    BackgroundColor(bg_color),
-                    StamWidget {
-                        id: widget_id,
-                        window_id,
-                        widget_type,
-                    },
-                    WidgetEventSubscriptions::default(),
-                    ChildOf(parent_entity),
-                ))
-                .id()
+            let mut entity_cmd = commands.spawn((
+                node,
+                BackgroundColor(bg_color),
+                StamWidget {
+                    id: widget_id,
+                    window_id,
+                    widget_type,
+                },
+                WidgetEventSubscriptions::default(),
+                ChildOf(parent_entity),
+            ));
+
+            // Apply border radius if specified
+            if let Some(radius) = config.border_radius {
+                entity_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
+            }
+
+            entity_cmd.id()
         }
     }
 }
@@ -1287,6 +1316,7 @@ fn update_widget_property(
     node_query: &mut Query<&mut Node>,
     text_color_query: &mut Query<&mut TextColor>,
     button_query: &mut Query<(&mut ButtonColors, Option<&Children>)>,
+    commands: &mut Commands,
 ) -> Result<(), String> {
     match property {
         "content" | "label" => {
@@ -1395,6 +1425,14 @@ fn update_widget_property(
                     button_colors.disabled = color_value_to_bevy(color);
                     return Ok(());
                 }
+            }
+            Err(format!("Cannot update {} on this widget", property))
+        }
+        "borderRadius" => {
+            if let PropertyValue::Number(radius) = value {
+                // Insert or update the BorderRadius component
+                commands.entity(entity).insert(bevy::ui::BorderRadius::all(Val::Px(*radius as f32)));
+                return Ok(());
             }
             Err(format!("Cannot update {} on this widget", property))
         }

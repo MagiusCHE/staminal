@@ -4,8 +4,8 @@ L'obiettivo è implementare l'API `network.download` esposta ai Mod (sia Client 
 
 ### 1. Centralizzazione e Interfaccia
 
-* **API Centralizzata:** L'oggetto **"network"** e il metodo **"download"** devono esistere sia per il client che per il server. Centralizzare il codice di parsing dell'URI e la logica di gestione degli schemi URI in un modulo comune (`stam_protocol`).
-* **Signature (JS Mod):** `network.download(uri: string): Promise<{status: u16, buffer: Uint8Array | null, file_name: string | null, file_content: Uint8Array | null}>`
+- **API Centralizzata:** L'oggetto **"network"** e il metodo **"download"** devono esistere sia per il client che per il server. Centralizzare il codice di parsing dell'URI e la logica di gestione degli schemi URI in un modulo comune (`stam_protocol`).
+- **Signature (JS Mod):** `network.download(uri: string): Promise<{status: u16, buffer: Uint8Array | null, file_name: string | null, file_content: Uint8Array | null}>`
 
 ---
 
@@ -15,32 +15,32 @@ Il metodo `download(uri)` deve analizzare l'URI e gestire il protocollo.
 
 #### A. Gestione Protocollo `stam://`
 
-Se il protocollo è `stam://` (Download tramite *PrimalClient* ad un Server):
+Se il protocollo è `stam://` (Download tramite _PrimalClient_ ad un Server):
 
 1.  **Parsing URI:**
-    * Analizzare l'URI per estrarre: IP, Porta, Username (opzionale), Password (opzionale), e la **Route** (il percorso dopo l'autorità `ip:porta`).
-2.  **Connessione:** Connettersi al Server (`ip:porta`) con una **nuova socket one-shot** (usare il connettore *PrimalClient*).
+    - Analizzare l'URI per estrarre: IP, Porta, Username (opzionale), Password (opzionale), e la **Route** (il percorso dopo l'autorità `ip:porta`).
+2.  **Connessione:** Connettersi al Server (`ip:porta`) con una **nuova socket one-shot** (usare il connettore _PrimalClient_).
 3.  **Flusso di Comunicazione:**
-    * Attendere il **Welcome Message** dal server.
-    * Inviare un messaggio **`PrimalMessage::Intent`** con **`IntentType::RequestUri`** e i seguenti argomenti (payload):
-        * `client_version` (String)
-        * `username` (String, se presente nell'URI)
-        * `password_hash` (String, SHA-512) (se presente nell'URI)
-        * `game_id` (String, il gioco attivo su cui è configurato il client e che esso ha ricevuto dal server durante il "PrimalLogin").
-        * `uri` (String, la richiesta originale **epurata della parte sulle credenziali** per la sicurezza).
+    - Attendere il **Welcome Message** dal server.
+    - Inviare un messaggio **`PrimalMessage::Intent`** con **`IntentType::RequestUri`** e i seguenti argomenti (payload):
+      - `client_version` (String)
+      - `username` (String, se presente nell'URI)
+      - `password_hash` (String, SHA-512) (se presente nell'URI)
+      - `game_id` (String, il gioco attivo su cui è configurato il client e che esso ha ricevuto dal server durante il "PrimalLogin").
+      - `uri` (String, la richiesta originale **epurata della parte sulle credenziali** per la sicurezza).
 4.  **Attesa Risposta:** Attendere un singolo messaggio di risposta dal Server.
-    * La risposta deve contenere i seguenti parametri serializzati:
-        * `status` (`u16`).
-        * `buffer` (Array di `u8` se presente).
-        * se `Response.filepath` sul Server era valorizzato
-          * `file_name` (String). 
-          * `file_size` in bytes (ulong)
-          * `file_content` (Array di byte in chunk). La grandezza del chunk deve essere dichiarata nel file di configurazione del server e come fallback è pari a 500kb (request_uri_chunk_size).
+    - La risposta deve contenere i seguenti parametri serializzati:
+      - `status` (`u16`).
+      - `buffer` (Array di `u8` se presente).
+      - se `Response.filepath` sul Server era valorizzato
+        - `file_name` (String).
+        - `file_size` in bytes (ulong)
+        - `file_content` (Array di byte in chunk). La grandezza del chunk deve essere dichiarata nel file di configurazione del server e come fallback è pari a 500kb (network_max_chunk_size).
 5.  **Chiusura:** Chiudere la socket immediatamente dopo aver ricevuto tutta la risposta (tutto il file).
 
 #### B. Gestione Altri Protocolli (`http://`, `https://`)
 
-* **TODO:** L'implementazione Client deve concentrarsi solo sul protocollo `stam://`. **Fallire con un errore chiaro (`Response.status = 501 Not Implemented`) per gli altri schemi.**
+- **TODO:** L'implementazione Client deve concentrarsi solo sul protocollo `stam://`. **Fallire con un errore chiaro (`Response.status = 501 Not Implemented`) per gli altri schemi.**
 
 ---
 
@@ -48,9 +48,9 @@ Se il protocollo è `stam://` (Download tramite *PrimalClient* ad un Server):
 
 #### A. Gestione Messaggio Entrante
 
-* **`IntentType`:** Aggiungere **`IntentType::RequestUri`** per gestire la richiesta one-shot del client.
-* **Validazione:** Dopo aver ricevuto `IntentType::RequestUri`, il Server deve validare i parametri: `client_version`, `username`/`password_hash`, `game_id`, e `uri`.
-  * Per ora la validazione delle credenziali `username`/`password_hash` è sempre TRUE (come fatto anche negli altri casi). Se non è presente, centralizzare la funcione di controllo credenziali con una funzione che accetti `username`/`password_hash`, `game_id`, `client_version` e che per il moemnto torni sempre TRUE.
+- **`IntentType`:** Aggiungere **`IntentType::RequestUri`** per gestire la richiesta one-shot del client.
+- **Validazione:** Dopo aver ricevuto `IntentType::RequestUri`, il Server deve validare i parametri: `client_version`, `username`/`password_hash`, `game_id`, e `uri`.
+  - Per ora la validazione delle credenziali `username`/`password_hash` è sempre TRUE (come fatto anche negli altri casi). Se non è presente, centralizzare la funcione di controllo credenziali con una funzione che accetti `username`/`password_hash`, `game_id`, `client_version` e che per il moemnto torni sempre TRUE.
 
 #### B. Flusso Event System
 
@@ -64,16 +64,15 @@ Se il protocollo è `stam://` (Download tramite *PrimalClient* ad un Server):
 Il Server analizza l'oggetto `Response` e prepara il messaggio finale per il Client:
 
 1.  **Lettura File (se necessario):** Se `Response.filepath` è valorizzato (non vuoto), il Server deve:
-    * **Costruire il Path Assoluto:** Unire la root attuale dei dati con `Response.filepath`.
-    * **Caricare il Contenuto:** Leggere l'intero contenuto del file in un array di byte (`file_content`).
-    * **Estrarre il Nome:** Estrarre solo il nome del file dal `Response.filepath`.
-2.  **Invio Risposta:** Inviare al Client i seguenti parametri serializzati, utilizzando il formato di risposta *PrimalMessage*:
-    * `status` (`u16`, da `Response.status`).
-    * `buffer` (Array di `u8`, la parte valida del `Response.buffer` se `Response.buffer_size > 0`).
-    * `file_name` (Stringa, se il file è stato caricato).
-    * `file_size` in bytes (ulong)
-    * `file_content` (Array di byte in chunk). La grandezza del chunk deve essere dichiarata nel file di configurazione del server e come fallback è pari a 500kb (request_uri_chunk_size).
+    - **Costruire il Path Assoluto:** Unire la root attuale dei dati con `Response.filepath`.
+    - **Caricare il Contenuto:** Leggere l'intero contenuto del file in un array di byte (`file_content`).
+    - **Estrarre il Nome:** Estrarre solo il nome del file dal `Response.filepath`.
+2.  **Invio Risposta:** Inviare al Client i seguenti parametri serializzati, utilizzando il formato di risposta _PrimalMessage_:
+    - `status` (`u16`, da `Response.status`).
+    - `buffer` (Array di `u8`, la parte valida del `Response.buffer` se `Response.buffer_size > 0`).
+    - `file_name` (Stringa, se il file è stato caricato).
+    - `file_size` in bytes (ulong)
+    - `file_content` (Array di byte in chunk). La grandezza del chunk deve essere dichiarata nel file di configurazione del server e come fallback è pari a 500kb (network_max_chunk_size).
 3.  **Gestione Server Error:** Se la lettura del file fallisce sul Server (es. file non trovato/permessi), il Server deve:
-    * Impostare lo `status` a `500` o `404`.
-    * Inviare questa risposta d'errore al Client.
-
+    - Impostare lo `status` a `500` o `404`.
+    - Inviare questa risposta d'errore al Client.

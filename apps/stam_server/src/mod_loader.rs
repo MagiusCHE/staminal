@@ -244,6 +244,7 @@ fn initialize_game_mods(
             // Server loads all mods immediately, so loaded: true
             // download_url is None on server (mods are already local)
             // exists: true on server (all mods are local)
+            // archive fields are None on server (not needed)
             js_adapter.register_mod_info(ModInfo {
                 id: mod_id.clone(),
                 version: manifest.version.clone(),
@@ -255,6 +256,9 @@ fn initialize_game_mods(
                 loaded: true,
                 exists: true,
                 download_url: None,
+                archive_sha512: None,
+                archive_bytes: None,
+                uncompressed_bytes: None,
             });
 
             mod_entries.push((mod_id.clone(), entry_point_path, manifest.mod_type.clone().unwrap_or_default()));

@@ -505,6 +505,12 @@ impl SystemJS {
     /// - mod_type: string | null
     /// - priority: number
     /// - bootstrapped: boolean
+    /// - loaded: boolean
+    /// - exists: boolean
+    /// - download_url: string | null
+    /// - archive_sha512: string | null (if available from server)
+    /// - archive_bytes: number | null (if available from server)
+    /// - uncompressed_bytes: number | null (if available from server)
     #[qjs(rename = "getMods")]
     pub fn get_mods<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Array<'js>> {
         //tracing::debug!("SystemJS::get_mods called");
@@ -535,6 +541,17 @@ impl SystemJS {
             obj.set("loaded", mod_info.loaded)?;
             obj.set("exists", mod_info.exists)?;
             obj.set("download_url", mod_info.download_url.as_deref())?;
+            obj.set("archive_sha512", mod_info.archive_sha512.as_deref())?;
+            if let Some(bytes) = mod_info.archive_bytes {
+                obj.set("archive_bytes", bytes)?;
+            } else {
+                obj.set("archive_bytes", rquickjs::Null)?;
+            }
+            if let Some(bytes) = mod_info.uncompressed_bytes {
+                obj.set("uncompressed_bytes", bytes)?;
+            } else {
+                obj.set("uncompressed_bytes", rquickjs::Null)?;
+            }
             array.set(idx, obj)?;
         }
 
@@ -1090,12 +1107,26 @@ impl LocaleJS {
             .unwrap_or_else(|_| "unknown".to_string());
 
         // Convert JavaScript object to HashMap<String, String>
+        // Handle any JS value type (string, number, boolean, etc.) by converting to string
         let mut args_map = HashMap::new();
 
-        // Iterate over object properties
-        for result in args.props::<String, String>() {
+        // Iterate over object properties with Value type to handle any JS type
+        for result in args.props::<String, rquickjs::Value>() {
             if let Ok((key, value)) = result {
-                args_map.insert(key, value);
+                // Convert JS value to string representation
+                let string_value = if value.is_string() {
+                    value.as_string().map(|s| s.to_string().unwrap_or_default()).unwrap_or_default()
+                } else if value.is_int() {
+                    value.as_int().map(|n| n.to_string()).unwrap_or_default()
+                } else if value.is_float() {
+                    value.as_float().map(|n| n.to_string()).unwrap_or_default()
+                } else if value.is_bool() {
+                    value.as_bool().map(|b| b.to_string()).unwrap_or_default()
+                } else {
+                    // Fallback: try to convert to string via coercion
+                    value.as_string().map(|s| s.to_string().unwrap_or_default()).unwrap_or_default()
+                };
+                args_map.insert(key, string_value);
             }
         }
 
@@ -1197,16 +1228,23 @@ impl NetworkJS {
                         // Download completed - break and return result
                         break result;
                     }
-                    _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(300)) => {
                         // Timer fired - check progress and call JS callback if changed
-                        if let Ok(state) = state_for_polling.lock() {
-                            let current = *state;
-                            // Only call if there's been progress
-                            if current.1 > last_reported.1 {
-                                last_reported = current;
-                                // Call the JS callback with current progress
-                                let _ = callback_clone.call::<_, ()>((current.0, current.1, current.2));
+                        let current = {
+                            // Scope the lock to release it quickly
+                            if let Ok(state) = state_for_polling.lock() {
+                                *state
+                            } else {
+                                continue;
                             }
+                        };
+                        // Only call if there's been progress
+                        if current.1 > last_reported.1 {
+                            last_reported = current;
+                            // Call the JS callback with current progress
+                            let _ = callback_clone.call::<_, ()>((current.0, current.1, current.2));
+                            // Yield to allow JS runtime to process the callback
+                            //tokio::task::yield_now().await;
                         }
                     }
                 }

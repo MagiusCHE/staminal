@@ -177,6 +177,12 @@ pub struct ModInfo {
     pub exists: bool,
     /// Download URL for this mod (stam:// URI from server)
     pub download_url: Option<String>,
+    /// SHA-512 hash of the mod archive (if available from server)
+    pub archive_sha512: Option<String>,
+    /// Size of the mod archive in bytes (if available from server)
+    pub archive_bytes: Option<u64>,
+    /// Size of the uncompressed mod contents in bytes (if available from server)
+    pub uncompressed_bytes: Option<u64>,
 }
 
 /// Information about the current game context (client-side only)
@@ -499,6 +505,9 @@ impl SystemApi {
             loaded: false,
             exists: true,  // Just installed, so it exists locally
             download_url: None,
+            archive_sha512: None,  // Not available after installation
+            archive_bytes: None,
+            uncompressed_bytes: None,
         };
 
         self.register_mod(mod_info);

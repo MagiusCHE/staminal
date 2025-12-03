@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpStream;
-use tracing::{info, debug, error, warn};
+use tracing::{info, debug, error, warn, trace};
 
 use stam_protocol::{IntentType, PrimalMessage, PrimalStream, ServerInfo};
 
@@ -278,8 +278,12 @@ impl PrimalClient {
             stam_mod_runtimes::api::UriResponse::default()
         };
 
-        // Chunk size for streaming large files (512 KB)
-        const CHUNK_SIZE: usize = 512 * 1024;
+        // Adaptive chunk sizing for optimal throughput
+        // Start with a larger chunk size for better localhost performance
+        const MIN_CHUNK_SIZE: usize = 256 * 1024;     // 256 KB minimum
+        const INITIAL_CHUNK_SIZE: usize = 4 * 1024 * 1024;  // Start at 4 MB for fast ramp-up
+        const TARGET_CHUNK_TIME_MS: u128 = 50;        // Target ~50ms per chunk for better throughput
+        let max_chunk_size = self.config.network_max_chunk_size.as_bytes();
 
         // Check if we need to read file content
         if !response.filepath.is_empty() {
@@ -371,42 +375,119 @@ impl PrimalClient {
                     }
                 };
 
-                let mut reader = tokio::io::BufReader::new(file);
-                let mut buffer = vec![0u8; CHUNK_SIZE];
+                // Use a larger buffer for BufReader to enable bigger reads
+                let mut reader = tokio::io::BufReader::with_capacity(max_chunk_size, file);
+                let mut current_chunk_size = INITIAL_CHUNK_SIZE.min(max_chunk_size);
+                let mut buffer = vec![0u8; max_chunk_size]; // Allocate max size once
                 let mut total_sent: u64 = 0;
+                let start_time = std::time::Instant::now();
+
+                // Bandwidth limiting configuration
+                let bandwidth_limit = self.config.download_bandwidth_limit_x_client_ps.as_bytes();
+                let rate_limit_enabled = bandwidth_limit > 0;
+                if rate_limit_enabled {
+                    debug!("Rate limiting enabled: {} bytes/sec ({}/s)",
+                        bandwidth_limit,
+                        crate::config::ByteSize(bandwidth_limit));
+                }
 
                 loop {
-                    let bytes_read = match reader.read(&mut buffer).await {
-                        Ok(0) => break, // EOF
-                        Ok(n) => n,
-                        Err(e) => {
-                            error!("Failed to read file '{}': {}", path.display(), e);
-                            // Send empty final chunk to signal error
-                            let _ = self.stream.write_primal_message(&PrimalMessage::UriResponseChunk {
-                                data: Vec::new(),
-                                is_final: true,
-                            }).await;
-                            return;
+                    // Read exactly current_chunk_size bytes (or less if EOF)
+                    // We use read_buf pattern to fill as much as possible
+                    let mut bytes_read = 0;
+                    while bytes_read < current_chunk_size {
+                        match reader.read(&mut buffer[bytes_read..current_chunk_size]).await {
+                            Ok(0) => break, // EOF
+                            Ok(n) => bytes_read += n,
+                            Err(e) => {
+                                error!("Failed to read file '{}': {}", path.display(), e);
+                                // Send empty final chunk to signal error
+                                let _ = self.stream.write_primal_message(&PrimalMessage::UriResponseChunk {
+                                    data: Vec::new(),
+                                    is_final: true,
+                                }).await;
+                                return;
+                            }
                         }
-                    };
+                    }
+
+                    if bytes_read == 0 {
+                        break; // EOF reached
+                    }
 
                     total_sent += bytes_read as u64;
                     let is_final = total_sent >= file_size;
 
-                    if let Err(e) = self.stream.write_primal_message(&PrimalMessage::UriResponseChunk {
-                        data: buffer[..bytes_read].to_vec(),
-                        is_final,
-                    }).await {
+                    // Measure time to send this chunk
+                    let chunk_start = std::time::Instant::now();
+
+                    // Use raw chunk writing to avoid allocations
+                    if let Err(e) = self.stream.write_raw_chunk(&buffer[..bytes_read], is_final).await {
                         error!("Failed to send file chunk: {}", e);
                         return;
                     }
+
+                    let chunk_elapsed_ms = chunk_start.elapsed().as_millis();
+
+                    // Log current chunk size in human-readable format
+                    trace!("Sent chunk: {} ({} bytes) in {}ms",
+                        crate::config::ByteSize(bytes_read).to_string(),
+                        bytes_read,
+                        chunk_elapsed_ms);
+
+                    // Apply bandwidth limiting if configured
+                    if rate_limit_enabled {
+                        // Calculate how long this chunk should take to send at the limited rate
+                        let expected_duration_ms = (bytes_read as f64 / bandwidth_limit as f64 * 1000.0) as u64;
+                        let actual_duration_ms = chunk_elapsed_ms as u64;
+
+                        // If we sent too fast, sleep to enforce the rate limit
+                        if actual_duration_ms < expected_duration_ms {
+                            let sleep_duration_ms = expected_duration_ms - actual_duration_ms;
+                            trace!("Rate limiting: sleeping {}ms (chunk sent in {}ms, should take {}ms at {}/s)",
+                                sleep_duration_ms,
+                                actual_duration_ms,
+                                expected_duration_ms,
+                                crate::config::ByteSize(bandwidth_limit));
+                            tokio::time::sleep(tokio::time::Duration::from_millis(sleep_duration_ms)).await;
+                        }
+                    }
+
+                    // Adapt chunk size based on transfer speed
+                    // Goal: maximize throughput while keeping chunks responsive
+                    // Only increase, never decrease - TCP flow control handles congestion
+                    // When rate limiting is enabled, adaptive chunk sizing is less relevant
+                    if !rate_limit_enabled && chunk_elapsed_ms > 0 && chunk_elapsed_ms < TARGET_CHUNK_TIME_MS {
+                        // Below target time: aggressively increase chunk size
+                        let multiplier = if chunk_elapsed_ms < TARGET_CHUNK_TIME_MS / 4 {
+                            4  // Very fast (<12ms): quadruple
+                        } else if chunk_elapsed_ms < TARGET_CHUNK_TIME_MS / 2 {
+                            2  // Fast (<25ms): double
+                        } else {
+                            3  // Moderate (<50ms): increase by 50% (3/2)
+                        };
+                        if multiplier == 3 {
+                            current_chunk_size = (current_chunk_size * 3 / 2).min(max_chunk_size);
+                        } else {
+                            current_chunk_size = (current_chunk_size * multiplier).min(max_chunk_size);
+                        }
+                    }
+                    // Note: We don't decrease chunk size anymore - TCP backpressure naturally
+                    // limits throughput, and smaller chunks have more overhead
 
                     if is_final {
                         break;
                     }
                 }
 
-                debug!("Finished sending file '{}' ({} bytes sent)", path.display(), total_sent);
+                let total_elapsed = start_time.elapsed();
+                let speed_mbps = if total_elapsed.as_secs_f64() > 0.0 {
+                    (total_sent as f64 / 1024.0 / 1024.0) / total_elapsed.as_secs_f64()
+                } else {
+                    0.0
+                };
+                debug!("Finished sending file '{}' ({} bytes in {:?}, {:.2} MB/s, final chunk size: {} KB)",
+                    path.display(), total_sent, total_elapsed, speed_mbps, current_chunk_size / 1024);
             } else {
                 // Path resolution failed
                 let _ = self.stream.write_primal_message(&PrimalMessage::UriResponse {

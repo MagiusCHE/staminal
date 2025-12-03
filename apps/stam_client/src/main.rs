@@ -256,60 +256,87 @@ async fn perform_stam_request(
             }
 
             // No buffer means chunked transfer - read chunks until final
+            // Use raw chunk reading for zero-copy performance
             let total_size = file_size.unwrap_or(0);
             let mut received_bytes: u64 = 0;
-            let mut all_data: Vec<u8> = Vec::with_capacity(total_size as usize);
+
+            // Pre-allocate the final buffer with exact size (or grow as needed)
+            let mut all_data: Vec<u8> = if total_size > 0 {
+                vec![0u8; total_size as usize]  // Allocate with zeros, we'll write directly into it
+            } else {
+                Vec::new()
+            };
+
+            // Temporary chunk buffer for unknown-size transfers
+            let mut chunk_buffer: Vec<u8> = if total_size == 0 {
+                vec![0u8; 16 * 1024 * 1024]  // 16MB default chunk buffer
+            } else {
+                Vec::new()
+            };
 
             loop {
-                match stream.read_primal_message().await {
-                    Ok(PrimalMessage::UriResponseChunk { data, is_final }) => {
-                        received_bytes += data.len() as u64;
-                        all_data.extend_from_slice(&data);
+                if total_size > 0 {
+                    // Known size: read directly into final buffer position
+                    let offset = received_bytes as usize;
 
-                        // Call progress callback if provided
-                        if let Some(ref callback) = progress_callback {
-                            let percentage = if total_size > 0 {
-                                (received_bytes as f64 / total_size as f64) * 100.0
-                            } else {
-                                0.0
+                    match stream.read_raw_chunk(&mut all_data[offset..]).await {
+                        Ok((bytes_read, is_final)) => {
+                            received_bytes += bytes_read as u64;
+
+                            // Call progress callback if provided
+                            if let Some(ref callback) = progress_callback {
+                                let percentage = (received_bytes as f64 / total_size as f64) * 100.0;
+                                callback(percentage, received_bytes, total_size);
+                                // Yield to allow other tasks to run (UI updates, input handling)
+                                tokio::task::yield_now().await;
+                            }
+
+                            if is_final {
+                                // Truncate to actual size received
+                                all_data.truncate(received_bytes as usize);
+                                debug!("Received final chunk, total {} bytes", received_bytes);
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to read raw chunk: {}", e);
+                            return DownloadResponse {
+                                status: 500,
+                                buffer: None,
+                                file_name: None,
+                                file_content: None,
+                                temp_file_path: None,
                             };
-                            callback(percentage, received_bytes, total_size);
                         }
+                    }
+                } else {
+                    // Unknown size: read into temp buffer then append
+                    match stream.read_raw_chunk(&mut chunk_buffer).await {
+                        Ok((bytes_read, is_final)) => {
+                            received_bytes += bytes_read as u64;
+                            all_data.extend_from_slice(&chunk_buffer[..bytes_read]);
 
-                        if is_final {
-                            debug!("Received final chunk, total {} bytes", received_bytes);
-                            break;
+                            // Call progress callback if provided
+                            if let Some(ref callback) = progress_callback {
+                                callback(0.0, received_bytes, 0);
+                                tokio::task::yield_now().await;
+                            }
+
+                            if is_final {
+                                debug!("Received final chunk, total {} bytes", received_bytes);
+                                break;
+                            }
                         }
-                    }
-                    Ok(PrimalMessage::Error { message }) => {
-                        error!("Server error during chunk transfer: {}", message);
-                        return DownloadResponse {
-                            status: 500,
-                            buffer: None,
-                            file_name: None,
-                            file_content: None,
-                            temp_file_path: None,
-                        };
-                    }
-                    Ok(msg) => {
-                        error!("Unexpected message during chunk transfer: {:?}", msg);
-                        return DownloadResponse {
-                            status: 500,
-                            buffer: None,
-                            file_name: None,
-                            file_content: None,
-                            temp_file_path: None,
-                        };
-                    }
-                    Err(e) => {
-                        error!("Failed to read chunk: {}", e);
-                        return DownloadResponse {
-                            status: 500,
-                            buffer: None,
-                            file_name: None,
-                            file_content: None,
-                            temp_file_path: None,
-                        };
+                        Err(e) => {
+                            error!("Failed to read raw chunk: {}", e);
+                            return DownloadResponse {
+                                status: 500,
+                                buffer: None,
+                                file_name: None,
+                                file_content: None,
+                                temp_file_path: None,
+                            };
+                        }
                     }
                 }
             }
@@ -955,6 +982,7 @@ async fn connect_to_game_server(
                 for mod_info in &mods {
                     if let Some(mod_data) = mod_data_map.get(&mod_info.mod_id) {
                         // Available mod - use manifest info, exists=true
+                        // Include archive info from server for display/validation
                         js_adapter.register_mod_info(ModInfo {
                             id: mod_info.mod_id.clone(),
                             version: mod_data.manifest.version.clone(),
@@ -966,9 +994,13 @@ async fn connect_to_game_server(
                             loaded: false,  // Will be set to true when actually loaded
                             exists: true,   // Available locally
                             download_url: Some(mod_info.download_url.clone()),  // Keep URL for potential re-download
+                            archive_sha512: if mod_info.archive_sha512.is_empty() { None } else { Some(mod_info.archive_sha512.clone()) },
+                            archive_bytes: if mod_info.archive_bytes > 0 { Some(mod_info.archive_bytes) } else { None },
+                            uncompressed_bytes: if mod_info.uncompressed_bytes > 0 { Some(mod_info.uncompressed_bytes) } else { None },
                         });
                     } else {
                         // Missing mod - use info from server with placeholder values, exists=false
+                        // Include archive info from server for download UI
                         js_adapter.register_mod_info(ModInfo {
                             id: mod_info.mod_id.clone(),
                             version: "?".to_string(),
@@ -980,6 +1012,9 @@ async fn connect_to_game_server(
                             loaded: false,  // Will remain false as it's missing
                             exists: false,  // Not available locally - needs download
                             download_url: Some(mod_info.download_url.clone()),  // Needs download
+                            archive_sha512: if mod_info.archive_sha512.is_empty() { None } else { Some(mod_info.archive_sha512.clone()) },
+                            archive_bytes: if mod_info.archive_bytes > 0 { Some(mod_info.archive_bytes) } else { None },
+                            uncompressed_bytes: if mod_info.uncompressed_bytes > 0 { Some(mod_info.uncompressed_bytes) } else { None },
                         });
                     }
                 }

@@ -1,9 +1,144 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use schemars::JsonSchema;
 use stam_schema::{ModManifest, Validatable, StringOrArray};
 use stam_protocol::ModInfo;
 use std::collections::HashMap;
 use std::path::Path;
+use std::fmt;
+
+/// A byte size value that can be specified as a number or a string with suffix (K, M, G)
+/// Examples: 1024, "100K", "25M", "1G"
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteSize(pub usize);
+
+impl ByteSize {
+    /// Parse a string with optional K/M/G suffix into bytes
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err("Empty string".to_string());
+        }
+
+        // Check for suffix
+        let (num_part, multiplier) = if let Some(prefix) = s.strip_suffix('K').or_else(|| s.strip_suffix('k')) {
+            (prefix, 1024usize)
+        } else if let Some(prefix) = s.strip_suffix('M').or_else(|| s.strip_suffix('m')) {
+            (prefix, 1024 * 1024)
+        } else if let Some(prefix) = s.strip_suffix('G').or_else(|| s.strip_suffix('g')) {
+            (prefix, 1024 * 1024 * 1024)
+        } else {
+            (s, 1)
+        };
+
+        let num: usize = num_part.trim().parse()
+            .map_err(|e| format!("Invalid number '{}': {}", num_part, e))?;
+
+        Ok(ByteSize(num.saturating_mul(multiplier)))
+    }
+
+    /// Get the value in bytes
+    pub fn as_bytes(&self) -> usize {
+        self.0
+    }
+}
+
+impl Default for ByteSize {
+    fn default() -> Self {
+        ByteSize(25 * 1024 * 1024) // 25 MB
+    }
+}
+
+impl fmt::Display for ByteSize {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let bytes = self.0;
+        if bytes >= 1024 * 1024 * 1024 && bytes % (1024 * 1024 * 1024) == 0 {
+            write!(f, "{}G", bytes / (1024 * 1024 * 1024))
+        } else if bytes >= 1024 * 1024 && bytes % (1024 * 1024) == 0 {
+            write!(f, "{}M", bytes / (1024 * 1024))
+        } else if bytes >= 1024 && bytes % 1024 == 0 {
+            write!(f, "{}K", bytes / 1024)
+        } else {
+            write!(f, "{}", bytes)
+        }
+    }
+}
+
+impl Serialize for ByteSize {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        // Serialize as a formatted string for readability
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for ByteSize {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        use serde::de::{self, Visitor};
+
+        struct ByteSizeVisitor;
+
+        impl<'de> Visitor<'de> for ByteSizeVisitor {
+            type Value = ByteSize;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+                formatter.write_str("a number or a string with optional K/M/G suffix (e.g., 1024, \"100K\", \"25M\", \"1G\")")
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<ByteSize, E>
+            where
+                E: de::Error,
+            {
+                Ok(ByteSize(value as usize))
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<ByteSize, E>
+            where
+                E: de::Error,
+            {
+                if value < 0 {
+                    Err(E::custom("byte size cannot be negative"))
+                } else {
+                    Ok(ByteSize(value as usize))
+                }
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<ByteSize, E>
+            where
+                E: de::Error,
+            {
+                ByteSize::parse(value).map_err(E::custom)
+            }
+        }
+
+        deserializer.deserialize_any(ByteSizeVisitor)
+    }
+}
+
+impl JsonSchema for ByteSize {
+    fn schema_name() -> String {
+        "ByteSize".to_string()
+    }
+
+    fn json_schema(_gen: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
+        use schemars::schema::{Schema, SchemaObject, InstanceType, SingleOrVec};
+
+        // Accept both string and integer
+        let mut schema = SchemaObject::default();
+        schema.instance_type = Some(SingleOrVec::Vec(vec![
+            InstanceType::String,
+            InstanceType::Integer,
+        ]));
+        schema.metadata().description = Some(
+            "Byte size as number or string with suffix (K=KB, M=MB, G=GB). Examples: 1024, \"100K\", \"25M\", \"1G\"".to_string()
+        );
+        Schema::Object(schema)
+    }
+}
 
 /// Mod configuration for a game
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -81,6 +216,16 @@ pub struct Config {
     #[serde(default)]
     #[schemars(description = "Available games on this server")]
     pub games: HashMap<String, GameConfig>,
+
+    /// Maximum chunk size for network transfers in bytes
+    #[serde(default)]
+    #[schemars(description = "Maximum chunk size for network file transfers. Accepts numbers or strings with K/M/G suffix (default: 25M)")]
+    pub network_max_chunk_size: ByteSize,
+
+    /// Download bandwidth limit per client in bytes per second
+    #[serde(default)]
+    #[schemars(description = "Maximum download bandwidth per client in bytes per second. Set to 0 or omit for unlimited. Accepts numbers or strings with K/M/G suffix")]
+    pub download_bandwidth_limit_x_client_ps: ByteSize,
 }
 
 fn default_name() -> String {
@@ -118,6 +263,8 @@ impl Default for Config {
             tick_rate: default_tick_rate(),
             public_uri: None,
             games: HashMap::new(),
+            network_max_chunk_size: ByteSize::default(),
+            download_bandwidth_limit_x_client_ps: ByteSize(0), // 0 = unlimited
         }
     }
 }
@@ -140,6 +287,17 @@ impl Config {
                     .join(candidate)
             }
         };
+
+        // Load mod-packages registry to get archive information
+        let home_dir = if let Some(home) = custom_home {
+            std::path::PathBuf::from(home)
+        } else {
+            std::env::current_dir()
+                .map_err(|e| format!("Failed to get current directory: {}", e))?
+        };
+
+        let mod_packages = stam_mod_runtimes::api::ModPackagesRegistry::load_from_home(&home_dir)
+            .map_err(|e| format!("Failed to load mod-packages.json: {}", e))?;
 
         for (game_id, game_config) in &mut self.games {
             // First pass: read manifests and populate mod_type and execute_on for each enabled mod
@@ -280,10 +438,17 @@ impl Config {
                 .filter(|(_, mod_config)| mod_config.enabled)
                 .filter(|(_, mod_config)| mod_config.execute_on.contains("client"))
                 .map(|(mod_id, mod_config)| {
+                    // Find package info for this mod in the registry
+                    let package_info = mod_packages.client.iter()
+                        .find(|pkg| pkg.id == *mod_id);
+
                     ModInfo {
                         mod_id: mod_id.clone(),
                         mod_type: mod_config.mod_type.clone().unwrap_or_default(),
                         download_url: mod_config.client_download.clone(),
+                        archive_sha512: package_info.map(|p| p.archive_sha512.clone()).unwrap_or_default(),
+                        archive_bytes: package_info.map(|p| p.archive_bytes).unwrap_or(0),
+                        uncompressed_bytes: package_info.map(|p| p.uncompressed_bytes).unwrap_or(0),
                     }
                 })
                 .collect();
@@ -350,5 +515,66 @@ mod tests {
 
         let result = Config::from_json_str(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_byte_size_parse() {
+        // Test numeric values
+        assert_eq!(ByteSize::parse("1024").unwrap().as_bytes(), 1024);
+        assert_eq!(ByteSize::parse("0").unwrap().as_bytes(), 0);
+
+        // Test K suffix
+        assert_eq!(ByteSize::parse("100K").unwrap().as_bytes(), 100 * 1024);
+        assert_eq!(ByteSize::parse("100k").unwrap().as_bytes(), 100 * 1024);
+        assert_eq!(ByteSize::parse(" 100K ").unwrap().as_bytes(), 100 * 1024);
+
+        // Test M suffix
+        assert_eq!(ByteSize::parse("25M").unwrap().as_bytes(), 25 * 1024 * 1024);
+        assert_eq!(ByteSize::parse("25m").unwrap().as_bytes(), 25 * 1024 * 1024);
+
+        // Test G suffix
+        assert_eq!(ByteSize::parse("1G").unwrap().as_bytes(), 1024 * 1024 * 1024);
+        assert_eq!(ByteSize::parse("1g").unwrap().as_bytes(), 1024 * 1024 * 1024);
+
+        // Test errors
+        assert!(ByteSize::parse("").is_err());
+        assert!(ByteSize::parse("abc").is_err());
+        assert!(ByteSize::parse("100X").is_err());
+    }
+
+    #[test]
+    fn test_byte_size_serde() {
+        // Test deserializing number
+        let json = r#"{"network_max_chunk_size": 1048576}"#;
+        let config: serde_json::Value = serde_json::from_str(json).unwrap();
+        let size: ByteSize = serde_json::from_value(config["network_max_chunk_size"].clone()).unwrap();
+        assert_eq!(size.as_bytes(), 1048576);
+
+        // Test deserializing string with suffix
+        let json = r#"{"network_max_chunk_size": "25M"}"#;
+        let config: serde_json::Value = serde_json::from_str(json).unwrap();
+        let size: ByteSize = serde_json::from_value(config["network_max_chunk_size"].clone()).unwrap();
+        assert_eq!(size.as_bytes(), 25 * 1024 * 1024);
+
+        // Test deserializing string with K suffix
+        let json = r#"{"network_max_chunk_size": "100K"}"#;
+        let config: serde_json::Value = serde_json::from_str(json).unwrap();
+        let size: ByteSize = serde_json::from_value(config["network_max_chunk_size"].clone()).unwrap();
+        assert_eq!(size.as_bytes(), 100 * 1024);
+
+        // Test deserializing string with G suffix
+        let json = r#"{"network_max_chunk_size": "1G"}"#;
+        let config: serde_json::Value = serde_json::from_str(json).unwrap();
+        let size: ByteSize = serde_json::from_value(config["network_max_chunk_size"].clone()).unwrap();
+        assert_eq!(size.as_bytes(), 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn test_byte_size_display() {
+        assert_eq!(format!("{}", ByteSize(1024)), "1K");
+        assert_eq!(format!("{}", ByteSize(1024 * 1024)), "1M");
+        assert_eq!(format!("{}", ByteSize(1024 * 1024 * 1024)), "1G");
+        assert_eq!(format!("{}", ByteSize(25 * 1024 * 1024)), "25M");
+        assert_eq!(format!("{}", ByteSize(500)), "500");
     }
 }
