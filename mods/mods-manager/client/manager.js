@@ -306,14 +306,16 @@ export class Manager {
 
         //await wait(5000); // DEBUG
 
+        console.log("All downloads initiated, waiting for installations to complete...");
         // Wait all installations to complete
         while (!this.#UIState.cancelled && !this.#UIState.last_error_occurred) {
-            const pendingInstalls = Object.entries(this.#UIState.mods).filter(([modId, modState]) => !modState.installed);
+            const pendingInstalls = Object.entries(this.#UIState.mods).filter(([modId, modState]) => !modState.installed && !modState.exists);
             if (pendingInstalls.length === 0) {
                 break;
             }
             await wait(250);
         }
+        console.log("All installations completed.");
 
         if (this.#UIState.cancelled) {
             return;
@@ -324,6 +326,11 @@ export class Manager {
         }
 
         // Now attach all mods (downloaded + existing)
+        for (const modId in toDownload) {
+            const mod = toDownload[modId];
+            toAttach.push(mod);
+        }
+        console.log("Attaching %o mods...", toAttach.length);
         for (const mod of toAttach) {
             // Loading (attaching)            
             try {

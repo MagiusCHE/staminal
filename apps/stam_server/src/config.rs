@@ -405,8 +405,8 @@ impl Config {
 
                 // Ensure we found at least one manifest
                 let manifest = primary_manifest.ok_or_else(|| format!(
-                    "Game '{}': No manifest.json found for mod '{}'",
-                    game_id, mod_id
+                    "Game '{}': No manifest.json found for mod '{}'. Have you copy the mod into {} ?",
+                    game_id, mod_id, mods_path.display()
                 ))?;
 
                 // Populate execute_on from combined manifests
