@@ -6,7 +6,7 @@ use clap::Parser;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::time::{Duration, interval};
-use tracing::{Level, debug, error, info, warn};
+use tracing::{Level, debug, error, info, trace, warn};
 
 use stam_mod_runtimes::adapters::js::run_js_event_loop;
 use stam_log::{LogConfig, init_logging};
@@ -267,7 +267,7 @@ async fn main() {
             biased;
 
             // Handle shutdown requests from mods (system.exit)
-            exit_code = shutdown_rx.recv() => {
+            exit_code = shutdown_rx.recv(), if !shutdown_rx.is_closed() => {
                 if let Some(code) = exit_code {
                     info!("Graceful shutdown requested with exit code {}", code);
                     // TODO: Could store exit_code and use it when process exits
@@ -284,6 +284,9 @@ async fn main() {
                 }
             } => {
                 if let Some(key_request) = key_request {
+                    trace!("Terminal key received: key='{}', ctrl={}, combo='{}'",
+                        key_request.key, key_request.ctrl, key_request.combo);
+
                     // Dispatch to all game runtimes
                     let mut handled = false;
                     for (game_id, runtime) in game_runtimes.iter() {

@@ -103,13 +103,46 @@ pub fn initialize_all_games(
             .map_err(|e| format!("Failed to get current directory: {}", e))?
     };
 
+    // Collect all enabled mod IDs from enabled games
+    let enabled_mod_ids: std::collections::HashSet<String> = config.games.iter()
+        .filter(|(_, game_config)| game_config.enabled)
+        .flat_map(|(_, game_config)| {
+            game_config.mods.iter()
+                .filter(|(_, mod_config)| mod_config.enabled)
+                .map(|(mod_id, _)| mod_id.clone())
+        })
+        .collect();
+
     // Load mod packages registry from STAM_HOME/mod-packages/mod-packages.json
-    let mod_packages = ModPackagesRegistry::load_from_home(&home_dir)
+    // and filter to only include packages for enabled mods
+    let full_registry = ModPackagesRegistry::load_from_home(&home_dir)
         .map_err(|e| format!("Failed to load mod-packages.json: {}", e))?;
+
+    let mod_packages = ModPackagesRegistry {
+        client: full_registry.client.into_iter()
+            .filter(|pkg| enabled_mod_ids.contains(&pkg.id))
+            .collect(),
+        server: full_registry.server.into_iter()
+            .filter(|pkg| enabled_mod_ids.contains(&pkg.id))
+            .collect(),
+    };
+
+    info!(
+        "Loaded mod-packages: {} client packages, {} server packages (from {} enabled mods)",
+        mod_packages.client.len(),
+        mod_packages.server.len(),
+        enabled_mod_ids.len()
+    );
 
     let mut runtimes: HashMap<String, GameModRuntime> = HashMap::new();
 
     for (game_id, game_config) in &config.games {
+        // Skip disabled games
+        if !game_config.enabled {
+            info!("Skipping disabled game '{}'", game_id);
+            continue;
+        }
+
         let game_runtime = initialize_game_mods(game_id, game_config, &mods_root, server_version, &home_dir, &mod_packages)?;
         runtimes.insert(game_id.clone(), game_runtime);
     }

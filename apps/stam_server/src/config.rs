@@ -159,6 +159,9 @@ pub struct ModConfig {
 /// Game configuration
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct GameConfig {
+    /// Whether this game is enabled (default: true)
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     /// Game name (human-readable)
     pub name: String,
     /// Game version
@@ -252,6 +255,10 @@ fn default_tick_rate() -> u64 {
     64
 }
 
+fn default_true() -> bool {
+    true
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -288,7 +295,18 @@ impl Config {
             }
         };
 
+        // Collect all enabled mod IDs from enabled games
+        let enabled_mod_ids: std::collections::HashSet<String> = self.games.iter()
+            .filter(|(_, game_config)| game_config.enabled)
+            .flat_map(|(_, game_config)| {
+                game_config.mods.iter()
+                    .filter(|(_, mod_config)| mod_config.enabled)
+                    .map(|(mod_id, _)| mod_id.clone())
+            })
+            .collect();
+
         // Load mod-packages registry to get archive information
+        // and filter to only include packages for enabled mods
         let home_dir = if let Some(home) = custom_home {
             std::path::PathBuf::from(home)
         } else {
@@ -296,10 +314,25 @@ impl Config {
                 .map_err(|e| format!("Failed to get current directory: {}", e))?
         };
 
-        let mod_packages = stam_mod_runtimes::api::ModPackagesRegistry::load_from_home(&home_dir)
+        let full_registry = stam_mod_runtimes::api::ModPackagesRegistry::load_from_home(&home_dir)
             .map_err(|e| format!("Failed to load mod-packages.json: {}", e))?;
 
+        let mod_packages = stam_mod_runtimes::api::ModPackagesRegistry {
+            client: full_registry.client.into_iter()
+                .filter(|pkg| enabled_mod_ids.contains(&pkg.id))
+                .collect(),
+            server: full_registry.server.into_iter()
+                .filter(|pkg| enabled_mod_ids.contains(&pkg.id))
+                .collect(),
+        };
+
         for (game_id, game_config) in &mut self.games {
+            // Skip disabled games
+            if !game_config.enabled {
+                tracing::debug!("Skipping disabled game '{}'", game_id);
+                continue;
+            }
+
             // First pass: read manifests and populate mod_type and execute_on for each enabled mod
             let mod_ids: Vec<String> = game_config.mods.keys().cloned().collect();
 
