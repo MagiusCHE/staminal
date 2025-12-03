@@ -301,7 +301,7 @@ impl GraphicProxy {
         })
         .map_err(|_| "Failed to send command to graphic engine")?;
 
-        tracing::debug!("Waiting for CreateWindow response for window {}", window_id);
+        // tracing::debug!("Waiting for CreateWindow response for window {}", window_id);
 
         response_rx
             .await
@@ -312,7 +312,7 @@ impl GraphicProxy {
         window_info.mark_created();
         self.windows.write().unwrap().insert(window_id, window_info);
 
-        tracing::debug!("Window {} created", window_id);
+        // tracing::debug!("Window {} created", window_id);
 
         Ok(window_id)
     }
@@ -638,12 +638,12 @@ impl GraphicProxy {
         let parent_id = config.parent_id;
         let (response_tx, response_rx) = oneshot::channel();
 
-        tracing::debug!(
-            "Creating widget {} (type: {:?}) in window {}",
-            widget_id,
-            widget_type,
-            window_id
-        );
+        // tracing::debug!(
+        //     "Creating widget {} (type: {:?}) in window {}",
+        //     widget_id,
+        //     widget_type,
+        //     window_id
+        // );
 
         tx.send(GraphicCommand::CreateWidget {
             window_id,
@@ -676,7 +676,7 @@ impl GraphicProxy {
             }
         }
 
-        tracing::debug!("Widget {} created", widget_id);
+        // tracing::debug!("Widget {} created", widget_id);
 
         Ok(widget_id)
     }
@@ -1110,7 +1110,7 @@ impl GraphicProxy {
             .unwrap()
             .insert(assigned_alias.clone(), font_info);
 
-        tracing::debug!("Query Font loaded {} with alias: \"{}\"", path, assigned_alias);
+        // tracing::debug!("Query Font loaded {} with alias: \"{}\"", path, assigned_alias);
 
         Ok(assigned_alias)
     }

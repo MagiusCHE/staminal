@@ -1693,48 +1693,48 @@ fn handle_graphic_event(
             }
         }
         GraphicEvent::WindowCreated { window_id } => {
-            debug!("Window {} created", window_id);
+            // debug!("Window {} created", window_id);
             warn!("TODO: Dispatch window:created event to mods");
         }
         GraphicEvent::WindowClosed { window_id } => {
-            debug!("Window {} closed, dispatching GraphicEngineWindowClosed event", window_id);
+            // debug!("Window {} closed, dispatching GraphicEngineWindowClosed event", window_id);
 
             // Dispatch GraphicEngineWindowClosed to all registered handlers
             if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
                 let request = GraphicEngineWindowClosedRequest::new(window_id);
                 let response = runtime_manager.dispatch_graphic_engine_window_closed(&request);
 
-                if response.handled {
-                    debug!("GraphicEngineWindowClosed was handled by a mod");
-                } else {
-                    debug!("GraphicEngineWindowClosed was not handled (no handlers or all handlers declined)");
-                }
-            } else {
-                debug!("No runtime manager available to dispatch GraphicEngineWindowClosed");
+            //     if response.handled {
+            //         debug!("GraphicEngineWindowClosed was handled by a mod");
+            //     } else {
+            //         debug!("GraphicEngineWindowClosed was not handled (no handlers or all handlers declined)");
+            //     }
+            // } else {
+            //     debug!("No runtime manager available to dispatch GraphicEngineWindowClosed");
             }
         }
         GraphicEvent::WindowResized { window_id, width, height } => {
-            debug!("Window {} resized to {}x{}", window_id, width, height);
+            // debug!("Window {} resized to {}x{}", window_id, width, height);
             warn!("TODO: Dispatch window:resized event to mods");
         }
         GraphicEvent::WindowFocused { window_id, focused } => {
-            debug!("Window {} focus changed: {}", window_id, focused);
+            // debug!("Window {} focus changed: {}", window_id, focused);
             warn!("TODO: Dispatch window:focused event to mods");
         }
         GraphicEvent::WindowMoved { window_id, x, y } => {
-            debug!("Window {} moved to ({}, {})", window_id, x, y);
+            // debug!("Window {} moved to ({}, {})", window_id, x, y);
             warn!("TODO: Dispatch window:moved event to mods");
         }
         GraphicEvent::KeyPressed { window_id, key, modifiers } => {
-            debug!("Key pressed in window {}: {} (mods: {:?})", window_id, key, modifiers);
+            // debug!("Key pressed in window {}: {} (mods: {:?})", window_id, key, modifiers);
             warn!("TODO: Dispatch input:keyPressed event to mods");
         }
         GraphicEvent::KeyReleased { window_id, key, modifiers } => {
-            debug!("Key released in window {}: {} (mods: {:?})", window_id, key, modifiers);
+            // debug!("Key released in window {}: {} (mods: {:?})", window_id, key, modifiers);
             warn!("TODO: Dispatch input:keyReleased event to mods");
         }
         GraphicEvent::CharacterInput { window_id, character } => {
-            debug!("Character input in window {}: '{}'", window_id, character);
+            // debug!("Character input in window {}: '{}'", window_id, character);
             warn!("TODO: Dispatch input:character event to mods");
         }
         GraphicEvent::MouseMoved { window_id, x, y } => {
@@ -1744,15 +1744,15 @@ fn handle_graphic_event(
             warn!("TODO: Dispatch input:mouseMoved event to mods");
         }
         GraphicEvent::MouseButtonPressed { window_id, button, x, y } => {
-            debug!("Mouse button {:?} pressed in window {} at ({}, {})", button, window_id, x, y);
+            // debug!("Mouse button {:?} pressed in window {} at ({}, {})", button, window_id, x, y);
             warn!("TODO: Dispatch input:mousePressed event to mods");
         }
         GraphicEvent::MouseButtonReleased { window_id, button, x, y } => {
-            debug!("Mouse button {:?} released in window {} at ({}, {})", button, window_id, x, y);
+            // debug!("Mouse button {:?} released in window {} at ({}, {})", button, window_id, x, y);
             warn!("TODO: Dispatch input:mouseReleased event to mods");
         }
         GraphicEvent::MouseWheel { window_id, delta_x, delta_y } => {
-            debug!("Mouse wheel in window {}: ({}, {})", window_id, delta_x, delta_y);
+            // debug!("Mouse wheel in window {}: ({}, {})", window_id, delta_x, delta_y);
             warn!("TODO: Dispatch input:mouseWheel event to mods");
         }
         GraphicEvent::FrameStart { window_id, delta_time } => {
@@ -1775,15 +1775,15 @@ fn handle_graphic_event(
         }
         // Widget events
         GraphicEvent::WidgetCreated { window_id, widget_id, widget_type } => {
-            debug!("Widget {} ({:?}) created in window {}", widget_id, widget_type, window_id);
+            // debug!("Widget {} ({:?}) created in window {}", widget_id, widget_type, window_id);
             warn!("TODO: Dispatch widget:created event to mods");
         }
         GraphicEvent::WidgetDestroyed { window_id, widget_id } => {
-            debug!("Widget {} destroyed in window {}", widget_id, window_id);
+            // debug!("Widget {} destroyed in window {}", widget_id, window_id);
             warn!("TODO: Dispatch widget:destroyed event to mods");
         }
         GraphicEvent::WidgetClicked { window_id, widget_id, x, y, button } => {
-            debug!("Widget {} clicked in window {} at ({}, {}) with {:?}", widget_id, window_id, x, y, button);
+            // debug!("Widget {} clicked in window {} at ({}, {}) with {:?}", widget_id, window_id, x, y, button);
 
             // Dispatch widget click event to mods
             if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
@@ -1802,15 +1802,15 @@ fn handle_graphic_event(
             }
         }
         GraphicEvent::WidgetHovered { window_id, widget_id, entered, x, y } => {
-            debug!("Widget {} hover {} in window {} at ({}, {})", widget_id, if entered { "enter" } else { "leave" }, window_id, x, y);
+            // debug!("Widget {} hover {} in window {} at ({}, {})", widget_id, if entered { "enter" } else { "leave" }, window_id, x, y);
             warn!("TODO: Dispatch widget:hovered event to mods");
         }
         GraphicEvent::WidgetFocused { window_id, widget_id, focused } => {
-            debug!("Widget {} focus {} in window {}", widget_id, if focused { "gained" } else { "lost" }, window_id);
+            // debug!("Widget {} focus {} in window {}", widget_id, if focused { "gained" } else { "lost" }, window_id);
             warn!("TODO: Dispatch widget:focused event to mods");
         }
         GraphicEvent::WidgetInteractionChanged { window_id, widget_id, interaction } => {
-            debug!("Widget {} interaction changed to '{}' in window {}", widget_id, interaction, window_id);
+            // debug!("Widget {} interaction changed to '{}' in window {}", widget_id, interaction, window_id);
             // Internal event for tracking, usually not dispatched
         }
     }

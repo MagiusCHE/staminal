@@ -673,12 +673,12 @@ fn process_commands(
                 config,
                 response_tx,
             } => {
-                tracing::debug!(
-                    "Creating widget {} (type: {:?}) in window {}",
-                    widget_id,
-                    widget_type,
-                    window_id
-                );
+                // tracing::debug!(
+                //     "Creating widget {} (type: {:?}) in window {}",
+                //     widget_id,
+                //     widget_type,
+                //     window_id
+                // );
 
                 // Ensure window has a root UI node
                 let root_entity = if let Some(root) = widget_registry.get_window_root(window_id) {
@@ -932,20 +932,20 @@ fn process_commands(
                 let font_handle: Handle<Font> = asset_server.load(&path);
                 font_registry.register_font(assigned_alias.clone(), font_handle);
 
-                tracing::debug!("Font registered: {} as \"{}\"", path, assigned_alias);
+                // tracing::debug!("Font registered: {} as \"{}\"", path, assigned_alias);
                 let _ = response_tx.send(Ok(assigned_alias));
             }
 
             GraphicCommand::UnloadFont { alias, response_tx } => {
                 font_registry.unregister_font(&alias);
-                tracing::debug!("Font unloaded: \"{}\"", alias);
+                // tracing::debug!("Font unloaded: \"{}\"", alias);
                 let _ = response_tx.send(Ok(()));
             }
 
             GraphicCommand::PreloadImage { path, response_tx } => {
                 // Preload image via AssetServer
                 let _: Handle<Image> = asset_server.load(&path);
-                tracing::debug!("Image preloaded: {}", path);
+                // tracing::debug!("Image preloaded: {}", path);
                 let _ = response_tx.send(Ok(()));
             }
         }
@@ -1100,14 +1100,14 @@ fn create_widget_entity(
                 .map(color_value_to_bevy)
                 .unwrap_or(Color::WHITE);
 
-            tracing::debug!(
-                "Creating Text widget: content='{}', font='{}', font_size={}, color={:?}, parent={:?}",
-                content,
-                effective_font.family,
-                font_size,
-                color,
-                parent_entity
-            );
+            // tracing::debug!(
+            //     "Creating Text widget: content='{}', font='{}', font_size={}, color={:?}, parent={:?}",
+            //     content,
+            //     effective_font.family,
+            //     font_size,
+            //     color,
+            //     parent_entity
+            // );
 
             // In Bevy 0.15, Text UI needs a properly configured Node for layout
             // Use the node from config (which may have width/height) or create one with auto sizing
@@ -1161,7 +1161,7 @@ fn create_widget_entity(
             let entity = entity_cmd.id();
             commands.entity(entity).insert(ChildOf(parent_entity));
 
-            tracing::debug!("Text widget entity {:?} created and parented", entity);
+            //tracing::debug!("Text widget entity {:?} created and parented", entity);
             entity
         }
 

@@ -617,7 +617,7 @@ impl SystemJS {
             array.set(idx, obj)?;
         }
 
-        tracing::debug!("SystemJS::get_mods returning array");
+        //tracing::debug!("SystemJS::get_mods returning array");
         Ok(array)
     }
 
@@ -657,14 +657,14 @@ impl SystemJS {
             // System event (number)
             let event_u32 = event_num as u32;
 
-            tracing::debug!(
-                "SystemJS::register_event called: mod={}, event={}, priority={}, protocol={:?}, route={:?}",
-                mod_id,
-                event_u32,
-                priority,
-                protocol_str,
-                route
-            );
+            // tracing::debug!(
+            //     "SystemJS::register_event called: mod={}, event={}, priority={}, protocol={:?}, route={:?}",
+            //     mod_id,
+            //     event_u32,
+            //     priority,
+            //     protocol_str,
+            //     route
+            // );
 
             // Validate event type
             let event_type = match SystemEvents::from_u32(event_u32) {
@@ -698,25 +698,25 @@ impl SystemJS {
             // Store the handler function in the context's handler map
             store_js_handler(&ctx, handler_id, handler)?;
 
-            tracing::debug!(
-                "Registered event handler: mod={}, event={:?}, handler_id={}, priority={}",
-                mod_id,
-                event_type,
-                handler_id,
-                priority
-            );
+            // tracing::debug!(
+            //     "Registered event handler: mod={}, event={:?}, handler_id={}, priority={}",
+            //     mod_id,
+            //     event_type,
+            //     handler_id,
+            //     priority
+            // );
 
             Ok(handler_id)
         } else if let Some(event_name) = event.as_string() {
             // Custom event (string)
             let event_name_str = event_name.to_string()?;
 
-            tracing::debug!(
-                "SystemJS::register_event (custom) called: mod={}, event_name={}, priority={}",
-                mod_id,
-                event_name_str,
-                priority
-            );
+            // tracing::debug!(
+            //     "SystemJS::register_event (custom) called: mod={}, event_name={}, priority={}",
+            //     mod_id,
+            //     event_name_str,
+            //     priority
+            // );
 
             // Register the handler with the event dispatcher
             let handler_id = self.system_api.event_dispatcher().register_custom_handler(
@@ -728,13 +728,13 @@ impl SystemJS {
             // Store the handler function in the context's handler map
             store_js_handler(&ctx, handler_id, handler)?;
 
-            tracing::debug!(
-                "Registered custom event handler: mod={}, event_name={}, handler_id={}, priority={}",
-                mod_id,
-                event_name_str,
-                handler_id,
-                priority
-            );
+            // tracing::debug!(
+            //     "Registered custom event handler: mod={}, event_name={}, handler_id={}, priority={}",
+            //     mod_id,
+            //     event_name_str,
+            //     handler_id,
+            //     priority
+            // );
 
             Ok(handler_id)
         } else {
@@ -765,13 +765,13 @@ impl SystemJS {
                 .unwrap_or_else(|| "null".to_string()))
             .collect();
 
-        tracing::debug!("SystemJS::send_event called: event_name={}, args_count={}", event_name, json_args.len());
+        //tracing::debug!("SystemJS::send_event called: event_name={}, args_count={}", event_name, json_args.len());
 
         let result = self.system_api.event_dispatcher().request_send_event(event_name.clone(), json_args).await;
 
         match result {
             Ok(()) => {
-                tracing::debug!("Event '{}' dispatched successfully", event_name);
+                //tracing::debug!("Event '{}' dispatched successfully", event_name);
                 Ok(())
             }
             Err(e) => {
@@ -790,10 +790,10 @@ impl SystemJS {
     /// true if the handler was found and removed, false otherwise
     #[qjs(rename = "unregisterEvent")]
     pub fn unregister_event(&self, ctx: Ctx<'_>, handler_id: u64) -> rquickjs::Result<bool> {
-        tracing::debug!(
-            "SystemJS::unregister_event called: handler_id={}",
-            handler_id
-        );
+        // tracing::debug!(
+        //     "SystemJS::unregister_event called: handler_id={}",
+        //     handler_id
+        // );
 
         // Remove from event dispatcher
         let removed = self
@@ -867,7 +867,7 @@ impl SystemJS {
         };
 
         let packages = self.system_api.get_mod_packages(mod_side);
-        tracing::debug!("SystemJS::get_mod_packages called: side={:?}, found {} packages", mod_side, packages.len());
+        //tracing::debug!("SystemJS::get_mod_packages called: side={:?}, found {} packages", mod_side, packages.len());
 
         let array = Array::new(ctx.clone())?;
 
@@ -933,7 +933,7 @@ impl SystemJS {
     /// Promise that resolves to the installation path on success, or rejects on failure
     #[qjs(rename = "installModFromPath")]
     pub async fn install_mod_from_path(&self, archive_path: String, mod_id: String) -> rquickjs::Result<String> {
-        tracing::debug!("SystemJS::install_mod_from_path called: archive_path={}, mod_id={}", archive_path, mod_id);
+        //tracing::debug!("SystemJS::install_mod_from_path called: archive_path={}, mod_id={}", archive_path, mod_id);
 
         let system_api = self.system_api.clone();
         let archive_path_owned = archive_path.clone();

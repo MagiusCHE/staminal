@@ -71,13 +71,15 @@ export class Manager {
     async prepareUi() {
         // console.log("Preparing UI for game %o", this.#gameInfo.id);
 
-        const assetTestPath = system.getAssetsPath("fonts/PerfectDOSVGA437.ttf");
+        //Exo2-Regular
+        //const assetTestPath = system.getAssetsPath();
 
-        await graphic.loadFont("default", assetTestPath);
+        await graphic.loadFont("terminus", system.getAssetsPath("fonts/terminus-ttf-4.49.3/TerminusTTF-Bold-4.49.3.ttf"));
+        await graphic.loadFont("exo2", system.getAssetsPath("fonts/Exo_2/Exo2-VariableFont_wght.ttf"));
 
         await this.#window.setTitle("Staminal: " + this.#gameInfo.name);
 
-        this.#window.setFont("default", 16);
+        this.#window.setFont("exo2", 16);
 
         // Main container with dark background
         this.#loadingContainer = await this.#window.createWidget(WidgetTypes.Container, {
@@ -444,6 +446,7 @@ export class Manager {
 
                 // Hide cancel button or change it to "Start" button
                 await this.#actionButton.setProperty("label", locale.get("starting"));
+                console.warn("Game is starting...", locale.get("starting"));
                 await this.#actionButton.setProperty("hoverColor", "#444dccff");
                 await this.#actionButton.setProperty("disabled", true);
                 await this.#actionButton.setProperty("backgroundColor", "#3e46b6ff");

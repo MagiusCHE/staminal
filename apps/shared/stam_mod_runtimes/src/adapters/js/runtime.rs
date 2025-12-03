@@ -1068,7 +1068,7 @@ impl JsRuntimeAdapter {
 
                     // If handler set handled=true, stop processing more handlers
                     if handled {
-                        debug!("Handler in mod '{}' marked request as handled", handler.mod_id);
+                        // debug!("Handler in mod '{}' marked request as handled", handler.mod_id);
                         break;
                     }
                 }
@@ -1210,7 +1210,7 @@ impl JsRuntimeAdapter {
 
                     // If handler set handled=true, stop processing more handlers
                     if handled {
-                        debug!("Handler in mod '{}' marked TerminalKeyPressed as handled", handler.mod_id);
+                        // debug!("Handler in mod '{}' marked TerminalKeyPressed as handled", handler.mod_id);
                         break;
                     }
                 }
@@ -1309,7 +1309,7 @@ impl JsRuntimeAdapter {
         event_name: &str,
         args: &[String],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        debug!("Calling event handler {} for event '{}'", handler_id, event_name);
+        // debug!("Calling event handler {} for event '{}'", handler_id, event_name);
 
         // We need to find which mod context has this handler
         // For now, iterate through all loaded mods (could be optimized with a handler->mod map)
@@ -1370,7 +1370,7 @@ impl JsRuntimeAdapter {
                         }
                         Err(e) => {
                             // Error getting handler, try next mod
-                            debug!("Error getting handler {} from mod '{}': {:?}", handler_id, mod_id, e);
+                            error!("Error getting handler {} from mod '{}': {:?}", handler_id, mod_id, e);
                             Ok(false)
                         }
                     }
@@ -1478,7 +1478,7 @@ impl JsRuntimeAdapter {
                                     // The Promise body will be executed by run_js_event_loop via
                                     // runtime.drive() which properly handles async operations.
                                     if result.is_promise() {
-                                        debug!("Handler in mod '{}' returned Promise - will execute asynchronously via event loop", mod_id);
+                                        //debug!("Handler in mod '{}' returned Promise - will execute asynchronously via event loop", mod_id);
                                         // Return true to indicate the handler was triggered successfully.
                                         // The actual async work will complete via run_js_event_loop.
                                         return Ok(true);
@@ -1516,7 +1516,7 @@ impl JsRuntimeAdapter {
                     // Note: For async handlers returning Promise, we set handled=true
                     // to indicate the handler was triggered (async completion via event loop)
                     if handled {
-                        debug!("Handler in mod '{}' triggered for GraphicEngineReady", handler.mod_id);
+                        // debug!("Handler in mod '{}' triggered for GraphicEngineReady", handler.mod_id);
                         break;
                     }
                 }
@@ -1597,7 +1597,7 @@ impl JsRuntimeAdapter {
                                     // If result is a Promise, DO NOT call promise.finish() here!
                                     // The Promise will execute asynchronously via the JS event loop.
                                     if result.is_promise() {
-                                        debug!("Handler in mod '{}' returned Promise - will execute asynchronously via event loop", mod_id);
+                                        // debug!("Handler in mod '{}' returned Promise - will execute asynchronously via event loop", mod_id);
                                         return Ok(true);
                                     }
 
@@ -1631,7 +1631,7 @@ impl JsRuntimeAdapter {
 
                     // If handler set handled=true, stop processing more handlers
                     if handled {
-                        debug!("Handler in mod '{}' triggered for GraphicEngineWindowClosed", handler.mod_id);
+                        // debug!("Handler in mod '{}' triggered for GraphicEngineWindowClosed", handler.mod_id);
                         break;
                     }
                 }
