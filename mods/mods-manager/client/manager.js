@@ -167,7 +167,7 @@ export class Manager {
         //Cancel button
         this.#cancelButton = await this.#loadingContainer.createChild(WidgetTypes.Button, {
             label: locale.get("cancel"),
-            font: { size: 14 },
+            font: { size: 16 },
             backgroundColor: "#cc3333",
             hoverColor: "#ff4444",
             pressedColor: "#991111",
@@ -182,9 +182,7 @@ export class Manager {
     async onCancelClicked() {
         console.log("Cancel button clicked");
         this.#UIState.cancelled = true;
-        await this.#statusLabel.setProperty("content", locale.get("cancelling"));
-        await this.#cancelButton.setProperty("disabled", true);
-        await this.#cancelButton.setProperty("label", locale.get("cancelling"));
+        this.updateUI();
 
         // Give a moment for UI to update, then exit
         await wait(500);
@@ -284,6 +282,8 @@ export class Manager {
             // }
         }
 
+        await wait(5000); // DEBUG
+
         // Wait all installations to complete
         while (!this.#UIState.cancelled && !this.#UIState.last_error_occurred) {
             const pendingInstalls = Object.entries(this.#UIState.mods).filter(([modId, modState]) => !modState.installed);
@@ -338,16 +338,20 @@ export class Manager {
             clearTimeout(this.#uiIntervalUpdate);
         }
         if (this.#UIState.cancelled) {
+            await this.#cancelButton.setProperty("label", locale.get("cancelling"));
+            await this.#cancelButton.setProperty("disabled", true);
+            return;
+        } else if (this.#UIState.last_error_occurred) {
             // Red state
             await this.#statusLabel.setProperty("content", locale.get("error-occurred"));
             await this.#statusLabel.setProperty("fontColor", "#ff4444");
 
-            await this.#progressBarFill.setProperty("backgroundColor", "#cc3333");
-            await this.#progressText.setProperty("content", message);
+            await this.#progressBarFill.setProperty("backgroundColor", "#cc3333");            
+            await this.#secondProgressBarFill.setProperty("backgroundColor", "#cc3333");            
 
             // Change cancel button to "Exit" button
-            await this.#cancelButton.setProperty("label", locale.get("exit"));
-            await this.#cancelButton.setProperty("disabled", false);
+            await this.#cancelButton.setProperty("label", locale.get("cancelling"));
+            await this.#cancelButton.setProperty("disabled", true);
             return;
         }
         const isDownloading = Object.values(this.#UIState.mods).some(modState => modState.downloading);
@@ -428,7 +432,8 @@ export class Manager {
                 // Hide cancel button or change it to "Start" button
                 await this.#cancelButton.setProperty("label", locale.get("starting"));
                 await this.#cancelButton.setProperty("disabled", true);
-                await this.#cancelButton.setProperty("backgroundColor", "#33cc33");
+                await this.#cancelButton.setProperty("backgroundColor", "#3e46b6ff");
+                await this.#cancelButton.setProperty("hoverColor", "#444dccff");
 
                 return;
             }

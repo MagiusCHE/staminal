@@ -1780,7 +1780,22 @@ fn handle_graphic_event(
         }
         GraphicEvent::WidgetClicked { window_id, widget_id, x, y, button } => {
             debug!("Widget {} clicked in window {} at ({}, {}) with {:?}", widget_id, window_id, x, y, button);
-            warn!("TODO: Dispatch widget:clicked event to mods");
+
+            // Dispatch widget click event to mods
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                // Create event data object
+                let event_data = serde_json::json!({
+                    "windowId": window_id,
+                    "widgetId": widget_id,
+                    "x": x,
+                    "y": y,
+                    "button": button.as_str(),
+                });
+
+                if let Err(e) = runtime_manager.dispatch_widget_event(widget_id, "click", event_data) {
+                    error!("Failed to dispatch widget click event: {}", e);
+                }
+            }
         }
         GraphicEvent::WidgetHovered { window_id, widget_id, entered, x, y } => {
             debug!("Widget {} hover {} in window {} at ({}, {})", widget_id, if entered { "enter" } else { "leave" }, window_id, x, y);

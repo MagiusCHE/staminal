@@ -180,6 +180,10 @@ impl Drop for TempFileManager {
 /// Name of the global JavaScript object used to store event handlers
 const JS_EVENT_HANDLERS_MAP: &str = "__eventHandlers";
 
+/// Name of the global JavaScript object used to store widget event callbacks
+/// Key format: "widgetId:eventType", value: callback function
+const JS_WIDGET_HANDLERS_MAP: &str = "__widgetHandlers";
+
 /// Store a JavaScript function handler in the context's handler map
 pub fn store_js_handler<'js>(
     ctx: &Ctx<'js>,
@@ -226,6 +230,64 @@ pub fn init_event_handlers_map(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     let handlers_map = Object::new(ctx.clone())?;
     ctx.globals().set(JS_EVENT_HANDLERS_MAP, handlers_map)?;
     Ok(())
+}
+
+/// Initialize the widget event handlers map in a JavaScript context
+pub fn init_widget_handlers_map(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+    let handlers_map = Object::new(ctx.clone())?;
+    ctx.globals().set(JS_WIDGET_HANDLERS_MAP, handlers_map)?;
+    Ok(())
+}
+
+/// Store a widget event callback in the context's widget handlers map
+///
+/// # Arguments
+/// * `ctx` - JavaScript context
+/// * `widget_id` - Widget ID
+/// * `event_type` - Event type ("click", "hover", "focus")
+/// * `callback` - JavaScript callback function
+pub fn store_widget_handler<'js>(
+    ctx: &Ctx<'js>,
+    widget_id: u64,
+    event_type: &str,
+    callback: Function<'js>,
+) -> rquickjs::Result<()> {
+    let globals = ctx.globals();
+    let handlers_map: Object = globals.get(JS_WIDGET_HANDLERS_MAP)?;
+    let key = format!("{}:{}", widget_id, event_type);
+    handlers_map.set(key, callback)?;
+    Ok(())
+}
+
+/// Remove a widget event callback from the context's widget handlers map
+///
+/// Returns true if a handler was removed, false if none was found
+pub fn remove_widget_handler(ctx: &Ctx<'_>, widget_id: u64, event_type: &str) -> rquickjs::Result<bool> {
+    let globals = ctx.globals();
+    let handlers_map: Object = globals.get(JS_WIDGET_HANDLERS_MAP)?;
+    let key = format!("{}:{}", widget_id, event_type);
+    let exists: bool = handlers_map.contains_key(&key)?;
+    if exists {
+        handlers_map.set(&key, rquickjs::Undefined)?;
+    }
+    Ok(exists)
+}
+
+/// Get a widget event callback from the context's widget handlers map
+pub fn get_widget_handler<'js>(
+    ctx: &Ctx<'js>,
+    widget_id: u64,
+    event_type: &str,
+) -> rquickjs::Result<Option<Function<'js>>> {
+    let globals = ctx.globals();
+    let handlers_map: Object = globals.get(JS_WIDGET_HANDLERS_MAP)?;
+    let key = format!("{}:{}", widget_id, event_type);
+    let handler: rquickjs::Value = handlers_map.get(&key)?;
+    if handler.is_undefined() || handler.is_null() {
+        Ok(None)
+    } else {
+        Ok(handler.into_function())
+    }
 }
 
 /// Setup console API in the JavaScript context
@@ -1011,6 +1073,7 @@ impl SystemJS {
 pub fn setup_system_api(ctx: Ctx, system_api: SystemApi) -> Result<(), rquickjs::Error> {
     // Initialize the event handlers map (must be done before any handler registration)
     init_event_handlers_map(&ctx)?;
+    init_widget_handlers_map(&ctx)?;
 
     // First, define the class in the runtime (required before creating instances)
     rquickjs::Class::<SystemJS>::define(&ctx.globals())?;
@@ -1962,22 +2025,18 @@ impl WidgetJS {
     ///
     /// # Arguments
     /// * `event_type` - Event type string ("click", "hover", "focus")
-    /// * `callback` - JavaScript callback function (currently stored for future use)
+    /// * `callback` - JavaScript callback function
     ///
     /// # Example
     /// ```javascript
     /// await widget.on("click", () => { console.log("Clicked!"); });
     /// ```
-    ///
-    /// # Note
-    /// Currently this subscribes to the event in the graphic engine.
-    /// Event dispatch to the callback will be implemented when the event system is complete.
     #[qjs(rename = "on")]
     pub async fn on<'js>(
         &self,
         ctx: Ctx<'js>,
         event_type: String,
-        _callback: Function<'js>,
+        callback: Function<'js>,
     ) -> rquickjs::Result<()> {
         use crate::api::WidgetEventType;
 
@@ -2003,9 +2062,8 @@ impl WidgetJS {
             .await
             .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))?;
 
-        // TODO: Store callback for later dispatch when event occurs
-        // For now, we just subscribe to the event but don't dispatch callbacks yet
-        tracing::warn!("TODO: Widget event callbacks not yet dispatched to JavaScript");
+        // Store the callback in the widget handlers map
+        store_widget_handler(&ctx, self.id, &event_type.to_lowercase(), callback)?;
 
         Ok(())
     }
@@ -2043,7 +2101,12 @@ impl WidgetJS {
         self.graphic_proxy
             .unsubscribe_widget_events(self.id, vec![event])
             .await
-            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))?;
+
+        // Remove the callback from the widget handlers map
+        remove_widget_handler(&ctx, self.id, &event_type.to_lowercase())?;
+
+        Ok(())
     }
 }
 

@@ -1666,6 +1666,93 @@ impl JsRuntimeAdapter {
 
         response
     }
+
+    /// Dispatch a widget event to the registered callback
+    ///
+    /// This is called when a widget event occurs (click, hover, focus).
+    /// It looks up the callback for the widget+event combination and invokes it.
+    ///
+    /// # Arguments
+    /// * `widget_id` - The widget ID
+    /// * `event_type` - Event type ("click", "hover", "focus")
+    /// * `event_data` - Event-specific data as JSON object
+    pub async fn dispatch_widget_event(
+        &self,
+        widget_id: u64,
+        event_type: &str,
+        event_data: serde_json::Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        debug!("Dispatching widget event {} for widget {}", event_type, widget_id);
+
+        // Iterate through all loaded mods to find which one has the callback
+        for (mod_id, loaded_mod) in &self.loaded_mods {
+            let event_type_owned = event_type.to_string();
+            let event_data_str = serde_json::to_string(&event_data)?;
+
+            let result: Result<bool, String> = loaded_mod
+                .context
+                .with(|ctx| {
+                    // Try to get the widget callback from this context
+                    match bindings::get_widget_handler(&ctx, widget_id, &event_type_owned) {
+                        Ok(Some(func)) => {
+                            // Found the callback! Parse event data and call it
+                            let event_value: Value = ctx.json_parse(event_data_str.as_bytes())
+                                .map_err(|e| format!("Failed to parse event data: {:?}", e))?;
+
+                            let event_obj: Object = event_value.into_object()
+                                .ok_or_else(|| "Event data is not an object".to_string())?;
+
+                            // Call the callback with the event object
+                            let call_result = func.call::<(Object,), Value>((event_obj,));
+
+                            match call_result {
+                                Ok(result) => {
+                                    // If result is a Promise, it will execute asynchronously
+                                    if result.is_promise() {
+                                        debug!("Widget callback in mod '{}' returned Promise - will execute asynchronously", mod_id);
+                                    }
+                                    Ok(true)
+                                }
+                                Err(e) => {
+                                    let error_msg = Self::format_js_error(&ctx, &e);
+                                    error!("Widget callback error in mod '{}': {}", mod_id, error_msg);
+                                    Err(format!("Widget callback error: {}", error_msg))
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            // No callback registered in this mod, continue to next
+                            Ok(false)
+                        }
+                        Err(e) => {
+                            error!("Failed to get widget handler from mod '{}': {:?}", mod_id, e);
+                            Err(format!("Failed to get widget handler: {:?}", e))
+                        }
+                    }
+                })
+                .await;
+
+            match result {
+                Ok(true) => {
+                    // Callback was found and executed
+                    debug!("Widget event {} dispatched to mod '{}'", event_type, mod_id);
+                    return Ok(());
+                }
+                Ok(false) => {
+                    // No callback in this mod, continue
+                    continue;
+                }
+                Err(e) => {
+                    // Error occurred but we found the callback
+                    return Err(e.into());
+                }
+            }
+        }
+
+        // No callback found in any mod
+        debug!("No callback registered for widget {} event {}", widget_id, event_type);
+        Ok(())
+    }
 }
 
 impl Drop for JsRuntimeAdapter {
@@ -1695,6 +1782,18 @@ impl RuntimeAdapter for JsRuntimeAdapter {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
                 .block_on(self.call_mod_function_async(mod_id, function_name))
+        })
+    }
+
+    fn dispatch_widget_event(
+        &self,
+        widget_id: u64,
+        event_type: &str,
+        event_data: serde_json::Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.dispatch_widget_event(widget_id, event_type, event_data))
         })
     }
 

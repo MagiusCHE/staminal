@@ -340,6 +340,10 @@ struct ButtonColors {
     disabled: Color,
 }
 
+/// Marker component for disabled buttons
+#[derive(Component)]
+struct ButtonDisabled;
+
 impl Default for ButtonColors {
     fn default() -> Self {
         Self {
@@ -471,7 +475,7 @@ fn process_commands(
     mut bg_color_query: Query<&mut BackgroundColor>,
     mut node_query: Query<&mut Node>,
     mut text_color_query: Query<&mut TextColor>,
-    mut button_query: Query<(&mut ButtonColors, Option<&Children>)>,
+    mut button_query: Query<(&mut ButtonColors, Option<&Interaction>, Option<&Children>)>,
     ui_camera: Option<Res<UiCamera>>,
 ) {
     // Lock the receiver and process all available commands (non-blocking)
@@ -1315,7 +1319,7 @@ fn update_widget_property(
     bg_color_query: &mut Query<&mut BackgroundColor>,
     node_query: &mut Query<&mut Node>,
     text_color_query: &mut Query<&mut TextColor>,
-    button_query: &mut Query<(&mut ButtonColors, Option<&Children>)>,
+    button_query: &mut Query<(&mut ButtonColors, Option<&Interaction>, Option<&Children>)>,
     commands: &mut Commands,
 ) -> Result<(), String> {
     match property {
@@ -1327,7 +1331,7 @@ fn update_widget_property(
                     return Ok(());
                 }
                 // For buttons, the text is on a child entity
-                if let Ok((_, Some(children))) = button_query.get(entity) {
+                if let Ok((_, _, Some(children))) = button_query.get(entity) {
                     for child in children.iter() {
                         if let Ok(mut text_component) = text_query.get_mut(child) {
                             *text_component = Text::new(text.clone());
@@ -1340,8 +1344,18 @@ fn update_widget_property(
         }
         "backgroundColor" => {
             if let PropertyValue::Color(color) = value {
+                let bevy_color = color_value_to_bevy(color);
+
+                // Update the background color
                 if let Ok(mut bg) = bg_color_query.get_mut(entity) {
-                    *bg = BackgroundColor(color_value_to_bevy(color));
+                    *bg = BackgroundColor(bevy_color);
+
+                    // For buttons, also update the 'normal' state color
+                    // so that when interaction changes back to None, it uses the new color
+                    if let Ok((mut button_colors, _, _)) = button_query.get_mut(entity) {
+                        button_colors.normal = bevy_color;
+                    }
+
                     return Ok(());
                 }
             }
@@ -1355,7 +1369,7 @@ fn update_widget_property(
                     return Ok(());
                 }
                 // For buttons, the text color is on a child entity
-                if let Ok((_, Some(children))) = button_query.get(entity) {
+                if let Ok((_, _, Some(children))) = button_query.get(entity) {
                     for child in children.iter() {
                         if let Ok(mut text_color) = text_color_query.get_mut(child) {
                             *text_color = TextColor(color_value_to_bevy(color));
@@ -1387,7 +1401,7 @@ fn update_widget_property(
         "disabled" => {
             if let PropertyValue::Bool(disabled) = value {
                 // For buttons, update the background color based on disabled state
-                if let Ok((button_colors, _)) = button_query.get(entity) {
+                if let Ok((button_colors, _, _)) = button_query.get(entity) {
                     let new_color = if *disabled {
                         button_colors.disabled
                     } else {
@@ -1395,6 +1409,14 @@ fn update_widget_property(
                     };
                     if let Ok(mut bg) = bg_color_query.get_mut(entity) {
                         *bg = BackgroundColor(new_color);
+
+                        // Add or remove the ButtonDisabled marker component
+                        if *disabled {
+                            commands.entity(entity).insert(ButtonDisabled);
+                        } else {
+                            commands.entity(entity).remove::<ButtonDisabled>();
+                        }
+
                         return Ok(());
                     }
                 }
@@ -1403,8 +1425,19 @@ fn update_widget_property(
         }
         "hoverColor" => {
             if let PropertyValue::Color(color) = value {
-                if let Ok((mut button_colors, _)) = button_query.get_mut(entity) {
-                    button_colors.hovered = color_value_to_bevy(color);
+                if let Ok((mut button_colors, interaction_opt, _)) = button_query.get_mut(entity) {
+                    let new_color = color_value_to_bevy(color);
+                    button_colors.hovered = new_color;
+
+                    // If the button is currently hovered, update the background color immediately
+                    if let Some(interaction) = interaction_opt {
+                        if *interaction == Interaction::Hovered {
+                            if let Ok(mut bg) = bg_color_query.get_mut(entity) {
+                                *bg = BackgroundColor(new_color);
+                            }
+                        }
+                    }
+
                     return Ok(());
                 }
             }
@@ -1412,8 +1445,19 @@ fn update_widget_property(
         }
         "pressedColor" => {
             if let PropertyValue::Color(color) = value {
-                if let Ok((mut button_colors, _)) = button_query.get_mut(entity) {
-                    button_colors.pressed = color_value_to_bevy(color);
+                if let Ok((mut button_colors, interaction_opt, _)) = button_query.get_mut(entity) {
+                    let new_color = color_value_to_bevy(color);
+                    button_colors.pressed = new_color;
+
+                    // If the button is currently pressed, update the background color immediately
+                    if let Some(interaction) = interaction_opt {
+                        if *interaction == Interaction::Pressed {
+                            if let Ok(mut bg) = bg_color_query.get_mut(entity) {
+                                *bg = BackgroundColor(new_color);
+                            }
+                        }
+                    }
+
                     return Ok(());
                 }
             }
@@ -1421,7 +1465,7 @@ fn update_widget_property(
         }
         "disabledColor" => {
             if let PropertyValue::Color(color) = value {
-                if let Ok((mut button_colors, _)) = button_query.get_mut(entity) {
+                if let Ok((mut button_colors, _, _)) = button_query.get_mut(entity) {
                     button_colors.disabled = color_value_to_bevy(color);
                     return Ok(());
                 }
@@ -1653,7 +1697,7 @@ fn handle_widget_interactions(
             &WidgetEventSubscriptions,
             &mut PreviousInteraction,
         ),
-        (Changed<Interaction>, With<Button>),
+        (Changed<Interaction>, With<Button>, Without<ButtonDisabled>),
     >,
     windows: Query<&Window, With<PrimaryWindow>>,
 ) {

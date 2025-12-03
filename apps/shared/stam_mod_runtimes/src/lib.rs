@@ -140,6 +140,27 @@ pub trait RuntimeAdapter {
     /// # Returns
     /// A `GraphicEngineWindowClosedResponse` containing whether the event was handled
     fn dispatch_graphic_engine_window_closed(&self, request: &api::GraphicEngineWindowClosedRequest) -> api::GraphicEngineWindowClosedResponse;
+
+    /// Dispatch a widget event to the registered callback (client-only)
+    ///
+    /// This is called when a widget event occurs (click, hover, focus).
+    /// It looks up the callback for the widget+event combination and invokes it.
+    ///
+    /// # Arguments
+    /// * `widget_id` - The widget ID
+    /// * `event_type` - Event type ("click", "hover", "focus")
+    /// * `event_data` - Event-specific data as JSON object
+    ///
+    /// Default implementation does nothing (for runtimes that don't support widget events yet)
+    fn dispatch_widget_event(
+        &self,
+        _widget_id: u64,
+        _event_type: &str,
+        _event_data: serde_json::Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Default: no-op for runtimes that don't implement widget events
+        Ok(())
+    }
 }
 
 /// Manager for all mod runtimes
@@ -358,6 +379,29 @@ impl RuntimeManager {
         }
         // No runtime handled the event
         api::GraphicEngineWindowClosedResponse::default()
+    }
+
+    /// Dispatch a widget event to the registered callback
+    ///
+    /// This is called when a widget event occurs (click, hover, focus).
+    /// It looks up the callback for the widget+event combination and invokes it.
+    ///
+    /// # Arguments
+    /// * `widget_id` - The widget ID
+    /// * `event_type` - Event type ("click", "hover", "focus")
+    /// * `event_data` - Event-specific data as JSON object
+    pub fn dispatch_widget_event(
+        &self,
+        widget_id: u64,
+        event_type: &str,
+        event_data: serde_json::Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        // Dispatch to all runtimes (currently only JavaScript)
+        // Unlike system events, widget events are dispatched to the first runtime that has a callback
+        for runtime in self.runtimes.values() {
+            runtime.dispatch_widget_event(widget_id, event_type, event_data.clone())?;
+        }
+        Ok(())
     }
 }
 
