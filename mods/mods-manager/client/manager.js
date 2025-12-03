@@ -2,6 +2,8 @@ import { wait, humanizeBytes } from "@js-helper";
 
 const UPDATEUI_INTERVAL_MS = 500;
 
+const INITIAL_FONT_SIZE = 20;
+
 export class Manager {
     #gameInfo;
     #window;
@@ -81,7 +83,7 @@ export class Manager {
 
         await this.#window.setTitle("Staminal: " + this.#gameInfo.name);
 
-        this.#window.setFont("macondo", 26);
+        this.#window.setFont("macondo", INITIAL_FONT_SIZE);
 
         // Main container with dark background
         this.#loadingContainer = await this.#window.createWidget(WidgetTypes.Container, {
@@ -98,7 +100,7 @@ export class Manager {
         // Status label: "Loading mods:"
         this.#statusLabel = await this.#loadingContainer.createChild(WidgetTypes.Text, {
             content: locale.get("mods-ensuring-title"),
-            font: { size: 40 },
+            font: { size: INITIAL_FONT_SIZE * 1.3 },
             fontColor: "#ffffff"
         });
 
@@ -142,7 +144,7 @@ export class Manager {
         // Progress text (mod name + operation) - centered in the overlay container
         this.#progressText = await progressTextContainer.createChild(WidgetTypes.Text, {
             content: "",
-            font: { size: 20 },
+            font: { size: INITIAL_FONT_SIZE },
             fontColor: "#ffffff"
         });
 
@@ -171,7 +173,7 @@ export class Manager {
         this.#actionButton = await this.#loadingContainer.createChild(WidgetTypes.Button, {
             // To create multiple text style in a single label, create childs with Text widgets and set default one to empty.
             label: locale.get("cancel"),
-            font: { size: 20 },
+            font: { size: INITIAL_FONT_SIZE },
             backgroundColor: "#cc3333",
             hoverColor: "#ff4444",
             pressedColor: "#991111",
