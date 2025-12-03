@@ -221,10 +221,8 @@ pub struct UriResponse {
     pub status: u16,
     /// Whether the request has been handled (default: false)
     pub handled: bool,
-    /// Zero-copy buffer for response data
-    pub buffer: Vec<u8>,
-    /// Actual size of data written to buffer
-    pub buffer_size: u64,
+    /// Response data as UTF-8 string
+    pub buffer_string: String,
     /// Optional file path for file-based responses
     pub filepath: String,
 }
@@ -234,23 +232,16 @@ impl Default for UriResponse {
         Self {
             status: 404,
             handled: false,
-            buffer: Vec::new(),
-            buffer_size: 0,
+            buffer_string: String::new(),
             filepath: String::new(),
         }
     }
 }
 
 impl UriResponse {
-    /// Create a new UriResponse with a specified buffer size
-    pub fn new(buffer_size: usize) -> Self {
-        Self {
-            status: 404,
-            handled: false,
-            buffer: vec![0u8; buffer_size],
-            buffer_size: 0,
-            filepath: String::new(),
-        }
+    /// Create a new UriResponse
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Set the HTTP status code
@@ -263,9 +254,9 @@ impl UriResponse {
         self.filepath = path.into();
     }
 
-    /// Set the actual size of data written to buffer
-    pub fn set_size(&mut self, size: u64) {
-        self.buffer_size = size;
+    /// Set the response buffer string
+    pub fn set_buffer_string(&mut self, data: impl Into<String>) {
+        self.buffer_string = data.into();
     }
 
     /// Set whether the request has been handled
@@ -277,7 +268,7 @@ impl UriResponse {
     pub fn set_error(&mut self) {
         self.status = 500;
         self.handled = true;
-        self.buffer_size = 0;
+        self.buffer_string.clear();
         self.filepath.clear();
     }
 }

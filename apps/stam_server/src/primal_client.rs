@@ -260,7 +260,7 @@ impl PrimalClient {
             error!("RequestUri authentication failed for user '{}'", username);
             let _ = self.stream.write_primal_message(&PrimalMessage::UriResponse {
                 status: 401,
-                buffer: None,
+                buffer_string: None,
                 file_name: None,
                 file_size: None,
             }).await;
@@ -334,7 +334,7 @@ impl PrimalClient {
                         error!("Failed to get file metadata '{}': {}", path.display(), e);
                         let _ = self.stream.write_primal_message(&PrimalMessage::UriResponse {
                             status: 500,
-                            buffer: None,
+                            buffer_string: None,
                             file_name: None,
                             file_size: None,
                         }).await;
@@ -349,10 +349,10 @@ impl PrimalClient {
 
                 debug!("Sending file '{}' ({} bytes) in chunks for URI '{}'", path.display(), file_size, uri);
 
-                // Send initial UriResponse with metadata (buffer is None for chunked transfer)
+                // Send initial UriResponse with metadata (buffer_string is None for chunked transfer)
                 if let Err(e) = self.stream.write_primal_message(&PrimalMessage::UriResponse {
                     status: response.status,
-                    buffer: None,
+                    buffer_string: None,
                     file_name,
                     file_size: Some(file_size),
                 }).await {
@@ -492,28 +492,20 @@ impl PrimalClient {
                 // Path resolution failed
                 let _ = self.stream.write_primal_message(&PrimalMessage::UriResponse {
                     status: 404,
-                    buffer: None,
+                    buffer_string: None,
                     file_name: None,
                     file_size: None,
                 }).await;
             }
-        } else if !response.buffer.is_empty() {
-            // Handler provided buffer directly
-            // Use buffer_size from response to truncate buffer (optimization for network transfer)
-            let effective_size = if response.buffer_size > 0 {
-                (response.buffer_size as usize).min(response.buffer.len())
-            } else {
-                response.buffer.len()
-            };
-            let truncated_buffer = response.buffer[..effective_size].to_vec();
-
-            debug!("RequestUri response: status={}, buffer_size={}", response.status, effective_size);
+        } else if !response.buffer_string.is_empty() {
+            // Handler provided buffer string directly
+            debug!("RequestUri response: status={}, buffer_string length={}", response.status, response.buffer_string.len());
 
             let _ = self.stream.write_primal_message(&PrimalMessage::UriResponse {
                 status: response.status,
-                buffer: Some(truncated_buffer),
+                buffer_string: Some(response.buffer_string),
                 file_name: None,
-                file_size: Some(effective_size as u64),
+                file_size: None,
             }).await;
         } else {
             // No content
@@ -521,7 +513,7 @@ impl PrimalClient {
 
             let _ = self.stream.write_primal_message(&PrimalMessage::UriResponse {
                 status: response.status,
-                buffer: None,
+                buffer_string: None,
                 file_name: None,
                 file_size: None,
             }).await;

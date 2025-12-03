@@ -942,7 +942,7 @@ impl JsRuntimeAdapter {
             let (host, path, query) = parse_uri_components(&uri_for_closure);
 
             // Call the handler function with request and response objects
-            let result: Result<(u16, bool, Vec<u8>, u64, String), String> = loaded_mod
+            let result: Result<(u16, bool, String, String), String> = loaded_mod
                 .context
                 .with(|ctx| {
                     // Get the handler function from the context's handler map
@@ -963,8 +963,7 @@ impl JsRuntimeAdapter {
                             let response_obj = Object::new(ctx.clone()).map_err(|e| format!("Failed to create response object: {:?}", e))?;
                             response_obj.set("status", 404i32).map_err(|e| format!("Failed to set status: {:?}", e))?;
                             response_obj.set("handled", false).map_err(|e| format!("Failed to set handled: {:?}", e))?;
-                            response_obj.set("buffer", rquickjs::Array::new(ctx.clone()).map_err(|e| format!("Failed to create buffer: {:?}", e))?).map_err(|e| format!("Failed to set buffer: {:?}", e))?;
-                            response_obj.set("buffer_size", 0i32).map_err(|e| format!("Failed to set buffer_size: {:?}", e))?;
+                            response_obj.set("buffer_string", "").map_err(|e| format!("Failed to set buffer_string: {:?}", e))?;
                             response_obj.set("filepath", "").map_err(|e| format!("Failed to set filepath: {:?}", e))?;
 
                             // Add setStatus method
@@ -990,6 +989,14 @@ impl JsRuntimeAdapter {
                                 Ok(())
                             }).map_err(|e| format!("Failed to create setHandled: {:?}", e))?;
                             response_obj.set("setHandled", set_handled).map_err(|e| format!("Failed to set setHandled: {:?}", e))?;
+
+                            // Add setBufferString method
+                            let set_buffer_string = Function::new(ctx.clone(), |ctx: Ctx, buffer_string: String| -> rquickjs::Result<()> {
+                                let this: Object = ctx.globals().get("__currentResponse")?;
+                                this.set("buffer_string", buffer_string)?;
+                                Ok(())
+                            }).map_err(|e| format!("Failed to create setBufferString: {:?}", e))?;
+                            response_obj.set("setBufferString", set_buffer_string).map_err(|e| format!("Failed to set setBufferString: {:?}", e))?;
 
                             // Store response object as global for method access
                             ctx.globals().set("__currentResponse", response_obj.clone()).map_err(|e| format!("Failed to set __currentResponse: {:?}", e))?;
@@ -1023,38 +1030,10 @@ impl JsRuntimeAdapter {
                                     let handled: bool = response_obj.get("handled").unwrap_or(false);
                                     let filepath: String = response_obj.get("filepath").unwrap_or_default();
 
-                                    // Read buffer_size from script (if set), otherwise use buffer length
-                                    let script_buffer_size: i64 = response_obj.get("buffer_size").unwrap_or(0);
+                                    // Read buffer_string if present
+                                    let buffer_string: String = response_obj.get("buffer_string").unwrap_or_default();
 
-                                    // Read buffer if present (convert JS array to Vec<u8>)
-                                    // Only read up to buffer_size bytes if script set it
-                                    let buffer: Vec<u8> = if let Ok(arr) = response_obj.get::<_, rquickjs::Array>("buffer") {
-                                        let arr_len = arr.len();
-                                        // If script set buffer_size, use it; otherwise use array length
-                                        let effective_len = if script_buffer_size > 0 {
-                                            (script_buffer_size as usize).min(arr_len)
-                                        } else {
-                                            arr_len
-                                        };
-                                        let mut buf = Vec::with_capacity(effective_len);
-                                        for i in 0..effective_len {
-                                            if let Ok(byte) = arr.get::<u8>(i) {
-                                                buf.push(byte);
-                                            }
-                                        }
-                                        buf
-                                    } else {
-                                        Vec::new()
-                                    };
-
-                                    // Use script's buffer_size if set, otherwise use actual buffer length
-                                    let buffer_size = if script_buffer_size > 0 {
-                                        script_buffer_size as u64
-                                    } else {
-                                        buffer.len() as u64
-                                    };
-
-                                    Ok((status as u16, handled, buffer, buffer_size, filepath))
+                                    Ok((status as u16, handled, buffer_string, filepath))
                                 }
                                 Err(e) => {
                                     let error_msg = Self::format_js_error(&ctx, &e);
@@ -1077,13 +1056,12 @@ impl JsRuntimeAdapter {
 
             // Update response based on handler result
             match result {
-                Ok((status, handled, buffer, buffer_size, filepath)) => {
+                Ok((status, handled, buffer_string, filepath)) => {
                     response.status = status;
                     response.handled = handled;
-                    if !buffer.is_empty() {
-                        response.buffer = buffer;
+                    if !buffer_string.is_empty() {
+                        response.buffer_string = buffer_string;
                     }
-                    response.buffer_size = buffer_size;
                     if !filepath.is_empty() {
                         response.filepath = filepath;
                     }

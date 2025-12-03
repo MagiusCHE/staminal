@@ -77,8 +77,8 @@ pub enum PrimalMessage {
     UriResponse {
         /// HTTP status code (200 = success, 404 = not found, 500 = error, etc.)
         status: u16,
-        /// Response buffer data (if any)
-        buffer: Option<Vec<u8>>,
+        /// Response buffer data as UTF-8 string (if any)
+        buffer_string: Option<String>,
         /// File name (if response is a file)
         file_name: Option<String>,
         /// File size in bytes (if response is a file)

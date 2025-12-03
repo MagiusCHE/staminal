@@ -13,10 +13,9 @@ export class Manager {
     #progressBarFill;
     #progressText;
     #secondProgressBarFill;  // Secondary bar for download progress
-    #cancelButton;
+    #actionButton;
 
     constructor() {
-        console.log("Initialized.");
         this.#gameInfo = system.getGameInfo();
     }
 
@@ -49,9 +48,9 @@ export class Manager {
     }
 
     async onGraphicEngineWindowClosed(req, res) {
-        console.log("Graphic engine window closed", req);
+        //console.log("Graphic engine window closed", req);
         if (req.windowId === this.#window.id) {
-            console.log("Main window closed, exiting...");
+            //console.log("Main window closed, exiting...");
             system.exit(0);
             res.handled = true;
         }
@@ -61,7 +60,7 @@ export class Manager {
 
         const engine = await graphic.getEngineInfo();
 
-        console.log("Graphic engine ready", engine);
+        // console.log("Graphic engine ready", engine);
 
         this.#window = engine.mainWindow;
 
@@ -70,7 +69,7 @@ export class Manager {
     }
 
     async prepareUi() {
-        console.log("Preparing UI for game %o", this.#gameInfo.id);
+        // console.log("Preparing UI for game %o", this.#gameInfo.id);
 
         const assetTestPath = system.getAssetsPath("fonts/PerfectDOSVGA437.ttf");
 
@@ -165,7 +164,7 @@ export class Manager {
         // await wait(3000)
 
         //Cancel button
-        this.#cancelButton = await this.#loadingContainer.createChild(WidgetTypes.Button, {
+        this.#actionButton = await this.#loadingContainer.createChild(WidgetTypes.Button, {
             label: locale.get("cancel"),
             font: { size: 16 },
             backgroundColor: "#cc3333",
@@ -176,11 +175,20 @@ export class Manager {
         });
 
         // Subscribe to button click event
-        await this.#cancelButton.on("click", this.onCancelClicked.bind(this));
+        await this.#actionButton.on("click", this.onActionClicked.bind(this));
     }
 
-    async onCancelClicked() {
-        console.log("Cancel button clicked");
+    async onActionClicked() {
+        await this.#actionButton.setProperty("disabled", true);
+
+        if (this.#UIState.last_error_occurred) {
+            // Exit on error
+            await wait(500);
+            system.exit(1);
+            return;
+        }
+        // Else, abort is pressed
+
         this.#UIState.cancelled = true;
         this.updateUI();
 
@@ -219,9 +227,9 @@ export class Manager {
     }
 
     async ensureMods() {
-        console.log("Ensuring mods...");
+        //console.log("Ensuring mods...");
         const mods = system.getMods();
-        console.log(`mods:`, mods);
+        //console.log(`mods:`, mods);
         // Filter mods that are not loaded yet
         const toload = mods.filter(mod => !mod.loaded);
 
@@ -247,12 +255,12 @@ export class Manager {
             };
         }
 
-        if (toDownload.length > 0) {
-            console.log(`${toDownload.length} mod(s) need to be downloaded:`, toDownload.map(m => m.id).join(", "));
-        }
-        if (toAttach.length > 0) {
-            console.log(`${toAttach.length} mod(s) need to be attached:`, toAttach.map(m => m.id).join(", "));
-        }
+        // if (toDownload.length > 0) {
+        //     console.log(`${toDownload.length} mod(s) need to be downloaded:`, toDownload.map(m => m.id).join(", "));
+        // }
+        // if (toAttach.length > 0) {
+        //     console.log(`${toAttach.length} mod(s) need to be attached:`, toAttach.map(m => m.id).join(", "));
+        // }
 
         // We need 3 steps.
         // 1. Download missing mods (one by one)
@@ -261,9 +269,12 @@ export class Manager {
 
         // First, download all missing mods
 
-        console.log("this.#UIState:", this.#UIState);
+        // console.log("this.#UIState:", this.#UIState);
 
         this.updateUI();
+
+        // this.#UIState.last_error_occurred = new Error("Test error"); // DEBUG
+        // return;
 
         for (const mod of toDownload) {
             if (this.#UIState.cancelled) {
@@ -274,7 +285,11 @@ export class Manager {
             // Downloading                
             // After downloading mod will be installed asynchronously
             // to ensure its installation before attaching check this.#installedMods[mod.id]
-            await this.downloadInstallMod(mod);
+            try {
+                await this.downloadInstallMod(mod);
+            } catch (e) {
+                return;
+            }
 
             // console.error(`Failed to download mod "${mod.id}":`, e);
             // if (!mod.exists) {
@@ -282,7 +297,7 @@ export class Manager {
             // }
         }
 
-        await wait(5000); // DEBUG
+        //await wait(5000); // DEBUG
 
         // Wait all installations to complete
         while (!this.#UIState.cancelled && !this.#UIState.last_error_occurred) {
@@ -298,7 +313,6 @@ export class Manager {
         }
 
         if (this.#UIState.last_error_occurred) {
-            await this.exitWithError();
             return;
         }
 
@@ -310,7 +324,6 @@ export class Manager {
             } catch (e) {
                 console.error(`Failed to attach mod "${mod.id}":`, e);
                 this.#UIState.last_error_occurred = locale.getWithArgs("mod-attach-failed", { mod_id: mod.id });
-                await this.exitWithError();
                 return;
             }
 
@@ -337,21 +350,21 @@ export class Manager {
         if (this.#uiIntervalUpdate) {
             clearTimeout(this.#uiIntervalUpdate);
         }
-        if (this.#UIState.cancelled) {
-            await this.#cancelButton.setProperty("label", locale.get("cancelling"));
-            await this.#cancelButton.setProperty("disabled", true);
-            return;
-        } else if (this.#UIState.last_error_occurred) {
+        if (this.#UIState.last_error_occurred) {
             // Red state
             await this.#statusLabel.setProperty("content", locale.get("error-occurred"));
             await this.#statusLabel.setProperty("fontColor", "#ff4444");
 
-            await this.#progressBarFill.setProperty("backgroundColor", "#cc3333");            
-            await this.#secondProgressBarFill.setProperty("backgroundColor", "#cc3333");            
+            await this.#progressBarFill.setProperty("backgroundColor", "#cc3333");
+            await this.#secondProgressBarFill.setProperty("backgroundColor", "#cc3333");
 
             // Change cancel button to "Exit" button
-            await this.#cancelButton.setProperty("label", locale.get("cancelling"));
-            await this.#cancelButton.setProperty("disabled", true);
+            await this.#actionButton.setProperty("label", locale.get("exit"));
+            await this.#actionButton.setProperty("disabled", false);
+            return;
+        } else if (this.#UIState.cancelled) {
+            await this.#actionButton.setProperty("label", locale.get("cancelling"));
+            await this.#actionButton.setProperty("disabled", true);
             return;
         }
         const isDownloading = Object.values(this.#UIState.mods).some(modState => modState.downloading);
@@ -430,10 +443,10 @@ export class Manager {
                 await this.#progressText.setProperty("content", locale.getWithArgs("starting-game", { game_name: this.#gameInfo.name }));
 
                 // Hide cancel button or change it to "Start" button
-                await this.#cancelButton.setProperty("label", locale.get("starting"));
-                await this.#cancelButton.setProperty("disabled", true);
-                await this.#cancelButton.setProperty("backgroundColor", "#3e46b6ff");
-                await this.#cancelButton.setProperty("hoverColor", "#444dccff");
+                await this.#actionButton.setProperty("label", locale.get("starting"));
+                await this.#actionButton.setProperty("hoverColor", "#444dccff");
+                await this.#actionButton.setProperty("disabled", true);
+                await this.#actionButton.setProperty("backgroundColor", "#3e46b6ff");
 
                 return;
             }
@@ -443,12 +456,6 @@ export class Manager {
 
 
         this.#uiIntervalUpdate = setTimeout(this.updateUI.bind(this), UPDATEUI_INTERVAL_MS);
-    }
-
-    async exitWithError() {
-        // Wait for user to click exit, or auto-exit after delay
-        await wait(5000);
-        system.exit(1);
     }
 
     async downloadInstallMod(mod_info) {
@@ -497,15 +504,6 @@ export class Manager {
             this.#UIState.mods[mod_info.id].attached = true;
         } finally {
             this.#UIState.mods[mod_info.id].attaching = false;
-        }
-    }
-
-
-    print_mods() {
-        const mods = system.getMods();
-        console.log(`Found ${mods.length} mods:`);
-        for (const mod of mods) {
-            console.log(` - ${mod.id} [${mod.mod_type}] loaded=${mod.loaded}`);
         }
     }
 }

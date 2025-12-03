@@ -1328,12 +1328,11 @@ impl NetworkJS {
         let result = Object::new(ctx.clone())?;
         result.set("status", response.status)?;
 
-        // Convert buffer to Uint8Array or null
-        if let Some(buffer) = response.buffer {
-            let array = rquickjs::TypedArray::<u8>::new(ctx.clone(), buffer)?;
-            result.set("buffer", array)?;
+        // Set buffer_string (or null)
+        if let Some(buffer_str) = response.buffer_string {
+            result.set("bufferString", buffer_str)?;
         } else {
-            result.set("buffer", rquickjs::Null)?;
+            result.set("bufferString", rquickjs::Null)?;
         }
 
         // Set file_name

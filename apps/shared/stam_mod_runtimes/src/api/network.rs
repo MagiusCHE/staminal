@@ -20,8 +20,8 @@ use std::sync::Arc;
 pub struct DownloadResponse {
     /// HTTP status code (200 = success, 404 = not found, 500 = error, etc.)
     pub status: u16,
-    /// Response buffer data (if any)
-    pub buffer: Option<Vec<u8>>,
+    /// Response buffer data as UTF-8 string (if any)
+    pub buffer_string: Option<String>,
     /// File name (if response is a file)
     pub file_name: Option<String>,
     /// File content (internal use only - will be saved to temp file before exposing to JS)
@@ -34,7 +34,7 @@ impl Default for DownloadResponse {
     fn default() -> Self {
         Self {
             status: 0,
-            buffer: None,
+            buffer_string: None,
             file_name: None,
             file_content: None,
             temp_file_path: None,
@@ -133,7 +133,7 @@ impl NetworkApi {
             // No callback available
             DownloadResponse {
                 status: 503,
-                buffer: None,
+                buffer_string: None,
                 file_name: None,
                 file_content: None,
                 temp_file_path: None,
@@ -142,7 +142,7 @@ impl NetworkApi {
             // HTTP(S) not implemented yet
             DownloadResponse {
                 status: 501,
-                buffer: None,
+                buffer_string: None,
                 file_name: None,
                 file_content: None,
                 temp_file_path: None,
@@ -151,7 +151,7 @@ impl NetworkApi {
             // Unknown protocol
             DownloadResponse {
                 status: 400,
-                buffer: None,
+                buffer_string: None,
                 file_name: None,
                 file_content: None,
                 temp_file_path: None,

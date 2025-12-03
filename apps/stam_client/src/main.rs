@@ -96,7 +96,7 @@ async fn perform_stam_request(
             error!("Invalid stam:// URI: {}", uri);
             return DownloadResponse {
                 status: 400,
-                buffer: None,
+                buffer_string: None,
                 file_name: None,
                 file_content: None,
                 temp_file_path: None,
@@ -129,7 +129,7 @@ async fn perform_stam_request(
             error!("Failed to connect to {}: {}", host_port, e);
             return DownloadResponse {
                 status: 503, // Service Unavailable
-                buffer: None,
+                buffer_string: None,
                 file_name: None,
                 file_content: None,
                 temp_file_path: None,
@@ -146,7 +146,7 @@ async fn perform_stam_request(
             error!("Unexpected message during RequestUri: {:?}", msg);
             return DownloadResponse {
                 status: 500,
-                buffer: None,
+                buffer_string: None,
                 file_name: None,
                 file_content: None,
                 temp_file_path: None,
@@ -156,7 +156,7 @@ async fn perform_stam_request(
             error!("Failed to read Welcome during RequestUri: {}", e);
             return DownloadResponse {
                 status: 500,
-                buffer: None,
+                buffer_string: None,
                 file_name: None,
                 file_content: None,
                 temp_file_path: None,
@@ -178,7 +178,7 @@ async fn perform_stam_request(
         error!("Failed to send RequestUri Intent: {}", e);
         return DownloadResponse {
             status: 500,
-            buffer: None,
+            buffer_string: None,
             file_name: None,
             file_content: None,
             temp_file_path: None,
@@ -187,12 +187,15 @@ async fn perform_stam_request(
 
     // Wait for UriResponse header
     match stream.read_primal_message().await {
-        Ok(PrimalMessage::UriResponse { status, buffer, file_name, file_size }) => {
-            debug!("Received UriResponse: status={}, file_name={:?}, file_size={:?}, buffer_len={:?}",
-                status, file_name, file_size, buffer.as_ref().map(|b| b.len()));
+        Ok(PrimalMessage::UriResponse { status, buffer_string, file_name, file_size }) => {
+            debug!("Received UriResponse: status={}, file_name={:?}, file_size={:?}, buffer_string_len={:?}",
+                status, file_name, file_size, buffer_string.as_ref().map(|s| s.len()));
 
-            // If buffer is present in response, this is a non-chunked transfer (small data or simple response)
-            if let Some(content) = buffer {
+            // If buffer_string is present in response, this is a non-chunked transfer (small data or simple response)
+            if let Some(content_string) = buffer_string {
+                // Convert string to bytes for file operations
+                let content_bytes = content_string.as_bytes().to_vec();
+
                 // Data was sent directly in the response
                 if file_name.is_some() && tmp_dir.is_some() {
                     // Save to temp file
@@ -205,19 +208,19 @@ async fn perform_stam_request(
                             error!("Failed to create temp directory: {}", e);
                             return DownloadResponse {
                                 status,
-                                buffer: None,
+                                buffer_string: Some(content_string.clone()),
                                 file_name,
-                                file_content: Some(content),
+                                file_content: Some(content_bytes.clone()),
                                 temp_file_path: None,
                             };
                         }
                     }
 
-                    match std::fs::write(&temp_path, &content) {
+                    match std::fs::write(&temp_path, &content_bytes) {
                         Ok(_) => {
                             return DownloadResponse {
                                 status,
-                                buffer: None,
+                                buffer_string: Some(content_string),
                                 file_name,
                                 file_content: None,
                                 temp_file_path: Some(temp_path.to_string_lossy().to_string()),
@@ -227,9 +230,9 @@ async fn perform_stam_request(
                             error!("Failed to write temp file: {}", e);
                             return DownloadResponse {
                                 status,
-                                buffer: None,
+                                buffer_string: Some(content_string),
                                 file_name,
-                                file_content: Some(content),
+                                file_content: Some(content_bytes),
                                 temp_file_path: None,
                             };
                         }
@@ -238,16 +241,16 @@ async fn perform_stam_request(
                     // Return as file_content
                     return DownloadResponse {
                         status,
-                        buffer: None,
+                        buffer_string: Some(content_string.clone()),
                         file_name,
-                        file_content: Some(content),
+                        file_content: Some(content_bytes),
                         temp_file_path: None,
                     };
                 } else {
-                    // Return as buffer
+                    // Return as buffer_string
                     return DownloadResponse {
                         status,
-                        buffer: Some(content),
+                        buffer_string: Some(content_string),
                         file_name: None,
                         file_content: None,
                         temp_file_path: None,
@@ -302,7 +305,7 @@ async fn perform_stam_request(
                             error!("Failed to read raw chunk: {}", e);
                             return DownloadResponse {
                                 status: 500,
-                                buffer: None,
+                                buffer_string: None,
                                 file_name: None,
                                 file_content: None,
                                 temp_file_path: None,
@@ -331,7 +334,7 @@ async fn perform_stam_request(
                             error!("Failed to read raw chunk: {}", e);
                             return DownloadResponse {
                                 status: 500,
-                                buffer: None,
+                                buffer_string: None,
                                 file_name: None,
                                 file_content: None,
                                 temp_file_path: None,
@@ -352,7 +355,7 @@ async fn perform_stam_request(
                         error!("Failed to create temp directory: {}", e);
                         return DownloadResponse {
                             status,
-                            buffer: None,
+                            buffer_string: None,
                             file_name,
                             file_content: Some(all_data),
                             temp_file_path: None,
@@ -364,7 +367,7 @@ async fn perform_stam_request(
                     Ok(_) => {
                         DownloadResponse {
                             status,
-                            buffer: None,
+                            buffer_string: None,
                             file_name,
                             file_content: None,
                             temp_file_path: Some(temp_path.to_string_lossy().to_string()),
@@ -374,7 +377,7 @@ async fn perform_stam_request(
                         error!("Failed to write temp file: {}", e);
                         DownloadResponse {
                             status,
-                            buffer: None,
+                            buffer_string: None,
                             file_name,
                             file_content: Some(all_data),
                             temp_file_path: None,
@@ -385,16 +388,17 @@ async fn perform_stam_request(
                 // Return as file_content
                 DownloadResponse {
                     status,
-                    buffer: None,
+                    buffer_string: None,
                     file_name,
                     file_content: Some(all_data),
                     temp_file_path: None,
                 }
             } else {
-                // Return as buffer
+                // Return as buffer_string (convert bytes to UTF-8 string)
+                let buffer_str = String::from_utf8_lossy(&all_data).to_string();
                 DownloadResponse {
                     status,
-                    buffer: Some(all_data),
+                    buffer_string: Some(buffer_str),
                     file_name: None,
                     file_content: None,
                     temp_file_path: None,
@@ -405,7 +409,7 @@ async fn perform_stam_request(
             error!("Server error during RequestUri: {}", message);
             DownloadResponse {
                 status: 500,
-                buffer: None,
+                buffer_string: None,
                 file_name: None,
                 file_content: None,
                 temp_file_path: None,
@@ -415,7 +419,7 @@ async fn perform_stam_request(
             error!("Unexpected response to RequestUri: {:?}", msg);
             DownloadResponse {
                 status: 500,
-                buffer: None,
+                buffer_string: None,
                 file_name: None,
                 file_content: None,
                 temp_file_path: None,
@@ -425,7 +429,7 @@ async fn perform_stam_request(
             error!("Failed to read UriResponse: {}", e);
             DownloadResponse {
                 status: 500,
-                buffer: None,
+                buffer_string: None,
                 file_name: None,
                 file_content: None,
                 temp_file_path: None,
