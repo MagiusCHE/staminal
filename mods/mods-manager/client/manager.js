@@ -39,7 +39,7 @@ export class Manager {
             window: {
                 title: "Staminal",
                 width: 500,
-                height: 150,
+                height: 200,
                 resizable: false,
                 positionMode: WindowPositionModes.Centered
             }
@@ -74,12 +74,14 @@ export class Manager {
         //Exo2-Regular
         //const assetTestPath = system.getAssetsPath();
 
-        await graphic.loadFont("terminus", system.getAssetsPath("fonts/terminus-ttf-4.49.3/TerminusTTF-Bold-4.49.3.ttf"));
-        await graphic.loadFont("exo2", system.getAssetsPath("fonts/Exo_2/Exo2-VariableFont_wght.ttf"));
+        // await graphic.loadFont("terminus", system.getAssetsPath("fonts/terminus-ttf-4.49.3/TerminusTTF-Bold-4.49.3.ttf"));
+        // await graphic.loadFont("exo2", system.getAssetsPath("fonts/Exo_2/Exo2-VariableFont_wght.ttf"));        
+        // await graphic.loadFont("jacquard24", system.getAssetsPath("fonts/Jacquard_24/Jacquard24-Regular.ttf"));
+        await graphic.loadFont("macondo", system.getAssetsPath("fonts/Macondo/Macondo-Regular.ttf"));
 
         await this.#window.setTitle("Staminal: " + this.#gameInfo.name);
 
-        this.#window.setFont("exo2", 16);
+        this.#window.setFont("macondo", 26);
 
         // Main container with dark background
         this.#loadingContainer = await this.#window.createWidget(WidgetTypes.Container, {
@@ -96,7 +98,7 @@ export class Manager {
         // Status label: "Loading mods:"
         this.#statusLabel = await this.#loadingContainer.createChild(WidgetTypes.Text, {
             content: locale.get("mods-ensuring-title"),
-            font: { size: 18 },
+            font: { size: 40 },
             fontColor: "#ffffff"
         });
 
@@ -140,7 +142,7 @@ export class Manager {
         // Progress text (mod name + operation) - centered in the overlay container
         this.#progressText = await progressTextContainer.createChild(WidgetTypes.Text, {
             content: "",
-            font: { size: 14 },
+            font: { size: 20 },
             fontColor: "#ffffff"
         });
 
@@ -164,11 +166,12 @@ export class Manager {
         });
 
         // await wait(3000)
-
+        
         //Cancel button
         this.#actionButton = await this.#loadingContainer.createChild(WidgetTypes.Button, {
+            // To create multiple text style in a single label, create childs with Text widgets and set default one to empty.
             label: locale.get("cancel"),
-            font: { size: 16 },
+            font: { size: 20 },
             backgroundColor: "#cc3333",
             hoverColor: "#ff4444",
             pressedColor: "#991111",
@@ -439,10 +442,10 @@ export class Manager {
         } else {
             if (this.#UIState.completed) {
                 // Completed, no further updates needed
-                await this.#statusLabel.setProperty("content", locale.getWithArgs("loading-complete", { mods: Object.entries(this.#UIState.mods).length }));
+                await this.#progressText.setProperty("content", locale.getWithArgs("loading-complete", { mods: Object.entries(this.#UIState.mods).length }));
                 await this.#progressBarFill.setProperty("width", "100%");
                 await this.#secondProgressBarFill.setProperty("width", "100%");
-                await this.#progressText.setProperty("content", locale.getWithArgs("starting-game", { game_name: this.#gameInfo.name }));
+                await this.#statusLabel.setProperty("content", locale.getWithArgs("starting-game", { game_name: this.#gameInfo.name }));
 
                 // Hide cancel button or change it to "Start" button
                 await this.#actionButton.setProperty("label", locale.get("starting"));
