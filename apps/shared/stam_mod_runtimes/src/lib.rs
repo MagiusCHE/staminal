@@ -141,6 +141,20 @@ pub trait RuntimeAdapter {
     /// A `GraphicEngineWindowClosedResponse` containing whether the event was handled
     fn dispatch_graphic_engine_window_closed(&self, request: &api::GraphicEngineWindowClosedRequest) -> api::GraphicEngineWindowClosedResponse;
 
+    /// Dispatch a custom event to all registered handlers
+    ///
+    /// This method finds all handlers registered for the custom event, calls them
+    /// in priority order (lowest first), and returns the aggregated response.
+    /// Each handler receives a request object with `args` array and a response object
+    /// with `handled` flag and `results` array.
+    ///
+    /// # Arguments
+    /// * `request` - The custom event request containing event_name and args
+    ///
+    /// # Returns
+    /// A `CustomEventResponse` containing whether the event was handled and any results
+    fn dispatch_custom_event(&self, request: &api::CustomEventRequest) -> api::CustomEventResponse;
+
     /// Dispatch a widget event to the registered callback (client-only)
     ///
     /// This is called when a widget event occurs (click, hover, focus).
@@ -379,6 +393,36 @@ impl RuntimeManager {
         }
         // No runtime handled the event
         api::GraphicEngineWindowClosedResponse::default()
+    }
+
+    /// Dispatch a custom event to all registered handlers
+    ///
+    /// This method iterates through all runtime adapters and dispatches the
+    /// custom event. Unlike other events, custom events aggregate results from
+    /// all handlers (handled flag and results array are combined).
+    ///
+    /// # Arguments
+    /// * `request` - The custom event request containing event_name and args
+    ///
+    /// # Returns
+    /// A `CustomEventResponse` containing whether the event was handled and any results
+    pub fn dispatch_custom_event(&self, request: &api::CustomEventRequest) -> api::CustomEventResponse {
+        let mut aggregated = api::CustomEventResponse::default();
+
+        // Dispatch to all runtimes (currently only JavaScript)
+        // Aggregate properties from all handlers
+        for runtime in self.runtimes.values() {
+            let response = runtime.dispatch_custom_event(request);
+            if response.handled {
+                aggregated.handled = true;
+            }
+            // Merge properties from this runtime into aggregated response
+            for (key, value) in response.properties {
+                aggregated.properties.insert(key, value);
+            }
+        }
+
+        aggregated
     }
 
     /// Dispatch a widget event to the registered callback

@@ -25,6 +25,7 @@ export class Manager {
         system.registerEvent(SystemEvents.TerminalKeyPressed, this.onTerminalKeyPressed.bind(this), 100);
         system.registerEvent(SystemEvents.GraphicEngineReady, this.onGraphicEngineReady.bind(this), 100);
         system.registerEvent(SystemEvents.GraphicEngineWindowClosed, this.onGraphicEngineWindowClosed.bind(this), 100);
+        system.registerEvent("EnsureAssets", this.onEnsureAssets.bind(this), 100);
     }
 
     async onTerminalKeyPressed(req, res) {
@@ -168,7 +169,7 @@ export class Manager {
         });
 
         // await wait(3000)
-        
+
         //Cancel button
         this.#actionButton = await this.#loadingContainer.createChild(WidgetTypes.Button, {
             // To create multiple text style in a single label, create childs with Text widgets and set default one to empty.
@@ -269,7 +270,7 @@ export class Manager {
 
         // Draw initial UI
         this.updateUI();
-        
+
         // First, download all missing mods
 
         for (const mod of toDownload) {
@@ -339,7 +340,12 @@ export class Manager {
         await wait(1500);
 
         // Now start the game!
-        system.sendEvent("AppStart");
+        const ret = await system.sendEvent("AppStart");
+        //console.log("AppStart event result:", ret);
+        if (!ret.handled) {
+            console.error("AppStart event was not handled by any mod!");
+            system.exit(0);
+        }
     }
 
     #uiIntervalUpdate = undefined;
@@ -504,5 +510,9 @@ export class Manager {
         } finally {
             this.#UIState.mods[mod_info.id].attaching = false;
         }
+    }
+
+    async onEnsureAssets(req, res) {
+
     }
 }

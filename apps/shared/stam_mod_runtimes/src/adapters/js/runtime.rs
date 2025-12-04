@@ -1731,6 +1731,165 @@ impl JsRuntimeAdapter {
         debug!("No callback registered for widget {} event {}", widget_id, event_type);
         Ok(())
     }
+
+    /// Dispatch a custom event to all registered handlers (async version)
+    ///
+    /// This is called when a mod calls `system.sendEvent(eventName, ...args)`.
+    /// All handlers registered for the event are called in priority order (lowest first).
+    /// Each handler receives a request object with `args` and a response object with
+    /// `handled` and `results`.
+    ///
+    /// # Arguments
+    /// * `request` - The custom event request containing event_name and args
+    ///
+    /// # Returns
+    /// A `CustomEventResponse` containing whether the event was handled and any results
+    pub async fn dispatch_custom_event(
+        &self,
+        request: &crate::api::CustomEventRequest,
+    ) -> crate::api::CustomEventResponse {
+        let handlers = self.system_api.event_dispatcher().get_handlers_for_custom_event(&request.event_name);
+
+        if handlers.is_empty() {
+            trace!("No handlers registered for custom event '{}'", request.event_name);
+            return crate::api::CustomEventResponse::default();
+        }
+
+        trace!("Dispatching custom event '{}' to {} handlers", request.event_name, handlers.len());
+
+        let mut response = crate::api::CustomEventResponse::default();
+        let event_name = request.event_name.clone();
+        let args = request.args.clone();
+
+        for handler in handlers {
+            // Get the mod's context
+            let loaded_mod = match self.loaded_mods.get(&handler.mod_id) {
+                Some(m) => m,
+                None => {
+                    error!("Handler mod '{}' not loaded", handler.mod_id);
+                    continue;
+                }
+            };
+
+            let handler_id = handler.handler_id;
+            let mod_id = handler.mod_id.clone();
+            let event_name_for_handler = event_name.clone();
+            let args_for_handler = args.clone();
+
+            // Call the handler function with request and response objects
+            let result: Result<(bool, std::collections::HashMap<String, String>), String> = loaded_mod
+                .context
+                .with(|ctx| {
+                    // Get the handler function from the context's handler map
+                    match bindings::get_js_handler(&ctx, handler_id) {
+                        Ok(Some(func)) => {
+                            // Create request object with event name and args
+                            let request_obj = Object::new(ctx.clone()).map_err(|e| format!("Failed to create request object: {:?}", e))?;
+                            request_obj.set("eventName", event_name_for_handler.as_str()).map_err(|e| format!("Failed to set eventName: {:?}", e))?;
+
+                            // Create args array from JSON strings
+                            let js_args = rquickjs::Array::new(ctx.clone())
+                                .map_err(|e| format!("Failed to create args array: {:?}", e))?;
+                            for (i, arg) in args_for_handler.iter().enumerate() {
+                                let js_value: Value = ctx.json_parse(arg.clone())
+                                    .unwrap_or_else(|_| {
+                                        rquickjs::String::from_str(ctx.clone(), arg)
+                                            .map(|s| s.into())
+                                            .unwrap_or(Value::new_undefined(ctx.clone()))
+                                    });
+                                js_args.set(i, js_value)
+                                    .map_err(|e| format!("Failed to set arg {}: {:?}", i, e))?;
+                            }
+                            request_obj.set("args", js_args).map_err(|e| format!("Failed to set args: {:?}", e))?;
+
+                            // Create response object with handled=false only
+                            // Handlers can add any properties they want
+                            let response_obj = Object::new(ctx.clone()).map_err(|e| format!("Failed to create response object: {:?}", e))?;
+                            response_obj.set("handled", false).map_err(|e| format!("Failed to set handled: {:?}", e))?;
+
+                            // Add setHandled method to response
+                            let set_handled = Function::new(ctx.clone(), |ctx: Ctx, handled: bool| -> rquickjs::Result<()> {
+                                let this: Object = ctx.globals().get("__currentCustomEventResponse")?;
+                                this.set("handled", handled)?;
+                                Ok(())
+                            }).map_err(|e| format!("Failed to create setHandled: {:?}", e))?;
+                            response_obj.set("setHandled", set_handled).map_err(|e| format!("Failed to set setHandled: {:?}", e))?;
+
+                            // Store response object as global for method access
+                            ctx.globals().set("__currentCustomEventResponse", response_obj.clone()).map_err(|e| format!("Failed to set __currentCustomEventResponse: {:?}", e))?;
+
+                            // Call the handler function with request and response
+                            let call_result = func.call::<(Object, Object), Value>((request_obj, response_obj.clone()));
+
+                            match call_result {
+                                Ok(_result) => {
+                                    // Note: We don't await promises here - handlers should be synchronous
+                                    // or use callbacks. The response object is read immediately after the call.
+
+                                    // Read back the response values
+                                    let handled: bool = response_obj.get("handled").unwrap_or(false);
+
+                                    // Read all properties from the response object
+                                    let mut properties = std::collections::HashMap::new();
+                                    let keys = response_obj.keys::<String>();
+                                    for key_result in keys {
+                                        if let Ok(key) = key_result {
+                                            // Skip 'handled' and 'setHandled' - they are special
+                                            if key == "handled" || key == "setHandled" {
+                                                continue;
+                                            }
+                                            if let Ok(val) = response_obj.get::<_, Value>(&key) {
+                                                if let Ok(Some(json_str)) = ctx.json_stringify(val) {
+                                                    if let Ok(s) = json_str.to_string() {
+                                                        properties.insert(key, s);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    Ok((handled, properties))
+                                }
+                                Err(e) => {
+                                    let error_msg = Self::format_js_error(&ctx, &e);
+                                    error!("Handler call error in mod '{}': {}", mod_id, error_msg);
+                                    Err(format!("Handler call error: {}", error_msg))
+                                }
+                            }
+                        }
+                        Ok(None) => {
+                            error!("Handler {} not found in mod '{}'", handler_id, mod_id);
+                            Err(format!("Handler {} not found", handler_id))
+                        }
+                        Err(e) => {
+                            error!("Failed to get handler {} from mod '{}': {:?}", handler_id, mod_id, e);
+                            Err(format!("Failed to get handler: {:?}", e))
+                        }
+                    }
+                })
+                .await;
+
+            // Update response based on handler result
+            match result {
+                Ok((handled, properties)) => {
+                    if handled {
+                        response.handled = true;
+                    }
+                    // Merge properties from this handler into the response
+                    for (key, value) in properties {
+                        response.properties.insert(key, value);
+                    }
+                    trace!("Handler in mod '{}' executed for custom event '{}' (handled={})", handler.mod_id, event_name, handled);
+                }
+                Err(e) => {
+                    error!("Handler execution failed: {}", e);
+                    // Continue to next handler on error
+                }
+            }
+        }
+
+        response
+    }
 }
 
 impl Drop for JsRuntimeAdapter {
@@ -1831,6 +1990,16 @@ impl RuntimeAdapter for JsRuntimeAdapter {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
                 .block_on(self.dispatch_graphic_engine_window_closed(request))
+        })
+    }
+
+    fn dispatch_custom_event(
+        &self,
+        request: &crate::api::CustomEventRequest,
+    ) -> crate::api::CustomEventResponse {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.dispatch_custom_event(request))
         })
     }
 }

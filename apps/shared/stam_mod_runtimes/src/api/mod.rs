@@ -14,7 +14,7 @@ pub mod process;
 pub mod system;
 
 pub use console::ConsoleApi;
-pub use events::{EventDispatcher, EventHandler, EventKey, SystemEvents, RequestUriProtocol, RequestUri, UriResponse, SendEventRequest, TerminalKeyRequest, TerminalKeyResponse, GraphicEngineReadyRequest, GraphicEngineReadyResponse, GraphicEngineWindowClosedRequest, GraphicEngineWindowClosedResponse};
+pub use events::{EventDispatcher, EventHandler, EventKey, SystemEvents, RequestUriProtocol, RequestUri, UriResponse, SendEventRequest, TerminalKeyRequest, TerminalKeyResponse, GraphicEngineReadyRequest, GraphicEngineReadyResponse, GraphicEngineWindowClosedRequest, GraphicEngineWindowClosedResponse, CustomEventRequest, CustomEventResponse};
 pub use graphic::{
     AlignItems, ColorValue, EdgeInsets, FlexDirection, FontConfig, FontInfo, GraphicCommand,
     GraphicEngine, GraphicEngineInfo, GraphicEngines, GraphicEvent, GraphicProxy,

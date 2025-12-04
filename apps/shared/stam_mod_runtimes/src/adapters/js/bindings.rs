@@ -419,8 +419,9 @@ fn set_timeout_interval<'js>(
         handles.insert(id, abort);
     }
 
-    //let timer_type = if is_interval { "setInterval" } else { "setTimeout" };
-    //tracing::debug!("{}: timer {} scheduled with {}ms delay for mod '{}'", timer_type, id, delay, mod_id);
+    // Timer scheduled - logging disabled for now
+    // let timer_type = if is_interval { "setInterval" } else { "setTimeout" };
+    // tracing::trace!("{}: timer {} scheduled with {}ms delay for mod '{}'", timer_type, id, delay, mod_id);
 
     // Spawn async task in the JS context
     ctx.spawn(async move {
@@ -432,7 +433,7 @@ fn set_timeout_interval<'js>(
 
                 // Check for cancellation
                 _ = abort_ref.notified() => {
-                    //tracing::debug!("Timer {} aborted", id);
+                    tracing::trace!("Timer {} aborted", id);
                     break;
                 }
 
@@ -520,14 +521,14 @@ pub fn setup_timer_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
 
     // clearTimeout(timerId) - cancels a pending timeout
     let clear_timeout_fn = Function::new(ctx.clone(), |_ctx: Ctx, timer_id: u32| {
-        //tracing::debug!("clearTimeout: cancelling timer {}", timer_id);
+        tracing::trace!("clearTimeout: cancelling timer {}", timer_id);
         clear_timer(timer_id);
     })?;
     globals.set("clearTimeout", clear_timeout_fn)?;
 
     // clearInterval(intervalId) - cancels a pending interval
     let clear_interval_fn = Function::new(ctx.clone(), |_ctx: Ctx, timer_id: u32| {
-        //tracing::debug!("clearInterval: cancelling interval {}", timer_id);
+        tracing::trace!("clearInterval: cancelling interval {}", timer_id);
         clear_timer(timer_id);
     })?;
     globals.set("clearInterval", clear_interval_fn)?;
@@ -575,7 +576,7 @@ impl SystemJS {
     /// - uncompressed_bytes: number | null (if available from server)
     #[qjs(rename = "getMods")]
     pub fn get_mods<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Array<'js>> {
-        //tracing::debug!("SystemJS::get_mods called");
+        tracing::trace!("SystemJS::get_mods called");
 
         let mods = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.system_api.get_mods()
@@ -587,7 +588,7 @@ impl SystemJS {
             }
         };
 
-        //tracing::debug!("SystemJS::get_mods got {} mods", mods.len());
+        tracing::trace!("SystemJS::get_mods got {} mods", mods.len());
 
         let array = Array::new(ctx.clone())?;
 
@@ -617,7 +618,7 @@ impl SystemJS {
             array.set(idx, obj)?;
         }
 
-        //tracing::debug!("SystemJS::get_mods returning array");
+        tracing::trace!("SystemJS::get_mods returning array");
         Ok(array)
     }
 
@@ -753,9 +754,11 @@ impl SystemJS {
     /// * `args` - Variadic arguments to pass to handlers (will be JSON-serialized)
     ///
     /// # Returns
-    /// Promise that resolves when all handlers have completed
+    /// Promise that resolves to an object with:
+    /// - `handled: boolean` - Whether any handler marked the event as handled
+    /// - Plus any custom properties added by handlers
     #[qjs(rename = "sendEvent")]
-    pub async fn send_event<'js>(&self, ctx: Ctx<'js>, event_name: String, args: Rest<Value<'js>>) -> rquickjs::Result<()> {
+    pub async fn send_event<'js>(&self, ctx: Ctx<'js>, event_name: String, args: Rest<Value<'js>>) -> rquickjs::Result<Object<'js>> {
         // Convert each JS value to JSON string
         let json_args: Vec<String> = args.0.iter()
             .map(|v| ctx.json_stringify(v.clone())
@@ -765,18 +768,31 @@ impl SystemJS {
                 .unwrap_or_else(|| "null".to_string()))
             .collect();
 
-        //tracing::debug!("SystemJS::send_event called: event_name={}, args_count={}", event_name, json_args.len());
+        tracing::trace!("SystemJS::send_event called: event_name={}, args_count={}", event_name, json_args.len());
 
         let result = self.system_api.event_dispatcher().request_send_event(event_name.clone(), json_args).await;
 
         match result {
-            Ok(()) => {
-                //tracing::debug!("Event '{}' dispatched successfully", event_name);
-                Ok(())
+            Ok(response) => {
+                tracing::trace!("Event '{}' dispatched successfully (handled={}, properties={})",
+                    event_name, response.handled, response.properties.len());
+
+                // Create response object
+                let response_obj = Object::new(ctx.clone())?;
+                response_obj.set("handled", response.handled)?;
+
+                // Add all custom properties from handlers
+                for (key, value_json) in response.properties.iter() {
+                    let js_value: Value = ctx.json_parse(value_json.clone())
+                        .unwrap_or_else(|_| Value::new_null(ctx.clone()));
+                    response_obj.set(key.as_str(), js_value)?;
+                }
+
+                Ok(response_obj)
             }
             Err(e) => {
                 tracing::error!("Failed to dispatch event '{}': {}", event_name, e);
-                Err(rquickjs::Error::Exception)
+                Err(ctx.throw(rquickjs::String::from_str(ctx.clone(), &e)?.into()))
             }
         }
     }
@@ -867,7 +883,7 @@ impl SystemJS {
         };
 
         let packages = self.system_api.get_mod_packages(mod_side);
-        //tracing::debug!("SystemJS::get_mod_packages called: side={:?}, found {} packages", mod_side, packages.len());
+        tracing::trace!("SystemJS::get_mod_packages called: side={:?}, found {} packages", mod_side, packages.len());
 
         let array = Array::new(ctx.clone())?;
 
@@ -933,7 +949,7 @@ impl SystemJS {
     /// Promise that resolves to the installation path on success, or rejects on failure
     #[qjs(rename = "installModFromPath")]
     pub async fn install_mod_from_path(&self, archive_path: String, mod_id: String) -> rquickjs::Result<String> {
-        //tracing::debug!("SystemJS::install_mod_from_path called: archive_path={}, mod_id={}", archive_path, mod_id);
+        tracing::trace!("SystemJS::install_mod_from_path called: archive_path={}, mod_id={}", archive_path, mod_id);
 
         let system_api = self.system_api.clone();
         let archive_path_owned = archive_path.clone();
@@ -975,7 +991,7 @@ impl SystemJS {
     /// Promise that resolves on success, or rejects on failure
     #[qjs(rename = "attachMod")]
     pub async fn attach_mod(&self, mod_id: String) -> rquickjs::Result<()> {
-        //tracing::debug!("SystemJS::attach_mod called: mod_id={}", mod_id);
+        tracing::trace!("SystemJS::attach_mod called: mod_id={}", mod_id);
 
         let result = self.system_api.request_attach_mod(mod_id.clone()).await;
 
@@ -1250,7 +1266,7 @@ impl NetworkJS {
     /// ```
     #[qjs(rename = "download")]
     pub async fn download<'js>(&self, ctx: Ctx<'js>, uri: String, progress_callback: Opt<Function<'js>>) -> rquickjs::Result<Object<'js>> {
-        //tracing::debug!("NetworkJS::download called: uri={}", uri);
+        tracing::trace!("NetworkJS::download called: uri={}", uri);
 
         // Shared state for progress updates: (percentage, received, total)
         // The Rust progress callback updates this, and we read it periodically to call JS
@@ -1346,12 +1362,11 @@ impl NetworkJS {
         // If file_content is present, save it to a temp file and return temp_file_path
         // Do NOT expose file_content directly to JavaScript
         if let Some(file_content) = response.file_content {
-            //tracing::debug!("NetworkJS::download: file_content has {} bytes, temp_dir={:?}",
-            //    file_content.len(), self.temp_file_manager.get_temp_dir());
+            tracing::trace!("NetworkJS::download: file_content has {} bytes", file_content.len());
             match self.temp_file_manager.create_temp_file(&file_content, file_name_for_temp.as_deref()) {
                 Ok(temp_path) => {
                     let path_str = temp_path.to_string_lossy().to_string();
-                    //tracing::debug!("NetworkJS::download: created temp file at {}", path_str);
+                    tracing::trace!("NetworkJS::download: created temp file at {}", path_str);
                     result.set("temp_file_path", path_str)?;
                 }
                 Err(_e) => {

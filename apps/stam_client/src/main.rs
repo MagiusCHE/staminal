@@ -1356,14 +1356,13 @@ async fn connect_to_game_server(
                     }
                 } => {
                     if let Some(request) = request {
-                        let result = handle_send_event_request(
+                        let response = handle_send_event_request(
                             &request.event_name,
                             &request.args,
                             &mut runtime_manager_opt,
-                            &system_api_opt,
-                        ).await;
+                        );
                         // Send response back to JS
-                        let _ = request.response_tx.send(result);
+                        let _ = request.response_tx.send(response);
                     }
                 }
 
@@ -1617,53 +1616,37 @@ async fn handle_attach_mod_request(
 /// Handle a request to dispatch a custom event to all registered handlers
 ///
 /// This is called when JavaScript code calls `system.send_event(event_name, ...args)`.
-/// It finds all handlers registered for the event and calls them in priority order.
-async fn handle_send_event_request(
+/// It dispatches the event to all registered handlers using the new request/response pattern.
+///
+/// # Returns
+/// A `CustomEventResponse` containing:
+/// - `handled: bool` - Whether any handler marked the event as handled
+/// - `results: Vec<String>` - JSON-serialized results from handlers
+fn handle_send_event_request(
     event_name: &str,
     args: &[String],
     runtime_manager_opt: &mut Option<ModRuntimeManager>,
-    system_api_opt: &Option<stam_mod_runtimes::api::SystemApi>,
-) -> Result<(), String> {
-    debug!("Dispatching event '{}' with {} args", event_name, args.len());
+) -> stam_mod_runtimes::api::CustomEventResponse {
+    debug!("Dispatching custom event '{}' with {} args", event_name, args.len());
 
-    let runtime_manager = runtime_manager_opt.as_mut()
-        .ok_or_else(|| "Runtime manager not available".to_string())?;
-
-    let system_api = system_api_opt.as_ref()
-        .ok_or_else(|| "System API not available".to_string())?;
-
-    // Get all handlers for this event
-    let handlers = system_api.event_dispatcher().get_handlers_for_custom_event(event_name);
-
-    if handlers.is_empty() {
-        debug!("No handlers registered for event '{}'", event_name);
-        return Ok(());
-    }
-
-    trace!("Found {} handler(s) for event '{}'", handlers.len(), event_name);
-
-    // Call each handler in priority order
-    for handler in &handlers {
-        trace!("Calling handler {} (mod={}, priority={})",
-            handler.handler_id, handler.mod_id, handler.priority);
-
-        // Call the handler function with event name and args
-        // The handler was stored in the JS context with the handler_id as key
-        let call_result = runtime_manager.call_event_handler(
-            handler.handler_id,
-            event_name,
-            args,
-        );
-
-        if let Err(e) = call_result {
-            warn!("Handler {} (mod={}) failed for event '{}': {}",
-                handler.handler_id, handler.mod_id, event_name, e);
-            // Continue to next handler - don't fail the whole event dispatch
+    let runtime_manager = match runtime_manager_opt.as_mut() {
+        Some(rm) => rm,
+        None => {
+            warn!("Runtime manager not available for custom event '{}'", event_name);
+            return stam_mod_runtimes::api::CustomEventResponse::default();
         }
-    }
+    };
 
-    debug!("Event '{}' dispatched to {} handler(s)", event_name, handlers.len());
-    Ok(())
+    // Create the request object
+    let request = stam_mod_runtimes::api::CustomEventRequest::new(event_name, args.to_vec());
+
+    // Dispatch to all handlers and get the aggregated response
+    let response = runtime_manager.dispatch_custom_event(&request);
+
+    debug!("Custom event '{}' dispatched (handled={}, properties={})",
+        event_name, response.handled, response.properties.len());
+
+    response
 }
 
 /// Handle a graphic engine event

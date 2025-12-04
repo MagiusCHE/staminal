@@ -133,6 +133,63 @@ impl EventKey {
     }
 }
 
+/// Request object passed to custom event handlers
+///
+/// This is the request object that custom event handlers receive.
+/// It contains the event name and the arguments passed to sendEvent.
+#[derive(Debug, Clone)]
+pub struct CustomEventRequest {
+    /// The event name being dispatched
+    pub event_name: String,
+    /// Arguments passed to sendEvent (JSON-serialized)
+    pub args: Vec<String>,
+}
+
+impl CustomEventRequest {
+    /// Create a new CustomEventRequest
+    pub fn new(event_name: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            event_name: event_name.into(),
+            args,
+        }
+    }
+}
+
+/// Response object for custom event handlers
+///
+/// This object is allocated by the Core and passed to handlers.
+/// Handlers can set `handled = true` and add any custom properties.
+/// The sender will receive all properties added by handlers.
+#[derive(Debug, Clone, Default)]
+pub struct CustomEventResponse {
+    /// Whether the event has been handled (default: false)
+    pub handled: bool,
+    /// Custom properties added by handlers (property name -> JSON-serialized value)
+    pub properties: std::collections::HashMap<String, String>,
+}
+
+impl CustomEventResponse {
+    /// Create a new CustomEventResponse
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Set whether the event has been handled
+    pub fn set_handled(&mut self, handled: bool) {
+        self.handled = handled;
+    }
+
+    /// Set a custom property (JSON-serialized value)
+    pub fn set_property(&mut self, key: String, value: String) {
+        self.properties.insert(key, value);
+    }
+
+    /// Get a custom property
+    pub fn get_property(&self, key: &str) -> Option<&String> {
+        self.properties.get(key)
+    }
+}
+
 /// Request to send/dispatch an event from JavaScript
 ///
 /// This is used by `system.send_event(event_name, ...args)` to trigger
@@ -144,7 +201,7 @@ pub struct SendEventRequest {
     /// Arguments to pass to handlers (JSON-serialized)
     pub args: Vec<String>,
     /// Channel to send the result back to the caller
-    pub response_tx: oneshot::Sender<Result<(), String>>,
+    pub response_tx: oneshot::Sender<CustomEventResponse>,
 }
 
 /// Protocol filter for RequestUri events
@@ -710,7 +767,10 @@ impl EventDispatcher {
     ///
     /// This is called by the JS binding `system.send_event(event_name, ...args)`.
     /// The request is sent to the main loop which will process it and respond.
-    pub async fn request_send_event(&self, event_name: String, args: Vec<String>) -> Result<(), String> {
+    ///
+    /// # Returns
+    /// A `CustomEventResponse` containing `handled` flag and `results` array
+    pub async fn request_send_event(&self, event_name: String, args: Vec<String>) -> Result<CustomEventResponse, String> {
         let (response_tx, response_rx) = oneshot::channel();
 
         let request = SendEventRequest {
@@ -731,7 +791,7 @@ impl EventDispatcher {
         tx.send(request).await.map_err(|_| "Failed to send event request".to_string())?;
 
         // Wait for the response
-        response_rx.await.map_err(|_| "Send event request was cancelled".to_string())?
+        response_rx.await.map_err(|_| "Send event request was cancelled".to_string())
     }
 
     /// Take the send_event request receiver (can only be called once)
