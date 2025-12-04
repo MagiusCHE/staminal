@@ -40,10 +40,10 @@ export class Game {
         const windows = await Graphic.getWindows();
         const engine = await Graphic.getEngineInfo();
         //let first = true;
-        console.log("Found", windows.length, "windows...");
-        console.log("Main window:", engine.mainWindow.id);
+        //console.log("Found", windows.length, "windows...");
+        //console.log("Main window:", engine.mainWindow.id);
         for (const win of windows) {
-            console.log(" - Win:", win.id);
+            //console.log(" - Win:", win.id);
             if (win.id == engine.mainWindow.id) {
                 await win.clearWidgets();
                 if (this.#config.graphic.mode == "borderless_fullscreen") {
