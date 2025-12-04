@@ -115,7 +115,7 @@ pub enum WindowPositionMode {
 | `CloseWindow` | Close and destroy a window |
 | `SetWindowSize` | Update window dimensions |
 | `SetWindowTitle` | Update window title |
-| `SetWindowFullscreen` | Toggle fullscreen mode |
+| `SetWindowMode` | Set window mode (Windowed, Fullscreen, BorderlessFullscreen) |
 | `SetWindowVisible` | Show/hide window |
 | `SetWindowFont` | Set default font for window widgets |
 
@@ -123,7 +123,7 @@ pub enum WindowPositionMode {
 
 ```javascript
 // Enable graphic engine (creates main window)
-await graphic.enableEngine("bevy", {
+await Graphic.enableEngine("bevy", {
     title: "My Game",
     width: 1920,
     height: 1080,
@@ -133,10 +133,10 @@ await graphic.enableEngine("bevy", {
 });
 
 // Get main window
-const mainWindow = await graphic.getMainWindow();
+const mainWindow = await Graphic.getMainWindow();
 
 // Create additional window
-const secondWindow = await graphic.createWindow({
+const secondWindow = await Graphic.createWindow({
     title: "Debug Window",
     width: 800,
     height: 600
@@ -145,7 +145,7 @@ const secondWindow = await graphic.createWindow({
 // Modify window
 await mainWindow.setTitle("New Title");
 await mainWindow.setSize(1280, 720);
-await mainWindow.setFullscreen(true);
+await mainWindow.setMode(WindowModes.BorderlessFullscreen);
 
 // Close window
 await secondWindow.close();
@@ -269,7 +269,7 @@ const panel = await window.createWidget("panel", {
 });
 
 // Create text with custom font
-await graphic.loadFont("fonts/Roboto-Bold.ttf", "roboto-bold");
+await Graphic.loadFont("fonts/Roboto-Bold.ttf", "roboto-bold");
 const title = await window.createWidget("text", {
     parent: panel.id,
     content: "Hello World",
@@ -347,7 +347,7 @@ Fonts must be loaded before use:
 
 ```javascript
 // Load font with custom alias
-await graphic.loadFont("mods/my-mod/assets/fonts/Custom.ttf", "custom");
+await Graphic.loadFont("mods/my-mod/assets/fonts/Custom.ttf", "custom");
 
 // Use in widget
 const text = await window.createWidget("text", {
@@ -359,10 +359,10 @@ const text = await window.createWidget("text", {
 await window.setFont("custom", 16);
 
 // Unload when done
-await graphic.unloadFont("custom");
+await Graphic.unloadFont("custom");
 
 // List loaded fonts
-const fonts = graphic.getLoadedFonts();
+const fonts = Graphic.getLoadedFonts();
 ```
 
 ### Image Loading
@@ -371,7 +371,7 @@ Images are loaded on-demand, but can be preloaded:
 
 ```javascript
 // Preload for faster first use
-await graphic.preloadImage("mods/my-mod/assets/images/background.png");
+await Graphic.preloadImage("mods/my-mod/assets/images/background.png");
 
 // Use in widget
 const img = await window.createWidget("image", {
@@ -395,9 +395,9 @@ All graphic operations return descriptive errors on the server:
 
 ```javascript
 try {
-    await graphic.enableEngine("bevy");
+    await Graphic.enableEngine("bevy");
 } catch (e) {
-    // "graphic.enableEngine() is not available on the server.
+    // "Graphic.enableEngine() is not available on the server.
     //  This method is client-only."
 }
 ```

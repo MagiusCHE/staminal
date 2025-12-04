@@ -158,7 +158,7 @@ function onAttach() {
 
 function onBootstrap() {
     console.log("Bootstrapping...");
-    console.log("Data path:", process.app.data_path);
+    console.log("Data path:", Process.app.data_path);
 }
 
 function getModInfo() {

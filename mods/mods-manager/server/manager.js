@@ -6,7 +6,7 @@ export class Manager {
     async register() {
         // Register handler for mod download requests
         // Route prefix: /mods-manager/ - will match /mods-manager/{mod_id}/download
-        system.registerEvent(SystemEvents.RequestUri, this.handle_mod_request.bind(this), 100, "stam://", "/mods-manager/");
+        System.registerEvent(SystemEvents.RequestUri, this.handle_mod_request.bind(this), 100, "stam://", "/mods-manager/");
     }
 
 
@@ -22,7 +22,7 @@ export class Manager {
         const filter = parts[3] || "client";  // e.g., "client" or "server"
         // enum ModSides { Client, Server }
         const modSide = filter == "server" ? ModSides.Server : ModSides.Client;
-        const mods = system.getModPackages(modSide);
+        const mods = System.getModPackages(modSide);
         const mod_info = mods.find(m => m.id === mod_id);
         if (!mod_info) {
             console.error(`Mod not found: ${mod_id}`);

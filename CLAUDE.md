@@ -128,6 +128,36 @@ When adding new dependencies:
 4. **Always prefer established crates over custom implementations**: Before implementing any functionality from scratch, search for well-known Rust crates that already solve the problem (e.g., `serde` for serialization, `tokio` for async, `tracing` for logging, `clap` for CLI args). Only implement custom solutions when no suitable crate exists or when there's a specific performance/integration requirement.
 5. **ALWAYS use latest versions**: When adding or updating dependencies, ALWAYS use the latest stable version available. Do not use old versions unless there is a specific compatibility requirement. Regularly check and update dependencies to their latest versions. Use `cargo outdated` or check crates.io to verify you're using the most recent version.
 
+### JavaScript Global Objects Naming Convention
+All global objects exposed to JavaScript mods MUST follow the **PascalCase** naming convention (capitalized):
+
+| Global Object | Description |
+|---------------|-------------|
+| `System` | System API (mods, events, game info, paths) |
+| `Graphic` | Graphic engine API (windows, widgets, fonts) |
+| `Network` | Network API (downloads) |
+| `Locale` | Localization API (translations) |
+| `Process` | Process API (app paths, environment) |
+| `File` | File API (secure file read/write operations) |
+| `Text` | Text utilities |
+
+**Exception:** `console` remains lowercase as it follows the standard JavaScript API convention (browser/Node.js).
+
+**Enum constants** are also PascalCase: `SystemEvents`, `GraphicEngines`, `WidgetTypes`, `WindowPositionModes`, `FlexDirection`, `JustifyContent`, `AlignItems`, `ModSides`.
+
+**Example usage in mods:**
+```javascript
+// Correct
+const mods = System.getMods();
+await Graphic.enableEngine(GraphicEngines.Bevy, config);
+const text = Locale.get("welcome");
+console.log("Data path:", Process.app.data_path);
+const config = File.readJson("settings.json", "utf-8", {});
+
+// Wrong (lowercase - will not work)
+const mods = system.getMods();  // ❌
+```
+
 ### Mod Runtime Development
 When developing features for the mod system (`stam_mod_runtimes`):
 1. **Language-agnostic design**: Even though JavaScript is currently the only supported runtime, design APIs and interfaces to be language-agnostic
@@ -190,18 +220,31 @@ When implementing new APIs or methods that are only available on one side (clien
 2. **Pattern for client-only methods**: Check if the required context is available (e.g., `game_info` for client). If not, throw an error with the message: `"<method_name>() is not available on the server. This method is client-only."`
 3. **Pattern for server-only methods**: Similarly, throw: `"<method_name>() is not available on the client. This method is server-only."`
 4. **Document the limitation**: In the Rust doc comments, clearly mark the method as client-only or server-only.
-5. **Example implementation** (see `system.get_game_info()`):
+5. **Example implementation** (see `System.getGameInfo()`):
    ```rust
    match self.system_api.get_game_info() {
        Some(info) => { /* return data */ },
        None => {
            Err(ctx.throw(rquickjs::String::from_str(
                ctx.clone(),
-               "system.get_game_info() is not available on the server. This method is client-only.",
+               "System.getGameInfo() is not available on the server. This method is client-only.",
            )?.into()))
        }
    }
    ```
+
+### Documentation Maintenance (CRITICAL)
+**Every system modification REQUIRES a documentation review.**
+
+After any change to the system (new features, API changes, architectural modifications):
+1. **Review the `docs/` folder**: Check if existing documentation needs to be updated
+2. **Create missing documentation**: If a relevant document doesn't exist, create it
+3. **Keep docs in sync**: Documentation must always reflect the current state of the system
+
+Documentation structure:
+- All documentation files go in the `docs/` directory
+- Use Markdown format (`.md` files)
+- Name files descriptively (e.g., `mod-api.md`, `networking.md`, `events.md`)
 
 ### Script Files (CRITICAL)
 **NEVER modify script files (JavaScript, Lua, etc.) unless the user EXPLICITLY requests it.**

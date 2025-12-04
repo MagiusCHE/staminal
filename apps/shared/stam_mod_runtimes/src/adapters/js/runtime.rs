@@ -550,14 +550,24 @@ impl JsRuntimeAdapter {
                 bindings::setup_console_api(ctx.clone())?;
 
                 // Register process API with game-specific directories
-                let app_api = AppApi::new(game_data_dir, game_config_dir);
+                let app_api = AppApi::new(game_data_dir.clone(), game_config_dir.clone());
                 bindings::setup_process_api(ctx.clone(), app_api)?;
+
+                // Register file API with game-specific directories for path validation
+                let file_api = crate::api::FileApi::new(game_data_dir, game_config_dir.clone());
+                bindings::setup_file_api(ctx.clone(), file_api)?;
 
                 // Register timer API (setTimeout, setInterval, etc.)
                 bindings::setup_timer_api(ctx.clone())?;
 
-                // Register system API (system.get_mods())
-                bindings::setup_system_api(ctx.clone(), system_api)?;
+                // Register system API (system.get_mods(), system.getGameConfigPath())
+                // game_config_dir is passed for client-only getGameConfigPath() method
+                let config_dir_for_system = if game_config_dir.as_os_str().is_empty() {
+                    None
+                } else {
+                    Some(game_config_dir)
+                };
+                bindings::setup_system_api(ctx.clone(), system_api, config_dir_for_system)?;
 
                 // Register locale API (locale.get(), locale.get_with_args())
                 if let Some(locale) = locale_api {

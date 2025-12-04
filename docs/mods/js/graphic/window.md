@@ -8,9 +8,9 @@ This document provides the JavaScript API reference for window and widget manage
 
 ```javascript
 // In your mod's onBootstrap or GraphicEngineReady handler
-system.registerEvent(system.GraphicEngineReady, async (req, res) => {
+System.registerEvent(System.GraphicEngineReady, async (req, res) => {
     // Get the main window (created by enableEngine)
-    const info = await graphic.getEngineInfo();
+    const info = await Graphic.getEngineInfo();
     const window = info.mainWindow;
 
     // Create a simple UI
@@ -28,7 +28,7 @@ system.registerEvent(system.GraphicEngineReady, async (req, res) => {
 });
 
 // Enable the graphic engine (triggers GraphicEngineReady)
-await graphic.enableEngine(GraphicEngines.Bevy, {
+await Graphic.enableEngine(GraphicEngines.Bevy, {
     window: {
         title: "My Game",
         width: 1280,
@@ -41,7 +41,7 @@ await graphic.enableEngine(GraphicEngines.Bevy, {
 
 ## Global Objects
 
-### `graphic`
+### `Graphic`
 
 The main graphic API object, available globally in all mods.
 
@@ -76,11 +76,21 @@ Enum for window positioning:
 | `WindowPositionModes.Default` | `0` | OS default positioning |
 | `WindowPositionModes.Centered` | `1` | Center on screen |
 
+### `WindowModes`
+
+Enum for window display modes:
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `WindowModes.Windowed` | `0` | Normal windowed mode |
+| `WindowModes.Fullscreen` | `1` | Exclusive fullscreen mode |
+| `WindowModes.BorderlessFullscreen` | `2` | Borderless fullscreen (covers entire screen) |
+
 ---
 
-## `graphic` Object
+## `Graphic` Object
 
-### `graphic.enableEngine(engineType, config?)`
+### `Graphic.enableEngine(engineType, config?)`
 
 Enables a graphic engine and creates the main window.
 
@@ -99,7 +109,7 @@ Enables a graphic engine and creates the main window.
 
 **Example:**
 ```javascript
-await graphic.enableEngine(GraphicEngines.Bevy, {
+await Graphic.enableEngine(GraphicEngines.Bevy, {
     window: {
         title: "My Awesome Game",
         width: 1920,
@@ -112,28 +122,28 @@ await graphic.enableEngine(GraphicEngines.Bevy, {
 
 ---
 
-### `graphic.isEngineEnabled()`
+### `Graphic.isEngineEnabled()`
 
 Checks if a graphic engine is currently enabled.
 
 **Returns:** `boolean`
 
 ```javascript
-if (graphic.isEngineEnabled()) {
+if (Graphic.isEngineEnabled()) {
     console.log("Engine is ready!");
 }
 ```
 
 ---
 
-### `graphic.getEngine()`
+### `Graphic.getEngine()`
 
 Gets the currently active engine type.
 
 **Returns:** `number | null` - `GraphicEngines` value or `null`
 
 ```javascript
-const engine = graphic.getEngine();
+const engine = Graphic.getEngine();
 if (engine === GraphicEngines.Bevy) {
     console.log("Using Bevy engine");
 }
@@ -141,7 +151,7 @@ if (engine === GraphicEngines.Bevy) {
 
 ---
 
-### `graphic.getEngineInfo()`
+### `Graphic.getEngineInfo()`
 
 Gets detailed information about the active engine.
 
@@ -161,7 +171,7 @@ Gets detailed information about the active engine.
 
 **Example:**
 ```javascript
-const info = await graphic.getEngineInfo();
+const info = await Graphic.getEngineInfo();
 console.log(`Using ${info.name} v${info.version}`);
 console.log(`Backend: ${info.backend}`);
 console.log(`Features: ${info.features.join(", ")}`);
@@ -172,14 +182,14 @@ await info.mainWindow.setTitle("Updated Title");
 
 ---
 
-### `graphic.getWindows()`
+### `Graphic.getWindows()`
 
 Gets all windows managed by the engine.
 
 **Returns:** `Window[]`
 
 ```javascript
-const windows = graphic.getWindows();
+const windows = Graphic.getWindows();
 for (const win of windows) {
     console.log(`Window ${win.id}`);
 }
@@ -187,7 +197,44 @@ for (const win of windows) {
 
 ---
 
-### `graphic.createWindow(config?)`
+### `Graphic.getPrimaryScreen()`
+
+Gets the primary screen/monitor identifier.
+
+**Returns:** `Promise<number>` - Screen ID (0 for primary, or hash-based ID)
+
+```javascript
+const screenId = await Graphic.getPrimaryScreen();
+console.log(`Primary screen ID: ${screenId}`);
+```
+
+---
+
+### `Graphic.getScreenResolution(screenId)`
+
+Gets the resolution of a specific screen/monitor.
+
+**Parameters:**
+- `screenId`: `number` - Screen identifier (from `getPrimaryScreen()` or 0 for primary)
+
+**Returns:** `Promise<object>`
+- `width`: `number` - Screen width in pixels
+- `height`: `number` - Screen height in pixels
+
+**Example:**
+```javascript
+const screen = await Graphic.getPrimaryScreen();
+const resolution = await Graphic.getScreenResolution(screen);
+console.log(`Screen resolution: ${resolution.width}x${resolution.height}`);
+
+// Or directly use 0 for primary screen
+const primaryRes = await Graphic.getScreenResolution(0);
+console.log(`Primary screen: ${primaryRes.width}x${primaryRes.height}`);
+```
+
+---
+
+### `Graphic.createWindow(config?)`
 
 Creates a new window.
 
@@ -205,7 +252,7 @@ Creates a new window.
 
 **Example:**
 ```javascript
-const debugWindow = await graphic.createWindow({
+const debugWindow = await Graphic.createWindow({
     title: "Debug Console",
     width: 600,
     height: 400,
@@ -215,20 +262,20 @@ const debugWindow = await graphic.createWindow({
 
 ---
 
-### `graphic.loadFont(alias, path)`
+### `Graphic.loadFont(alias, path)`
 
 Loads a custom font from a file.
 
 **Parameters:**
 - `alias`: `string` - Name to reference this font
-- `path`: `string` - Path to font file (use `system.getAssetsPath()`)
+- `path`: `string` - Path to font file (use `System.getAssetsPath()`)
 
 **Returns:** `Promise<string>` - The assigned alias
 
 **Example:**
 ```javascript
-const fontPath = system.getAssetsPath("fonts/Roboto-Bold.ttf");
-await graphic.loadFont("roboto-bold", fontPath);
+const fontPath = System.getAssetsPath("fonts/Roboto-Bold.ttf");
+await Graphic.loadFont("roboto-bold", fontPath);
 
 // Use in widgets
 const text = await window.createWidget(WidgetTypes.Text, {
@@ -239,7 +286,7 @@ const text = await window.createWidget(WidgetTypes.Text, {
 
 ---
 
-### `graphic.unloadFont(alias)`
+### `Graphic.unloadFont(alias)`
 
 Unloads a previously loaded font.
 
@@ -249,14 +296,14 @@ Unloads a previously loaded font.
 **Returns:** `Promise<void>`
 
 ```javascript
-await graphic.unloadFont("roboto-bold");
+await Graphic.unloadFont("roboto-bold");
 ```
 
 ---
 
 ## `Window` Object
 
-Returned by `graphic.createWindow()` or `graphic.getEngineInfo().mainWindow`.
+Returned by `Graphic.createWindow()` or `Graphic.getEngineInfo().mainWindow`.
 
 ### Properties
 
@@ -297,17 +344,27 @@ await window.setTitle("Level 2 - The Dark Forest");
 
 ---
 
-### `window.setFullscreen(fullscreen)`
+### `window.setMode(mode)`
 
-Sets fullscreen mode.
+Sets the window display mode.
 
 **Parameters:**
-- `fullscreen`: `boolean` - `true` for fullscreen, `false` for windowed
+- `mode`: `WindowModes` - The display mode to set:
+  - `WindowModes.Windowed` (0) - Normal windowed mode
+  - `WindowModes.Fullscreen` (1) - Exclusive fullscreen mode
+  - `WindowModes.BorderlessFullscreen` (2) - Borderless fullscreen
 
 **Returns:** `Promise<void>`
 
 ```javascript
-await window.setFullscreen(true);
+// Set to borderless fullscreen
+await window.setMode(WindowModes.BorderlessFullscreen);
+
+// Set to exclusive fullscreen
+await window.setMode(WindowModes.Fullscreen);
+
+// Set back to windowed mode
+await window.setMode(WindowModes.Windowed);
 ```
 
 ---
@@ -333,13 +390,13 @@ await window.setVisible(true);  // Show
 Sets the default font for all widgets in this window.
 
 **Parameters:**
-- `family`: `string` - Font alias (loaded via `graphic.loadFont()`)
+- `family`: `string` - Font alias (loaded via `Graphic.loadFont()`)
 - `size`: `number` - Font size in pixels
 
 **Returns:** `Promise<void>`
 
 ```javascript
-await graphic.loadFont("game-font", system.getAssetsPath("fonts/Game.ttf"));
+await Graphic.loadFont("game-font", System.getAssetsPath("fonts/Game.ttf"));
 await window.setFont("game-font", 16);
 ```
 
@@ -669,12 +726,12 @@ image: {
 ### Menu Screen
 
 ```javascript
-system.registerEvent(system.GraphicEngineReady, async (req, res) => {
-    const info = await graphic.getEngineInfo();
+System.registerEvent(System.GraphicEngineReady, async (req, res) => {
+    const info = await Graphic.getEngineInfo();
     const window = info.mainWindow;
 
     // Load font
-    await graphic.loadFont("title", system.getAssetsPath("fonts/Title.ttf"));
+    await Graphic.loadFont("title", System.getAssetsPath("fonts/Title.ttf"));
 
     // Main container
     const main = await window.createWidget(WidgetTypes.Container, {
@@ -727,11 +784,11 @@ system.registerEvent(system.GraphicEngineReady, async (req, res) => {
     });
 
     await quitBtn.on("click", async () => {
-        await system.exit(0);
+        await System.exit(0);
     });
 });
 
-await graphic.enableEngine(GraphicEngines.Bevy, {
+await Graphic.enableEngine(GraphicEngines.Bevy, {
     window: { title: "My Awesome Game", width: 1280, height: 720 }
 });
 ```
@@ -767,7 +824,7 @@ async function createHUD(window) {
     for (let i = 0; i < 3; i++) {
         await livesContainer.createChild(WidgetTypes.Image, {
             image: {
-                path: system.getAssetsPath("sprites/heart.png"),
+                path: System.getAssetsPath("sprites/heart.png"),
                 scaleMode: "fit"
             },
             width: 32,
@@ -787,12 +844,12 @@ await hud.scoreText.setContent("Score: 1000");
 
 ```javascript
 // Main game window
-await graphic.enableEngine(GraphicEngines.Bevy, {
+await Graphic.enableEngine(GraphicEngines.Bevy, {
     window: { title: "Game", width: 1280, height: 720 }
 });
 
 // Create debug window
-const debugWin = await graphic.createWindow({
+const debugWin = await Graphic.createWindow({
     title: "Debug Console",
     width: 400,
     height: 300
@@ -829,15 +886,15 @@ All async methods can throw errors. Always use try/catch:
 
 ```javascript
 try {
-    await graphic.enableEngine(GraphicEngines.Bevy);
+    await Graphic.enableEngine(GraphicEngines.Bevy);
 } catch (error) {
     console.error("Failed to enable engine:", error.message);
 }
 ```
 
 Common errors:
-- `"graphic.* is not available on the server. This method is client-only."`
-- `"No graphic engine enabled. Call graphic.enableEngine() first."`
+- `"Graphic.* is not available on the server. This method is client-only."`
+- `"No graphic engine enabled. Call Graphic.enableEngine() first."`
 - `"A graphic engine is already enabled"`
 - `"Invalid widget type: X"`
 - `"Invalid color: ..."`
@@ -847,4 +904,4 @@ Common errors:
 ## See Also
 
 - [Graphic Engine Architecture](../graphic-window.md) - Internal architecture documentation
-- [Event System](../event-system.md) - Event handling patterns
+- [Event System](../event-System.md) - Event handling patterns

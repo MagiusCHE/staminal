@@ -37,4 +37,4 @@ pub use widget::{
     PropertyValue, RectValue, ShadowConfig, SizeValue, TextAlign, WidgetConfig, WidgetEventType,
     WidgetFilter, WidgetInfo, WidgetSubscriptions, WidgetType,
 };
-pub use window::{InitialWindowConfig, WindowConfig, WindowInfo, WindowPositionMode};
+pub use window::{InitialWindowConfig, WindowConfig, WindowInfo, WindowMode, WindowPositionMode};

@@ -12,7 +12,7 @@ use tokio::sync::{mpsc, oneshot};
 use super::{
     FontInfo, GraphicCommand, GraphicEngineInfo, GraphicEngines, GraphicEvent,
     InitialWindowConfig, PropertyValue, WidgetConfig, WidgetEventType, WidgetInfo,
-    WidgetSubscriptions, WidgetType, WindowConfig, WindowInfo,
+    WidgetSubscriptions, WidgetType, WindowConfig, WindowInfo, WindowMode,
 };
 use super::super::path_security::{PathSecurityConfig, validate_and_resolve_path};
 
@@ -433,15 +433,15 @@ impl GraphicProxy {
         Ok(())
     }
 
-    /// Set window fullscreen mode
-    pub async fn set_window_fullscreen(
+    /// Set window mode (windowed, fullscreen, borderless fullscreen)
+    pub async fn set_window_mode(
         &self,
         window_id: u64,
-        fullscreen: bool,
+        mode: WindowMode,
     ) -> Result<(), String> {
         if !self.available {
             return Err(
-                "window.setFullscreen() is not available on the server. This method is client-only."
+                "window.setMode() is not available on the server. This method is client-only."
                     .to_string(),
             );
         }
@@ -451,9 +451,9 @@ impl GraphicProxy {
 
         let (response_tx, response_rx) = oneshot::channel();
 
-        tx.send(GraphicCommand::SetWindowFullscreen {
+        tx.send(GraphicCommand::SetWindowMode {
             id: window_id,
-            fullscreen,
+            mode,
             response_tx,
         })
         .map_err(|_| "Failed to send command to graphic engine")?;
@@ -464,7 +464,7 @@ impl GraphicProxy {
 
         // Update tracking
         if let Some(info) = self.windows.write().unwrap().get_mut(&window_id) {
-            info.config.fullscreen = fullscreen;
+            info.config.fullscreen = mode == WindowMode::Fullscreen || mode == WindowMode::BorderlessFullscreen;
         }
 
         Ok(())
@@ -1231,6 +1231,85 @@ impl GraphicProxy {
         tracing::debug!("Image preloaded: {}", path);
 
         Ok(())
+    }
+
+    // ========================================================================
+    // Screen/Monitor Management
+    // ========================================================================
+
+    /// Get the primary screen/monitor identifier
+    ///
+    /// Returns an identifier for the primary display that can be used
+    /// with other screen-related methods.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Called on the server
+    /// - No graphic engine is enabled
+    /// - The engine fails to respond
+    pub async fn get_primary_screen(&self) -> Result<u32, String> {
+        if !self.available {
+            return Err(
+                "Graphic.getPrimaryScreen() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx
+            .as_ref()
+            .ok_or("No graphic engine enabled. Call Graphic.enableEngine() first.")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::GetPrimaryScreen { response_tx })
+            .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Get the resolution of a specific screen/monitor
+    ///
+    /// # Arguments
+    /// * `screen_id` - Screen identifier (from get_primary_screen or similar)
+    ///
+    /// # Returns
+    /// Tuple of (width, height) in pixels
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Called on the server
+    /// - No graphic engine is enabled
+    /// - The screen ID is invalid
+    /// - The engine fails to respond
+    pub async fn get_screen_resolution(&self, screen_id: u32) -> Result<(u32, u32), String> {
+        if !self.available {
+            return Err(
+                "Graphic.getScreenResolution() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx
+            .as_ref()
+            .ok_or("No graphic engine enabled. Call Graphic.enableEngine() first.")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::GetScreenResolution {
+            screen_id,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
     }
 }
 

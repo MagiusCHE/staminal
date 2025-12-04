@@ -1,6 +1,6 @@
 # Event System
 
-This document describes the Staminal event system architecture, focusing on custom events dispatched via `system.sendEvent()`.
+This document describes the Staminal event system architecture, focusing on custom events dispatched via `System.sendEvent()`.
 
 ## Overview
 
@@ -12,7 +12,7 @@ The event system allows mods to communicate with each other through custom event
 
 ```javascript
 // In onAttach() or onBootstrap()
-system.registerEvent("EventName", handlerFunction, priority);
+System.registerEvent("EventName", handlerFunction, priority);
 ```
 
 - **eventName**: String identifier for the event
@@ -22,7 +22,7 @@ system.registerEvent("EventName", handlerFunction, priority);
 ### Dispatching an Event
 
 ```javascript
-const result = await system.sendEvent("EventName", arg1, arg2, ...);
+const result = await System.sendEvent("EventName", arg1, arg2, ...);
 if (result.handled) {
     console.log("Event was handled");
 }
@@ -51,7 +51,7 @@ This creates a synchronization challenge because:
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                         MOD A (caller)                               │
-│  const result = await system.sendEvent("AppStart");                 │
+│  const result = await System.sendEvent("AppStart");                 │
 │                           │                                          │
 │                           ▼                                          │
 │  ┌─────────────────────────────────────────────────────────────┐    │
@@ -101,7 +101,7 @@ This creates a synchronization challenge because:
 
 The deadlock scenario:
 
-1. **Mod A** calls `await system.sendEvent("AppStart")`
+1. **Mod A** calls `await System.sendEvent("AppStart")`
 2. The JS binding sends the request and awaits the response (`response_rx.await`)
 3. **Mod A's JS context is now suspended** waiting for the response
 4. The main loop receives the request and calls `dispatch_custom_event()`
@@ -154,7 +154,7 @@ const onAppStart = async (req, res) => {
     res.handled = true;  // Set immediately
 
     // These execute asynchronously after sendEvent returns
-    const windows = await graphic.getWindows();
+    const windows = await Graphic.getWindows();
     for (const win of windows) {
         await win.clearWidgets();
     }
@@ -163,7 +163,7 @@ const onAppStart = async (req, res) => {
 
 ## Flow Summary
 
-1. **Caller** invokes `await system.sendEvent("EventName", ...args)`
+1. **Caller** invokes `await System.sendEvent("EventName", ...args)`
 2. **JS Binding** serializes args and sends request through mpsc channel
 3. **Main Loop** receives request, calls `RuntimeManager::dispatch_custom_event()`
 4. **Runtime Adapter** iterates handlers, calls each in the correct mod context
@@ -206,17 +206,17 @@ These events read `res.handled` immediately after calling the handler. If your h
 
 ```javascript
 // ✓ CORRECT for TerminalKeyPressed
-system.registerEvent(system.TerminalKeyPressed, async (req, res) => {
+System.registerEvent(System.TerminalKeyPressed, async (req, res) => {
     if (req.combo === "Ctrl+Q") {
         res.handled = true;  // Must be set BEFORE await!
-        await system.exit(0);
+        await System.exit(0);
     }
 }, 0);
 
 // ✗ WRONG - handled set after await
-system.registerEvent(system.TerminalKeyPressed, async (req, res) => {
+System.registerEvent(System.TerminalKeyPressed, async (req, res) => {
     if (req.combo === "Ctrl+Q") {
-        await system.exit(0);
+        await System.exit(0);
         res.handled = true;  // NOT captured - too late!
     }
 }, 0);
@@ -235,14 +235,14 @@ For these events, the important thing is that the handler is **triggered**. The 
 
 ```javascript
 // ✓ CORRECT for GraphicEngineReady - async work is fine
-system.registerEvent(system.GraphicEngineReady, async (req, res) => {
+System.registerEvent(System.GraphicEngineReady, async (req, res) => {
     // No need to set res.handled before await - it's automatic for async handlers
-    const win = await graphic.createWindow({ title: "My Game" });
+    const win = await Graphic.createWindow({ title: "My Game" });
     await win.addWidget({ type: "label", text: "Hello!" });
 }, 0);
 
 // ✓ ALSO CORRECT - synchronous handler
-system.registerEvent(system.GraphicEngineReady, (req, res) => {
+System.registerEvent(System.GraphicEngineReady, (req, res) => {
     res.handled = true;  // This IS read for sync handlers
     // Start async work without awaiting
     initializeUI();

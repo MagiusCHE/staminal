@@ -18,27 +18,27 @@ export class Manager {
     #actionButton;
 
     constructor() {
-        this.#gameInfo = system.getGameInfo();
+        this.#gameInfo = System.getGameInfo();
     }
 
     register() {
-        system.registerEvent(SystemEvents.TerminalKeyPressed, this.onTerminalKeyPressed.bind(this), 100);
-        system.registerEvent(SystemEvents.GraphicEngineReady, this.onGraphicEngineReady.bind(this), 100);
-        system.registerEvent(SystemEvents.GraphicEngineWindowClosed, this.onGraphicEngineWindowClosed.bind(this), 100);
-        system.registerEvent("EnsureAssets", this.onEnsureAssets.bind(this), 100);
+        System.registerEvent(SystemEvents.TerminalKeyPressed, this.onTerminalKeyPressed.bind(this), 100);
+        System.registerEvent(SystemEvents.GraphicEngineReady, this.onGraphicEngineReady.bind(this), 100);
+        System.registerEvent(SystemEvents.GraphicEngineWindowClosed, this.onGraphicEngineWindowClosed.bind(this), 100);
+        System.registerEvent("EnsureAssets", this.onEnsureAssets.bind(this), 100);
     }
 
     async onTerminalKeyPressed(req, res) {
         //console.log("Console key pressed:", req);
         if (req.key == "c" && req.ctrl) {
             res.handled = true;
-            system.exit(0);
+            System.exit(0);
             return;
         }
     }
 
     async run() {
-        graphic.enableEngine(GraphicEngines.Bevy, {
+        Graphic.enableEngine(GraphicEngines.Bevy, {
             window: {
                 title: "Staminal",
                 width: 500,
@@ -54,14 +54,14 @@ export class Manager {
         //console.log("Graphic engine window closed", req);
         if (req.windowId === this.#window.id) {
             //console.log("Main window closed, exiting...");
-            system.exit(0);
+            System.exit(0);
             res.handled = true;
         }
     }
 
     async onGraphicEngineReady() {
 
-        const engine = await graphic.getEngineInfo();
+        const engine = await Graphic.getEngineInfo();
 
         // console.log("Graphic engine ready", engine);
 
@@ -75,18 +75,18 @@ export class Manager {
         // console.log("Preparing UI for game %o", this.#gameInfo.id);
 
         //Exo2-Regular
-        //const assetTestPath = system.getAssetsPath();
+        //const assetTestPath = System.getAssetsPath();
 
-        // await graphic.loadFont("terminus", system.getAssetsPath("fonts/terminus-ttf-4.49.3/TerminusTTF-Bold-4.49.3.ttf"));
-        // await graphic.loadFont("exo2", system.getAssetsPath("fonts/Exo_2/Exo2-VariableFont_wght.ttf"));        
-        // await graphic.loadFont("jacquard24", system.getAssetsPath("fonts/Jacquard_24/Jacquard24-Regular.ttf"));
-        await graphic.loadFont("macondo", system.getAssetsPath("fonts/Macondo/Macondo-Regular.ttf"));
+        // await Graphic.loadFont("terminus", System.getAssetsPath("fonts/terminus-ttf-4.49.3/TerminusTTF-Bold-4.49.3.ttf"));
+        // await Graphic.loadFont("exo2", System.getAssetsPath("fonts/Exo_2/Exo2-VariableFont_wght.ttf"));
+        // await Graphic.loadFont("jacquard24", System.getAssetsPath("fonts/Jacquard_24/Jacquard24-Regular.ttf"));
+        await Graphic.loadFont("macondo", System.getAssetsPath("fonts/Macondo/Macondo-Regular.ttf"));
 
         await this.#window.setTitle("Staminal: " + this.#gameInfo.name);
 
         this.#window.setFont("macondo", INITIAL_FONT_SIZE);
 
-        await graphic.createWindow({ title: "test" });
+        //await Graphic.createWindow({ title: "test" });
 
         // Main container with dark background
         this.#loadingContainer = await this.#window.createWidget(WidgetTypes.Container, {
@@ -102,7 +102,7 @@ export class Manager {
 
         // Status label: "Loading mods:"
         this.#statusLabel = await this.#loadingContainer.createChild(WidgetTypes.Text, {
-            content: locale.get("mods-ensuring-title"),
+            content: Locale.get("mods-ensuring-title"),
             font: { size: INITIAL_FONT_SIZE * 1.3 },
             fontColor: "#ffffff"
         });
@@ -175,7 +175,7 @@ export class Manager {
         //Cancel button
         this.#actionButton = await this.#loadingContainer.createChild(WidgetTypes.Button, {
             // To create multiple text style in a single label, create childs with Text widgets and set default one to empty.
-            label: locale.get("cancel"),
+            label: Locale.get("cancel"),
             font: { size: INITIAL_FONT_SIZE },
             backgroundColor: "#cc3333",
             hoverColor: "#ff4444",
@@ -194,7 +194,7 @@ export class Manager {
         if (this.#UIState.last_error_occurred) {
             // Exit on error
             await wait(500);
-            system.exit(1);
+            System.exit(1);
             return;
         }
         // Else, abort is pressed
@@ -204,7 +204,7 @@ export class Manager {
 
         // Give a moment for UI to update, then exit
         await wait(500);
-        system.exit(0);
+        System.exit(0);
     }
 
     #UIState = undefined
@@ -238,7 +238,7 @@ export class Manager {
 
     async ensureMods() {
         //console.log("Ensuring mods...");
-        const mods = system.getMods();
+        const mods = System.getMods();
         //console.log(`mods:`, mods);
         // Filter mods that are not loaded yet
         const toAnalize = mods.filter(mod => !mod.loaded);
@@ -324,7 +324,7 @@ export class Manager {
                 await this.attachMod(mod);
             } catch (e) {
                 console.error(`Failed to attach mod "${mod.id}":`, e);
-                this.#UIState.last_error_occurred = locale.getWithArgs("mod-attach-failed", { mod_id: mod.id });
+                this.#UIState.last_error_occurred = Locale.getWithArgs("mod-attach-failed", { mod_id: mod.id });
                 return;
             }
 
@@ -342,11 +342,11 @@ export class Manager {
         await wait(1500);
 
         // Now start the game!
-        const ret = await system.sendEvent("AppStart");
+        const ret = await System.sendEvent("AppStart");
         //console.log("AppStart event result:", ret);
         if (!ret.handled) {
             console.error("AppStart event was not handled by any mod!");
-            system.exit(0);
+            System.exit(0);
         }
     }
 
@@ -358,18 +358,18 @@ export class Manager {
         }
         if (this.#UIState.last_error_occurred) {
             // Red state
-            await this.#statusLabel.setProperty("content", locale.get("error-occurred"));
+            await this.#statusLabel.setProperty("content", Locale.get("error-occurred"));
             await this.#statusLabel.setProperty("fontColor", "#ff4444");
 
             await this.#progressBarFill.setProperty("backgroundColor", "#cc3333");
             await this.#secondProgressBarFill.setProperty("backgroundColor", "#cc3333");
 
             // Change cancel button to "Exit" button
-            await this.#actionButton.setProperty("label", locale.get("exit"));
+            await this.#actionButton.setProperty("label", Locale.get("exit"));
             await this.#actionButton.setProperty("disabled", false);
             return;
         } else if (this.#UIState.cancelled) {
-            await this.#actionButton.setProperty("label", locale.get("cancelling"));
+            await this.#actionButton.setProperty("label", Locale.get("cancelling"));
             await this.#actionButton.setProperty("disabled", true);
             return;
         }
@@ -381,7 +381,7 @@ export class Manager {
                 todo: this.#UIState.to_download,
                 done: Object.entries(this.#UIState.mods).filter(([modId, modState]) => modState.downloaded).length + 1
             }
-            await this.#statusLabel.setProperty("content", locale.getWithArgs("mods-downloading-title", todoDone));
+            await this.#statusLabel.setProperty("content", Locale.getWithArgs("mods-downloading-title", todoDone));
             const mainProgress = (todoDone.done > 0 ? (todoDone.todo > 0 ? Math.floor((todoDone.done / todoDone.todo) * 100) : 100) : 0) + "%";
             await this.#progressBarFill.setProperty("width", mainProgress);
 
@@ -407,7 +407,7 @@ export class Manager {
                 this.#UIState.previous_timestamp = now;
             }
 
-            await this.#progressText.setProperty("content", locale.getWithArgs("mods-downloading-progress", {
+            await this.#progressText.setProperty("content", Locale.getWithArgs("mods-downloading-progress", {
                 received: humanizeBytes(received),
                 total: humanizeBytes(this.#UIState.expected_total_bytes),
                 bps: bps_str,
@@ -417,7 +417,7 @@ export class Manager {
                 todo: this.#UIState.to_download,
                 done: Object.entries(this.#UIState.mods).filter(([modId, modState]) => modState.installed && modState.downloaded).length + 1
             }
-            await this.#statusLabel.setProperty("content", locale.getWithArgs("mods-installing-title", todoDone));
+            await this.#statusLabel.setProperty("content", Locale.getWithArgs("mods-installing-title", todoDone));
             const mainProgress = (todoDone.done > 0 ? (todoDone.todo > 0 ? Math.floor((todoDone.done / todoDone.todo) * 100) : 100) : 0) + "%";
             await this.#progressBarFill.setProperty("width", mainProgress);
 
@@ -425,13 +425,13 @@ export class Manager {
             // const percent = (received > 0 ? (this.#UIState.expected_total_bytes > 0 ? Math.floor((received / this.#UIState.expected_total_bytes) * 100) : 1) : 0) + "%";
             await this.#secondProgressBarFill.setProperty("width", "50%"); // Static 50% during install
 
-            await this.#progressText.setProperty("content", locale.get("mods-installing-progress"));
+            await this.#progressText.setProperty("content", Locale.get("mods-installing-progress"));
         } else if (isAttaching) {
             const todoDone = {
                 todo: this.#UIState.to_attach,
                 done: Object.entries(this.#UIState.mods).filter(([modId, modState]) => modState.attached).length + 1
             }
-            await this.#statusLabel.setProperty("content", locale.getWithArgs("mods-attaching-title", todoDone));
+            await this.#statusLabel.setProperty("content", Locale.getWithArgs("mods-attaching-title", todoDone));
             const mainProgress = (todoDone.done > 0 ? (todoDone.todo > 0 ? Math.floor((todoDone.done / todoDone.todo) * 100) : 100) : 0) + "%";
             await this.#progressBarFill.setProperty("width", mainProgress);
 
@@ -439,18 +439,18 @@ export class Manager {
             // const percent = (received > 0 ? (this.#UIState.expected_total_bytes > 0 ? Math.floor((received / this.#UIState.expected_total_bytes) * 100) : 1) : 0) + "%";
             await this.#secondProgressBarFill.setProperty("width", "50%"); // Static 50% during install
 
-            await this.#progressText.setProperty("content", locale.get("mods-attaching-progress"));
+            await this.#progressText.setProperty("content", Locale.get("mods-attaching-progress"));
         } else {
             if (this.#UIState.completed) {
                 // Completed, no further updates needed
-                await this.#progressText.setProperty("content", locale.getWithArgs("loading-complete", { mods: Object.entries(this.#UIState.mods).length }));
+                await this.#progressText.setProperty("content", Locale.getWithArgs("loading-complete", { mods: Object.entries(this.#UIState.mods).length }));
                 await this.#progressBarFill.setProperty("width", "100%");
                 await this.#secondProgressBarFill.setProperty("width", "100%");
-                await this.#statusLabel.setProperty("content", locale.getWithArgs("starting-game", { game_name: this.#gameInfo.name }));
+                await this.#statusLabel.setProperty("content", Locale.getWithArgs("starting-game", { game_name: this.#gameInfo.name }));
 
                 // Hide cancel button or change it to "Start" button
-                await this.#actionButton.setProperty("label", locale.get("starting"));
-                console.warn("Game is starting...", locale.get("starting"));
+                await this.#actionButton.setProperty("label", Locale.get("starting"));
+                console.warn("Game is starting...", Locale.get("starting"));
                 await this.#actionButton.setProperty("hoverColor", "#444dccff");
                 await this.#actionButton.setProperty("disabled", true);
                 await this.#actionButton.setProperty("backgroundColor", "#3e46b6ff");
@@ -474,7 +474,7 @@ export class Manager {
         this.#UIState.mods[mod_info.id].downloading = true;
         let response;
         try {
-            response = await network.download(uri, (percentage, receivedBytes, totalBytes) => {
+            response = await Network.download(uri, (percentage, receivedBytes, totalBytes) => {
                 this.#UIState.mods[mod_info.id].received_bytes = receivedBytes;
                 this.#UIState.mods[mod_info.id].expected_total_bytes = totalBytes;
             });
@@ -493,13 +493,13 @@ export class Manager {
         this.#UIState.mods[mod_info.id].downloaded = true;
 
         this.#UIState.mods[mod_info.id].installing = true;
-        system.installModFromPath(response.temp_file_path, mod_info.id).then(() => {
+        System.installModFromPath(response.temp_file_path, mod_info.id).then(() => {
             this.#UIState.mods[mod_info.id].installed = true;
             this.#UIState.mods[mod_info.id].installing = false;
         }).catch((e) => {
             this.#UIState.mods[mod_info.id].installing = false;
             console.error(`Failed to install mod "${mod_info.id}":`, e);
-            this.#UIState.last_error_occurred = locale.getWithArgs("mod-install-failed", { mod_id: mod_info.id });
+            this.#UIState.last_error_occurred = Locale.getWithArgs("mod-install-failed", { mod_id: mod_info.id });
         });
         return mod_info;
     }
@@ -507,7 +507,7 @@ export class Manager {
     async attachMod(mod_info) {
         this.#UIState.mods[mod_info.id].attaching = true;
         try {
-            await system.attachMod(mod_info.id);
+            await System.attachMod(mod_info.id);
             this.#UIState.mods[mod_info.id].attached = true;
         } finally {
             this.#UIState.mods[mod_info.id].attaching = false;

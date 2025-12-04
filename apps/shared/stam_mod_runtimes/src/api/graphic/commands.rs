@@ -2,7 +2,7 @@
 //!
 //! Commands sent from the GraphicProxy (worker thread) to the graphic engine (main thread).
 
-use super::{GraphicEngineInfo, PropertyValue, WidgetConfig, WidgetEventType, WidgetType, WindowConfig};
+use super::{GraphicEngineInfo, PropertyValue, WidgetConfig, WidgetEventType, WidgetType, WindowConfig, WindowMode};
 use tokio::sync::oneshot;
 
 /// Commands that can be sent to the graphic engine
@@ -55,12 +55,12 @@ pub enum GraphicCommand {
         response_tx: oneshot::Sender<Result<(), String>>,
     },
 
-    /// Set fullscreen mode
-    SetWindowFullscreen {
+    /// Set window mode (windowed, fullscreen, borderless fullscreen)
+    SetWindowMode {
         /// Window ID
         id: u64,
-        /// Enable fullscreen
-        fullscreen: bool,
+        /// Window mode
+        mode: WindowMode,
         /// Channel to send the result back
         response_tx: oneshot::Sender<Result<(), String>>,
     },
@@ -232,6 +232,28 @@ pub enum GraphicCommand {
         /// Channel to send the result back
         response_tx: oneshot::Sender<Result<(), String>>,
     },
+
+    // ========================================================================
+    // Screen/Monitor Commands
+    // ========================================================================
+
+    /// Get the primary screen/monitor
+    ///
+    /// Returns the identifier of the primary monitor.
+    GetPrimaryScreen {
+        /// Channel to send the result back (returns screen identifier)
+        response_tx: oneshot::Sender<Result<u32, String>>,
+    },
+
+    /// Get the resolution of a specific screen/monitor
+    ///
+    /// Returns the width and height of the specified screen.
+    GetScreenResolution {
+        /// Screen/monitor identifier (from GetPrimaryScreen or other sources)
+        screen_id: u32,
+        /// Channel to send the result back (returns (width, height))
+        response_tx: oneshot::Sender<Result<(u32, u32), String>>,
+    },
 }
 
 impl std::fmt::Debug for GraphicCommand {
@@ -258,10 +280,10 @@ impl std::fmt::Debug for GraphicCommand {
                 .field("id", id)
                 .field("title", title)
                 .finish(),
-            Self::SetWindowFullscreen { id, fullscreen, .. } => f
-                .debug_struct("SetWindowFullscreen")
+            Self::SetWindowMode { id, mode, .. } => f
+                .debug_struct("SetWindowMode")
                 .field("id", id)
-                .field("fullscreen", fullscreen)
+                .field("mode", mode)
                 .finish(),
             Self::SetWindowVisible { id, visible, .. } => f
                 .debug_struct("SetWindowVisible")
@@ -352,6 +374,12 @@ impl std::fmt::Debug for GraphicCommand {
             Self::PreloadImage { path, .. } => {
                 f.debug_struct("PreloadImage").field("path", path).finish()
             }
+            // Screen commands
+            Self::GetPrimaryScreen { .. } => f.debug_struct("GetPrimaryScreen").finish(),
+            Self::GetScreenResolution { screen_id, .. } => f
+                .debug_struct("GetScreenResolution")
+                .field("screen_id", screen_id)
+                .finish(),
         }
     }
 }

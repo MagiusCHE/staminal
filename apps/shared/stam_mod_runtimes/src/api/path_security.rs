@@ -212,6 +212,97 @@ pub fn make_absolute(path: impl AsRef<Path>, data_dir: impl AsRef<Path>) -> Path
     }
 }
 
+/// Validate that a path would be within a permitted directory, even if the path doesn't exist yet.
+///
+/// This is useful for validating paths before creating files or directories.
+/// Unlike `validate_path`, this function does NOT require the path to exist.
+///
+/// # Security
+/// This function:
+/// - Normalizes the path by resolving `.` and `..` components
+/// - Checks if the normalized path starts with the base directory
+/// - Does NOT follow symlinks (the path may not exist)
+/// - Rejects paths that would escape the base directory via `..`
+///
+/// # Arguments
+/// * `relative_path` - The relative path to validate (must not start with `/`)
+/// * `base_dir` - The base directory that the path must stay within
+///
+/// # Returns
+/// * `Ok(PathBuf)` - The full absolute path if valid
+/// * `Err(String)` - Error message if the path would escape the base directory
+pub fn validate_path_for_creation(
+    relative_path: impl AsRef<Path>,
+    base_dir: impl AsRef<Path>,
+) -> Result<PathBuf, String> {
+    let relative_path = relative_path.as_ref();
+    let base_dir = base_dir.as_ref();
+
+    // Reject absolute paths
+    if relative_path.is_absolute() {
+        return Err(format!(
+            "Absolute paths are not allowed: {}",
+            relative_path.display()
+        ));
+    }
+
+    // Canonicalize base_dir to get the real absolute path
+    let canonical_base = base_dir.canonicalize().map_err(|e| {
+        format!(
+            "Failed to canonicalize base directory '{}': {}",
+            base_dir.display(),
+            e
+        )
+    })?;
+
+    // Build the full path
+    let full_path = canonical_base.join(relative_path);
+
+    // Normalize the path by resolving `.` and `..` components without requiring existence
+    let normalized = normalize_path_components(&full_path);
+
+    // Check that the normalized path starts with the base directory
+    if !normalized.starts_with(&canonical_base) {
+        return Err(format!(
+            "Access denied: path '{}' escapes the permitted directory '{}'. \
+             Path traversal (../) is not allowed.",
+            relative_path.display(),
+            base_dir.display()
+        ));
+    }
+
+    Ok(normalized)
+}
+
+/// Normalize a path by resolving `.` and `..` components without requiring the path to exist.
+///
+/// Unlike `std::fs::canonicalize`, this function:
+/// - Does NOT require the path to exist
+/// - Does NOT follow symlinks
+/// - Only resolves `.` (current dir) and `..` (parent dir) components
+fn normalize_path_components(path: &Path) -> PathBuf {
+    use std::path::Component;
+
+    let mut normalized = PathBuf::new();
+
+    for component in path.components() {
+        match component {
+            Component::CurDir => {
+                // Skip `.` components
+            }
+            Component::ParentDir => {
+                // Go up one directory if possible
+                normalized.pop();
+            }
+            _ => {
+                normalized.push(component);
+            }
+        }
+    }
+
+    normalized
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

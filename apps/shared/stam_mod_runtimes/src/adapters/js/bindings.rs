@@ -29,7 +29,8 @@
 //! external .js files in the `glue/` directory. These files are concatenated at compile
 //! time by build.rs and embedded into the binary.
 
-use crate::api::{AppApi, ConsoleApi, LocaleApi, NetworkApi, RequestUriProtocol, SystemApi, SystemEvents, ModSide};
+use crate::api::{AppApi, ConsoleApi, FileApi, LocaleApi, NetworkApi, ReadJsonResult, RequestUriProtocol, SystemApi, SystemEvents, ModSide};
+use crate::api::path_security::validate_path_for_creation;
 
 /// JavaScript glue code - embedded at compile time from src/adapters/js/glue/*.js
 /// This code sets up console, error handlers, and other runtime utilities.
@@ -402,8 +403,113 @@ pub fn setup_process_api(ctx: Ctx, app_api: AppApi) -> Result<(), rquickjs::Erro
     // Register app object in process
     process.set("app", app)?;
 
-    // Register process object globally
-    globals.set("process", process)?;
+    // Register Process object globally (capitalized for Staminal convention)
+    globals.set("Process", process)?;
+
+    Ok(())
+}
+
+/// JavaScript File API class
+///
+/// This class is exposed to JavaScript as the `File` global object.
+/// It provides methods to read and write files with path security validation.
+#[rquickjs::class]
+#[derive(Clone, Trace, JsLifetime)]
+pub struct FileJS {
+    #[qjs(skip_trace)]
+    file_api: FileApi,
+}
+
+#[rquickjs::methods]
+impl FileJS {
+    /// Read a JSON file and parse it
+    ///
+    /// # Arguments
+    /// * `path` - Path to the JSON file (relative or absolute)
+    /// * `encoding` - File encoding (only "utf-8" supported)
+    /// * `default_value` - Default value to return if file doesn't exist or is empty
+    ///                     Must be an object, array, null, or undefined. Primitives are rejected.
+    ///
+    /// # Returns
+    /// The parsed JSON object, or the default value if file doesn't exist/is empty
+    ///
+    /// # Throws
+    /// - Error if path escapes permitted directories (path traversal)
+    /// - Error if file contains invalid JSON
+    /// - Error if default_value is a primitive (string, number, boolean)
+    /// - Error if encoding is not "utf-8"
+    ///
+    /// # Example
+    /// ```javascript
+    /// // Read config, return empty object if file doesn't exist
+    /// const config = await File.readJson("settings.json", "utf-8", {});
+    ///
+    /// // Read with default config values
+    /// const config = await File.readJson("settings.json", "utf-8", { volume: 50, fullscreen: false });
+    /// ```
+    #[qjs(rename = "readJson")]
+    pub fn read_json<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        path: String,
+        encoding: String,
+        default_value: Opt<Value<'js>>,
+    ) -> rquickjs::Result<Value<'js>> {
+        // Determine default value
+        let default_val = default_value.0;
+
+        // Validate default_value is not a primitive
+        if let Some(ref val) = default_val {
+            if !val.is_undefined() && !val.is_null() && !val.is_object() && !val.is_array() {
+                return Err(ctx.throw(rquickjs::String::from_str(
+                    ctx.clone(),
+                    "File.readJson() default_value must be an object, array, null, or undefined. Primitive types (string, number, boolean) are not allowed.",
+                )?.into()));
+            }
+        }
+
+        // Call the Rust API
+        match self.file_api.read_json(&path, &encoding) {
+            ReadJsonResult::Success(json_str) => {
+                // Parse JSON string into JavaScript value
+                let json_global: Object = ctx.globals().get("JSON")?;
+                let parse_fn: Function = json_global.get("parse")?;
+                parse_fn.call((json_str,))
+            }
+            ReadJsonResult::UseDefault => {
+                // Return default value or empty object
+                match default_val {
+                    Some(val) => Ok(val),
+                    None => {
+                        // Return empty object if no default provided
+                        let obj = Object::new(ctx)?;
+                        Ok(obj.into_value())
+                    }
+                }
+            }
+            ReadJsonResult::Error(msg) => {
+                Err(ctx.throw(rquickjs::String::from_str(ctx.clone(), &msg)?.into()))
+            }
+        }
+    }
+}
+
+/// Setup File API in the JavaScript context
+///
+/// Provides File.readJson() for secure file operations with path validation.
+///
+/// # Arguments
+/// * `ctx` - The JavaScript context
+/// * `file_api` - The FileApi instance with configured data_dir and config_dir
+pub fn setup_file_api(ctx: Ctx, file_api: FileApi) -> Result<(), rquickjs::Error> {
+    // Define the FileJS class
+    rquickjs::Class::<FileJS>::define(&ctx.globals())?;
+
+    // Create an instance of FileJS
+    let file_obj = rquickjs::Class::<FileJS>::instance(ctx.clone(), FileJS { file_api })?;
+
+    // Register it as global 'File' object (capitalized for Staminal convention)
+    ctx.globals().set("File", file_obj)?;
 
     Ok(())
 }
@@ -566,6 +672,10 @@ fn set_timeout_interval_wrapper<'js, const IS_INTERVAL: bool>(
 pub struct SystemJS {
     #[qjs(skip_trace)]
     system_api: SystemApi,
+    /// Game config directory (optional, client-only)
+    /// Used by getGameConfigPath() to resolve config file paths
+    #[qjs(skip_trace)]
+    game_config_dir: Option<PathBuf>,
 }
 
 #[rquickjs::methods]
@@ -1063,6 +1173,66 @@ impl SystemJS {
         }
     }
 
+    /// Get the full path for a config file within the game config directory (client-only)
+    ///
+    /// This method takes a relative path and returns the full absolute path within
+    /// the game's config directory. The path is validated to ensure it doesn't escape
+    /// the config directory (path traversal attacks like `../` are blocked).
+    ///
+    /// # Arguments
+    /// * `relative_path` - The relative path within the config directory (e.g., "settings.json", "saves/game1.json")
+    ///
+    /// # Returns
+    /// The full absolute path to the config file
+    ///
+    /// # Throws
+    /// - Error if called on the server (config directory not available)
+    /// - Error if the path attempts to escape the config directory (path traversal)
+    /// - Error if the relative path is absolute
+    ///
+    /// # Security
+    /// This method validates the path to prevent directory traversal attacks:
+    /// - Absolute paths are rejected
+    /// - Paths containing `..` that would escape the config directory are rejected
+    /// - The file does not need to exist (useful for creating new config files)
+    ///
+    /// # Examples
+    /// ```javascript
+    /// // Get path for a config file
+    /// const settingsPath = system.getGameConfigPath("settings.json");
+    /// // Returns: "/home/user/.config/game/settings.json"
+    ///
+    /// // Get path for a nested config file
+    /// const savePath = system.getGameConfigPath("saves/slot1.json");
+    /// // Returns: "/home/user/.config/game/saves/slot1.json"
+    ///
+    /// // This will throw an error (path traversal attempt)
+    /// system.getGameConfigPath("../../../etc/passwd"); // Error!
+    /// ```
+    #[qjs(rename = "getGameConfigPath")]
+    pub fn get_game_config_path<'js>(&self, ctx: Ctx<'js>, relative_path: String) -> rquickjs::Result<String> {
+        // Check if game_config_dir is available (client-only)
+        match &self.game_config_dir {
+            Some(config_dir) => {
+                // Validate the path to prevent directory traversal
+                match validate_path_for_creation(&relative_path, config_dir) {
+                    Ok(full_path) => Ok(full_path.to_string_lossy().to_string()),
+                    Err(error_msg) => {
+                        Err(ctx.throw(rquickjs::String::from_str(ctx.clone(), &error_msg)?.into()))
+                    }
+                }
+            }
+            None => {
+                // Throw a descriptive error for server-side calls
+                Err(ctx.throw(rquickjs::String::from_str(
+                    ctx.clone(),
+                    "system.getGameConfigPath() is not available on the server. This method is client-only.",
+                )?
+                .into()))
+            }
+        }
+    }
+
     /// Resolve an asset path for the current mod
     ///
     /// This method resolves relative asset paths to actual file paths.
@@ -1111,7 +1281,12 @@ impl SystemJS {
 ///
 /// Provides system.get_mods() function that returns an array of mod info objects.
 /// Each mod info object contains: id, version, name, description, mod_type, priority, bootstrapped
-pub fn setup_system_api(ctx: Ctx, system_api: SystemApi) -> Result<(), rquickjs::Error> {
+///
+/// # Arguments
+/// * `ctx` - The JavaScript context
+/// * `system_api` - The system API instance
+/// * `game_config_dir` - Optional game config directory (client-only, for getGameConfigPath)
+pub fn setup_system_api(ctx: Ctx, system_api: SystemApi, game_config_dir: Option<PathBuf>) -> Result<(), rquickjs::Error> {
     // Initialize the event handlers map (must be done before any handler registration)
     init_event_handlers_map(&ctx)?;
     init_widget_handlers_map(&ctx)?;
@@ -1120,10 +1295,10 @@ pub fn setup_system_api(ctx: Ctx, system_api: SystemApi) -> Result<(), rquickjs:
     rquickjs::Class::<SystemJS>::define(&ctx.globals())?;
 
     // Create an instance of SystemJS
-    let system_obj = rquickjs::Class::<SystemJS>::instance(ctx.clone(), SystemJS { system_api })?;
+    let system_obj = rquickjs::Class::<SystemJS>::instance(ctx.clone(), SystemJS { system_api, game_config_dir })?;
 
-    // Register it as global 'system' object
-    ctx.globals().set("system", system_obj)?;
+    // Register it as global 'System' object (capitalized for Staminal convention)
+    ctx.globals().set("System", system_obj)?;
 
     // Create SystemEvents enum object
     let system_events = Object::new(ctx.clone())?;
@@ -1249,8 +1424,8 @@ pub fn setup_locale_api(ctx: Ctx, locale_api: LocaleApi) -> Result<(), rquickjs:
     // Create an instance of LocaleJS
     let locale_obj = rquickjs::Class::<LocaleJS>::instance(ctx.clone(), LocaleJS { locale_api })?;
 
-    // Register it as global 'locale' object
-    ctx.globals().set("locale", locale_obj)?;
+    // Register it as global 'Locale' object (capitalized for Staminal convention)
+    ctx.globals().set("Locale", locale_obj)?;
 
     Ok(())
 }
@@ -1421,8 +1596,8 @@ pub fn setup_network_api(ctx: Ctx, network_api: NetworkApi, temp_file_manager: T
     // Create an instance of NetworkJS
     let network_obj = rquickjs::Class::<NetworkJS>::instance(ctx.clone(), NetworkJS { network_api, temp_file_manager })?;
 
-    // Register it as global 'network' object
-    ctx.globals().set("network", network_obj)?;
+    // Register it as global 'Network' object (capitalized for Staminal convention)
+    ctx.globals().set("Network", network_obj)?;
 
     Ok(())
 }
@@ -1481,7 +1656,7 @@ pub fn setup_text_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
 use crate::api::{
     AlignItems, ColorValue, EdgeInsets, FlexDirection, FontConfig, GraphicEngines, GraphicProxy,
     InitialWindowConfig, JustifyContent, PropertyValue, SizeValue, WidgetConfig, WidgetEventType,
-    WidgetType, WindowConfig, WindowPositionMode,
+    WidgetType, WindowConfig, WindowMode, WindowPositionMode,
 };
 
 /// JavaScript Graphic API class
@@ -1769,6 +1944,66 @@ impl GraphicJS {
             .await
             .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
     }
+
+    /// Get the primary screen/monitor identifier
+    ///
+    /// Returns a numeric identifier for the primary display. This identifier
+    /// can be passed to `getScreenResolution()` to get the screen's resolution.
+    ///
+    /// # Returns
+    /// Promise that resolves to a screen identifier (number)
+    ///
+    /// # Throws
+    /// Error if called on server or if no engine is enabled
+    ///
+    /// # Example
+    /// ```javascript
+    /// const screen = await Graphic.getPrimaryScreen();
+    /// const resolution = await Graphic.getScreenResolution(screen);
+    /// console.log(`Primary screen: ${resolution.width}x${resolution.height}`);
+    /// ```
+    #[qjs(rename = "getPrimaryScreen")]
+    pub async fn get_primary_screen<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<u32> {
+        self.graphic_proxy
+            .get_primary_screen()
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+
+    /// Get the resolution of a screen/monitor
+    ///
+    /// # Arguments
+    /// * `screen_id` - Screen identifier (from `getPrimaryScreen()`)
+    ///
+    /// # Returns
+    /// Promise that resolves to an object with `width` and `height` properties
+    ///
+    /// # Throws
+    /// Error if called on server, no engine is enabled, or screen ID is invalid
+    ///
+    /// # Example
+    /// ```javascript
+    /// const screen = await Graphic.getPrimaryScreen();
+    /// const resolution = await Graphic.getScreenResolution(screen);
+    /// console.log(`Resolution: ${resolution.width}x${resolution.height}`);
+    /// ```
+    #[qjs(rename = "getScreenResolution")]
+    pub async fn get_screen_resolution<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        screen_id: u32,
+    ) -> rquickjs::Result<Object<'js>> {
+        let (width, height) = self
+            .graphic_proxy
+            .get_screen_resolution(screen_id)
+            .await
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))?;
+
+        let obj = Object::new(ctx.clone())?;
+        obj.set("width", width)?;
+        obj.set("height", height)?;
+        Ok(obj)
+    }
 }
 
 /// JavaScript Window class
@@ -1823,17 +2058,24 @@ impl WindowJS {
             .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
     }
 
-    /// Set fullscreen mode
+    /// Set window mode (windowed, fullscreen, borderless fullscreen)
     ///
     /// # Arguments
-    /// * `fullscreen` - true to enable fullscreen, false for windowed
+    /// * `mode` - WindowModes enum value (0=Windowed, 1=Fullscreen, 2=BorderlessFullscreen)
     ///
     /// # Returns
     /// Promise that resolves when mode is changed
-    #[qjs(rename = "setFullscreen")]
-    pub async fn set_fullscreen(&self, ctx: Ctx<'_>, fullscreen: bool) -> rquickjs::Result<()> {
+    #[qjs(rename = "setMode")]
+    pub async fn set_mode(&self, ctx: Ctx<'_>, mode: u32) -> rquickjs::Result<()> {
+        let window_mode = WindowMode::from_u32(mode).ok_or_else(|| {
+            let msg = format!(
+                "Invalid window mode: {}. Use WindowModes.Windowed (0), Fullscreen (1), or BorderlessFullscreen (2)",
+                mode
+            );
+            ctx.throw(rquickjs::String::from_str(ctx.clone(), &msg).unwrap().into())
+        })?;
         self.graphic_proxy
-            .set_window_fullscreen(self.id, fullscreen)
+            .set_window_mode(self.id, window_mode)
             .await
             .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
     }
@@ -2640,10 +2882,10 @@ pub fn setup_graphic_api(ctx: Ctx, graphic_proxy: Arc<GraphicProxy>) -> Result<(
     rquickjs::Class::<WindowJS>::define(&ctx.globals())?;
     rquickjs::Class::<WidgetJS>::define(&ctx.globals())?;
 
-    // Create graphic instance
+    // Create Graphic instance (capitalized for Staminal convention)
     let graphic_obj =
         rquickjs::Class::<GraphicJS>::instance(ctx.clone(), GraphicJS { graphic_proxy })?;
-    ctx.globals().set("graphic", graphic_obj)?;
+    ctx.globals().set("Graphic", graphic_obj)?;
 
     // Create GraphicEngines enum
     let engines = Object::new(ctx.clone())?;
@@ -2657,6 +2899,13 @@ pub fn setup_graphic_api(ctx: Ctx, graphic_proxy: Arc<GraphicProxy>) -> Result<(
     position_modes.set("Default", WindowPositionMode::Default.to_u32())?;
     position_modes.set("Centered", WindowPositionMode::Centered.to_u32())?;
     ctx.globals().set("WindowPositionModes", position_modes)?;
+
+    // Create WindowModes enum
+    let window_modes = Object::new(ctx.clone())?;
+    window_modes.set("Windowed", WindowMode::Windowed.to_u32())?;
+    window_modes.set("Fullscreen", WindowMode::Fullscreen.to_u32())?;
+    window_modes.set("BorderlessFullscreen", WindowMode::BorderlessFullscreen.to_u32())?;
+    ctx.globals().set("WindowModes", window_modes)?;
 
     // Create WidgetTypes enum
     let widget_types = Object::new(ctx.clone())?;

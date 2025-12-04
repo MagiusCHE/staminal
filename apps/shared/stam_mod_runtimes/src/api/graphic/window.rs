@@ -2,6 +2,42 @@
 //!
 //! Types for window creation and runtime window information.
 
+/// Window display mode
+///
+/// Controls how the window is displayed (windowed, fullscreen, etc.)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowMode {
+    /// Regular windowed mode with decorations
+    Windowed,
+    /// Fullscreen mode (exclusive, changes display resolution)
+    Fullscreen,
+    /// Borderless fullscreen (covers screen without changing resolution)
+    BorderlessFullscreen,
+}
+
+impl WindowMode {
+    /// Convert from u32 enum value
+    ///
+    /// 0 = Windowed, 1 = Fullscreen, 2 = BorderlessFullscreen
+    pub fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::Windowed),
+            1 => Some(Self::Fullscreen),
+            2 => Some(Self::BorderlessFullscreen),
+            _ => None,
+        }
+    }
+
+    /// Convert to u32 enum value
+    pub fn to_u32(&self) -> u32 {
+        match self {
+            Self::Windowed => 0,
+            Self::Fullscreen => 1,
+            Self::BorderlessFullscreen => 2,
+        }
+    }
+}
+
 /// Window position mode
 ///
 /// Controls how the window is positioned on screen.

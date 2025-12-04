@@ -6,6 +6,7 @@
 
 pub mod console;
 pub mod events;
+pub mod file;
 pub mod graphic;
 pub mod locale;
 pub mod network;
@@ -20,11 +21,12 @@ pub use graphic::{
     GraphicEngine, GraphicEngineInfo, GraphicEngines, GraphicEvent, GraphicProxy,
     InitialWindowConfig, JustifyContent, KeyModifiers, MouseButton, PropertyValue, SizeValue,
     WidgetConfig, WidgetEventType, WidgetInfo, WidgetType, WindowConfig, WindowInfo,
-    WindowPositionMode, EnableEngineRequest,
+    WindowMode, WindowPositionMode, EnableEngineRequest,
 };
 pub use locale::LocaleApi;
 pub use network::{NetworkApi, NetworkConfig, DownloadResponse, ProgressCallback, parse_stam_uri, sanitize_uri};
 pub use path_security::{PathSecurityConfig, PathValidationResult, validate_path, validate_and_resolve_path, is_path_permitted, make_absolute};
+pub use file::{FileApi, ReadJsonResult};
 pub use process::{ProcessApi, AppApi};
 pub use system::{SystemApi, ModInfo, ModSide, ModPackageInfo, ModPackageManifest, ModPackagesRegistry, extract_mod_archive, extract_mod_zip, AttachModRequest, ShutdownRequest, GameInfo};
 

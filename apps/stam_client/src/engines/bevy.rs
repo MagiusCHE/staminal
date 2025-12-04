@@ -4,8 +4,8 @@
 //! Bevy runs on the main thread and communicates with the worker thread via channels.
 
 use bevy::prelude::*;
-use bevy::window::{PrimaryWindow, WindowMode, WindowResolution};
-use bevy::winit::{UpdateMode, WinitSettings};
+use bevy::window::{PrimaryWindow, VideoModeSelection, WindowMode, WindowResolution};
+use bevy::winit::{UpdateMode, WinitSettings, WINIT_WINDOWS};
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
@@ -15,11 +15,8 @@ use stam_mod_runtimes::api::{
     ColorValue, EdgeInsets, FlexDirection, GraphicCommand, GraphicEngine, GraphicEngineInfo,
     GraphicEngines, GraphicEvent, InitialWindowConfig, JustifyContent, KeyModifiers, MouseButton,
     PropertyValue, SizeValue, WidgetConfig, WidgetEventType, WidgetType, WindowPositionMode,
-    AlignItems,
+    AlignItems, WindowMode as StamWindowMode,
 };
-
-// Note: WinitWindows was removed as SetWindowPosition is no longer supported
-// (Wayland doesn't allow setting window position after creation)
 
 /// Bevy engine implementation
 ///
@@ -461,8 +458,7 @@ fn edge_insets_to_ui_rect(insets: &EdgeInsets) -> UiRect {
 
 /// System to process commands from the worker thread
 fn process_commands(
-    cmd_rx: NonSend<CommandReceiverRes>,
-    event_tx: Res<EventSenderRes>,
+    channels: (NonSend<CommandReceiverRes>, Res<EventSenderRes>),
     mut commands: Commands,
     mut registry: ResMut<WindowRegistry>,
     mut widget_registry: ResMut<WidgetRegistry>,
@@ -478,6 +474,7 @@ fn process_commands(
     mut button_query: Query<(&mut ButtonColors, Option<&Interaction>, Option<&Children>)>,
     ui_camera: Option<Res<UiCamera>>,
 ) {
+    let (cmd_rx, event_tx) = channels;
     // Lock the receiver and process all available commands (non-blocking)
     let receiver = match cmd_rx.0.lock() {
         Ok(r) => r,
@@ -581,17 +578,17 @@ fn process_commands(
                 }
             }
 
-            GraphicCommand::SetWindowFullscreen {
+            GraphicCommand::SetWindowMode {
                 id,
-                fullscreen,
+                mode,
                 response_tx,
             } => {
                 if let Some(entity) = registry.get_entity(id) {
                     if let Ok(mut window) = windows.get_mut(entity) {
-                        window.mode = if fullscreen {
-                            WindowMode::BorderlessFullscreen(MonitorSelection::Current)
-                        } else {
-                            WindowMode::Windowed
+                        window.mode = match mode {
+                            StamWindowMode::Windowed => WindowMode::Windowed,
+                            StamWindowMode::Fullscreen => WindowMode::Fullscreen(MonitorSelection::Current, VideoModeSelection::Current),
+                            StamWindowMode::BorderlessFullscreen => WindowMode::BorderlessFullscreen(MonitorSelection::Current),
                         };
                         let _ = response_tx.send(Ok(()));
                     } else {
@@ -947,6 +944,97 @@ fn process_commands(
                 let _: Handle<Image> = asset_server.load(&path);
                 // tracing::debug!("Image preloaded: {}", path);
                 let _ = response_tx.send(Ok(()));
+            }
+
+            // ================================================================
+            // Screen/Monitor Commands
+            // ================================================================
+            GraphicCommand::GetPrimaryScreen { response_tx } => {
+                // Get primary monitor via winit using thread_local WINIT_WINDOWS
+                let result = (|| -> Result<u32, String> {
+                    let primary_entity = primary_window_query
+                        .single()
+                        .map_err(|_| "No primary window found".to_string())?;
+
+                    // Access WINIT_WINDOWS thread_local
+                    WINIT_WINDOWS.with(|winit_windows| {
+                        let winit_wins = winit_windows.borrow();
+                        if let Some(winit_window) = winit_wins.get_window(primary_entity) {
+                            if let Some(monitor) = winit_window.primary_monitor() {
+                                // Use monitor name hash as ID, or 0 for primary
+                                let monitor_id = monitor
+                                    .name()
+                                    .map(|name| {
+                                        use std::hash::{Hash, Hasher};
+                                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                        name.hash(&mut hasher);
+                                        hasher.finish() as u32
+                                    })
+                                    .unwrap_or(0);
+                                return Ok(monitor_id);
+                            }
+                        }
+                        // Fallback: return 0 as default primary screen ID
+                        Ok(0)
+                    })
+                })();
+
+                let _ = response_tx.send(result);
+            }
+
+            GraphicCommand::GetScreenResolution { screen_id, response_tx } => {
+                // Get resolution of a specific screen/monitor using thread_local WINIT_WINDOWS
+                let result = (|| -> Result<(u32, u32), String> {
+                    let primary_entity = primary_window_query
+                        .single()
+                        .map_err(|_| "No primary window found".to_string())?;
+
+                    // Access WINIT_WINDOWS thread_local
+                    WINIT_WINDOWS.with(|winit_windows| {
+                        let winit_wins = winit_windows.borrow();
+                        if let Some(winit_window) = winit_wins.get_window(primary_entity) {
+                            // For screen_id 0, try multiple methods to get primary monitor
+                            if screen_id == 0 {
+                                // Try primary_monitor first
+                                if let Some(monitor) = winit_window.primary_monitor() {
+                                    let size = monitor.size();
+                                    return Ok((size.width, size.height));
+                                }
+                                // Fallback to current_monitor (the monitor the window is on)
+                                if let Some(monitor) = winit_window.current_monitor() {
+                                    let size = monitor.size();
+                                    return Ok((size.width, size.height));
+                                }
+                                // Fallback to first available monitor
+                                if let Some(monitor) = winit_window.available_monitors().next() {
+                                    let size = monitor.size();
+                                    return Ok((size.width, size.height));
+                                }
+                            }
+
+                            // Search through available monitors for specific screen_id
+                            for monitor in winit_window.available_monitors() {
+                                let monitor_id = monitor
+                                    .name()
+                                    .map(|name| {
+                                        use std::hash::{Hash, Hasher};
+                                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                                        name.hash(&mut hasher);
+                                        hasher.finish() as u32
+                                    })
+                                    .unwrap_or(0);
+
+                                if monitor_id == screen_id {
+                                    let size = monitor.size();
+                                    return Ok((size.width, size.height));
+                                }
+                            }
+                        }
+                        Err(format!("Screen {} not found", screen_id))
+                    })
+                })();
+
+                let _ = response_tx.send(result);
             }
         }
     }
