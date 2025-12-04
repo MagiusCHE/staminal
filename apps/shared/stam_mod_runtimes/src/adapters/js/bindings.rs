@@ -756,10 +756,15 @@ impl SystemJS {
         }
     }
 
-    /// Send/dispatch a custom event to all registered handlers (async)
+    /// Send a custom event to all registered handlers
     ///
     /// This function triggers all handlers registered for the given event name,
-    /// passing the provided arguments to each handler.
+    /// passing the provided arguments to each handler. The dispatch happens through
+    /// the main event loop which has access to all mod contexts.
+    ///
+    /// **IMPORTANT**: Handler response values (like `res.handled = true`) must be set
+    /// SYNCHRONOUSLY, before any `await` points. Values set after an `await` will not
+    /// be captured in the response.
     ///
     /// # Arguments
     /// * `event_name` - The custom event name to dispatch
@@ -769,6 +774,14 @@ impl SystemJS {
     /// Promise that resolves to an object with:
     /// - `handled: boolean` - Whether any handler marked the event as handled
     /// - Plus any custom properties added by handlers
+    ///
+    /// # Example
+    /// ```javascript
+    /// const result = await system.sendEvent("AppStart", { data: "test" });
+    /// if (result.handled) {
+    ///     console.log("Event was handled");
+    /// }
+    /// ```
     #[qjs(rename = "sendEvent")]
     pub async fn send_event<'js>(&self, ctx: Ctx<'js>, event_name: String, args: Rest<Value<'js>>) -> rquickjs::Result<Object<'js>> {
         // Convert each JS value to JSON string

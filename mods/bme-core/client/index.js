@@ -6,6 +6,8 @@ export function onAttach() {
 const onAppStart = async (req, res) => {
     //console.log("App started. req:", req, "res", res);
     // Get all opened windows and close them, keeping only one with no widgets
+    res.handled = true;
+    
     const windows = await graphic.getWindows();
     const engine = await graphic.getEngineInfo();
     //let first = true;
@@ -15,9 +17,9 @@ const onAppStart = async (req, res) => {
         console.log(" - Win:", win.id);
         if (win.id == engine.mainWindow.id) {
             await win.clearWidgets();
+            await win.setFullscreen(true);
         } else {
             await win.close();
         }
     }
-    res.handled = true;
 }

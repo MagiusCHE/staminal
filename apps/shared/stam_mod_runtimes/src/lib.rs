@@ -146,7 +146,10 @@ pub trait RuntimeAdapter {
     /// This method finds all handlers registered for the custom event, calls them
     /// in priority order (lowest first), and returns the aggregated response.
     /// Each handler receives a request object with `args` array and a response object
-    /// with `handled` flag and `results` array.
+    /// with `handled` flag and custom properties.
+    ///
+    /// **IMPORTANT**: Handler response values must be set SYNCHRONOUSLY before any
+    /// `await` points. Values set after an `await` will not be captured.
     ///
     /// # Arguments
     /// * `request` - The custom event request containing event_name and args

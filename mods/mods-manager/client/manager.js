@@ -68,7 +68,7 @@ export class Manager {
         this.#window = engine.mainWindow;
 
         await this.prepareUi();
-        await this.ensureMods();
+        this.ensureMods();
     }
 
     async prepareUi() {
@@ -342,12 +342,12 @@ export class Manager {
         await wait(1500);
 
         // Now start the game!
-        // const ret = await system.sendEvent("AppStart");
-        // //console.log("AppStart event result:", ret);
-        // if (!ret.handled) {
-        //     console.error("AppStart event was not handled by any mod!");
-        //     system.exit(0);
-        // }
+        const ret = await system.sendEvent("AppStart");
+        //console.log("AppStart event result:", ret);
+        if (!ret.handled) {
+            console.error("AppStart event was not handled by any mod!");
+            system.exit(0);
+        }
     }
 
     #uiIntervalUpdate = undefined;

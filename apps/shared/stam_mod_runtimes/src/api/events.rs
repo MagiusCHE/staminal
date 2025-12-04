@@ -192,7 +192,7 @@ impl CustomEventResponse {
 
 /// Request to send/dispatch an event from JavaScript
 ///
-/// This is used by `system.send_event(event_name, ...args)` to trigger
+/// This is used by `system.sendEvent(event_name, ...args)` to trigger
 /// handlers registered for custom events.
 #[derive(Debug)]
 pub struct SendEventRequest {
@@ -765,11 +765,14 @@ impl EventDispatcher {
 
     /// Send a request to dispatch a custom event and wait for completion
     ///
-    /// This is called by the JS binding `system.send_event(event_name, ...args)`.
+    /// This is called by the JS binding `system.sendEvent(event_name, ...args)`.
     /// The request is sent to the main loop which will process it and respond.
     ///
+    /// **IMPORTANT**: Handler response values must be set SYNCHRONOUSLY before any
+    /// `await` points. Values set after an `await` will not be captured.
+    ///
     /// # Returns
-    /// A `CustomEventResponse` containing `handled` flag and `results` array
+    /// A `CustomEventResponse` containing `handled` flag and custom properties
     pub async fn request_send_event(&self, event_name: String, args: Vec<String>) -> Result<CustomEventResponse, String> {
         let (response_tx, response_rx) = oneshot::channel();
 

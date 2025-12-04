@@ -55,6 +55,35 @@ impl GameModRuntime {
         }
     }
 
+    /// Dispatch a custom event to registered handlers
+    ///
+    /// Returns a CustomEventResponse containing whether the event was handled
+    /// and any custom properties set by handlers.
+    ///
+    /// **IMPORTANT**: Handler response values must be set SYNCHRONOUSLY before any
+    /// `await` points. Values set after an `await` will not be captured.
+    pub async fn dispatch_custom_event(&self, request: &stam_mod_runtimes::api::CustomEventRequest) -> stam_mod_runtimes::api::CustomEventResponse {
+        if let Some(ref adapter) = self.js_adapter {
+            let adapter = adapter.read().await;
+            adapter.dispatch_custom_event(request).await
+        } else {
+            // No JS adapter, return default unhandled response
+            stam_mod_runtimes::api::CustomEventResponse::default()
+        }
+    }
+
+    /// Take the send_event request receiver from EventDispatcher (if available)
+    ///
+    /// This is used by the main loop to receive and process send_event requests
+    /// from JavaScript mods calling `system.sendEvent()`.
+    pub async fn take_send_event_receiver(&self) -> Option<tokio::sync::mpsc::Receiver<stam_mod_runtimes::api::SendEventRequest>> {
+        if let Some(ref system_api) = self.system_api {
+            system_api.event_dispatcher().take_send_event_receiver().await
+        } else {
+            None
+        }
+    }
+
     /// Get the home directory path from the system API
     pub fn get_home_dir(&self) -> Option<PathBuf> {
         self.system_api.as_ref().and_then(|api| api.get_home_dir())

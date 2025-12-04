@@ -1192,18 +1192,18 @@ impl JsRuntimeAdapter {
                 }
             };
 
-            // Step 2: If it was a Promise, let the runtime process pending jobs
+            // Step 2: If it was a Promise, we do NOT call runtime.idle() here.
+            // The main event loop will process pending JS jobs naturally via run_js_event_loop().
+            // Calling idle() here could cause deadlocks if the handler calls sendEvent(),
+            // because the sendEvent awaits a response that can't arrive until this function returns.
+            //
+            // Handlers that need async operations (like system.exit()) should set their
+            // response values synchronously before any await points.
             if was_promise {
-                // Process pending JavaScript jobs (this allows async operations like
-                // system.exit(), res.handled = true, etc. to complete)
-                // Use a timeout to prevent potential deadlocks when called from block_on
-                let _ = tokio::time::timeout(
-                    tokio::time::Duration::from_millis(100),
-                    self.runtime.idle()
-                ).await;
+                trace!("TerminalKeyPressed handler returned Promise - async work will complete via event loop");
             }
 
-            // Step 3: Read the response object (after Promise has resolved if async)
+            // Step 3: Read the response object
             let result: Result<bool, String> = loaded_mod
                 .context
                 .with(|ctx| {
@@ -1868,14 +1868,22 @@ impl JsRuntimeAdapter {
                 }
             };
 
-            // Step 2: If it was a Promise, let the runtime process pending jobs
+            // Step 2: We do NOT call runtime.idle() here, even with wait_for_completion=true.
+            //
+            // Reason: If sendEventAsync was called from JS, there's a pending job waiting for
+            // the response. Calling idle() would wait for that job to complete, but that job
+            // is waiting for us to send the response - causing a DEADLOCK.
+            //
+            // Instead, handlers MUST set response values (like res.handled = true) SYNCHRONOUSLY
+            // before any await points. The async part of the handler will execute later via
+            // the main JS event loop.
             if was_promise {
-                // Process pending JavaScript jobs (this allows async operations like
-                // clearWidgets, close, etc. to complete via tokio channels)
-                self.runtime.idle().await;
+                trace!("Custom event handler returned Promise - reading sync values only (async work will complete via event loop)");
             }
 
-            // Step 3: Read the response object (after Promise has resolved if async)
+            // Step 3: Read the response object
+            // Note: For async handlers, the response values (like res.handled = true)
+            // should be set synchronously before awaiting any async operation.
             let result: Result<(bool, std::collections::HashMap<String, String>), String> = loaded_mod
                 .context
                 .with(|ctx| {

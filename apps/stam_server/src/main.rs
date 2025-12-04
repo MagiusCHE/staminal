@@ -222,6 +222,26 @@ async fn main() {
     // Drop the original sender so the channel closes when all game senders are done
     drop(shutdown_tx);
 
+    // Collect send_event receivers from all game runtimes and aggregate them
+    // into a single channel for the main loop (with game_id for proper dispatch)
+    let (send_event_tx, mut send_event_rx) = tokio::sync::mpsc::channel::<(String, stam_mod_runtimes::api::SendEventRequest)>(16);
+    for (game_id, runtime) in game_runtimes.iter() {
+        if let Some(mut game_send_event_rx) = runtime.take_send_event_receiver().await {
+            let tx = send_event_tx.clone();
+            let gid = game_id.clone();
+            tokio::spawn(async move {
+                while let Some(request) = game_send_event_rx.recv().await {
+                    trace!("send_event request from game '{}': event='{}'", gid, request.event_name);
+                    if tx.send((gid.clone(), request)).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    }
+    // Drop the original sender so the channel closes when all game senders are done
+    drop(send_event_tx);
+
     // Start terminal input reader if running in a terminal
     let (mut terminal_rx, mut terminal_handle) = if stam_mod_runtimes::terminal_input::is_terminal() {
         match stam_mod_runtimes::terminal_input::spawn_terminal_event_reader() {
@@ -303,6 +323,29 @@ async fn main() {
                         info!("Received shutdown signal (Ctrl+C)");
                         break;
                     }
+                }
+            }
+
+            // Handle send_event requests from JavaScript mods
+            // This implements the channel-based dispatch pattern described in docs/event-system.md
+            request = send_event_rx.recv() => {
+                if let Some((game_id, request)) = request {
+                    trace!("Dispatching custom event '{}' for game '{}'", request.event_name, game_id);
+
+                    // Get the runtime for this game and dispatch the event
+                    let response = if let Some(runtime) = game_runtimes.get(&game_id) {
+                        let event_request = stam_mod_runtimes::api::CustomEventRequest::new(
+                            request.event_name.clone(),
+                            request.args.clone(),
+                        );
+                        runtime.dispatch_custom_event(&event_request).await
+                    } else {
+                        warn!("Game runtime '{}' not found for send_event", game_id);
+                        stam_mod_runtimes::api::CustomEventResponse::default()
+                    };
+
+                    // Send response back to the calling JS code
+                    let _ = request.response_tx.send(response);
                 }
             }
 

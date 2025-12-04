@@ -1351,6 +1351,7 @@ async fn connect_to_game_server(
                 }
 
                 // Handle send_event requests from JavaScript
+                // Both sendEvent (fire-and-forget) and sendEventAsync use this path
                 request = async {
                     if let Some(ref mut rx) = send_event_rx {
                         rx.recv().await
@@ -1619,13 +1620,21 @@ async fn handle_attach_mod_request(
 
 /// Handle a request to dispatch a custom event to all registered handlers
 ///
-/// This is called when JavaScript code calls `system.send_event(event_name, ...args)`.
-/// It dispatches the event to all registered handlers using the new request/response pattern.
+/// This is called when JavaScript code calls `system.sendEvent()`.
+/// It dispatches the event to all registered handlers using the request/response pattern.
+///
+/// **IMPORTANT**: Handler response values must be set SYNCHRONOUSLY before any
+/// `await` points. Values set after an `await` will not be captured.
+///
+/// # Arguments
+/// * `event_name` - The event name to dispatch
+/// * `args` - JSON-serialized arguments to pass to handlers
+/// * `runtime_manager_opt` - The runtime manager (if available)
 ///
 /// # Returns
 /// A `CustomEventResponse` containing:
 /// - `handled: bool` - Whether any handler marked the event as handled
-/// - `results: Vec<String>` - JSON-serialized results from handlers
+/// - `properties: HashMap` - Custom properties set by handlers
 fn handle_send_event_request(
     event_name: &str,
     args: &[String],
