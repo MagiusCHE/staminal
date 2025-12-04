@@ -1879,6 +1879,10 @@ struct Args {
     /// Enable logging to file (stam_client.log in current directory)
     #[arg(long, env = "STAM_LOG_FILE")]
     log_file: bool,
+
+    /// Log level (trace, debug, info, warn, error)
+    #[arg(long, env = "STAM_LOG_LEVEL", default_value = "info")]
+    log_level: String,
 }
 
 // ============================================================================
@@ -1993,19 +1997,29 @@ fn main() {
 
 /// Setup logging (called from main thread)
 ///
+/// Uses STAM_LOG_LEVEL environment variable or --log-level argument to set log level.
 /// Uses STAM_LOGDEPS environment variable to control dependency logging:
 /// - STAM_LOGDEPS=0 (default): Only show logs from Staminal code
 /// - STAM_LOGDEPS=1: Show all logs including external dependencies (bevy, wgpu, etc.)
 fn setup_logging(args: &Args) {
+    let level = match args.log_level.to_lowercase().as_str() {
+        "trace" => Level::TRACE,
+        "debug" => Level::DEBUG,
+        "info" => Level::INFO,
+        "warn" => Level::WARN,
+        "error" => Level::ERROR,
+        _ => Level::DEBUG,
+    };
+
     let config = if args.log_file {
         let file = std::fs::File::create("stam_client.log")
             .expect("Unable to create stam_client.log");
         LogConfig::new("stam_client::")
-            .with_level(Level::DEBUG)
+            .with_level(level)
             .with_log_file(file)
     } else {
         LogConfig::<std::fs::File>::new("stam_client::")
-            .with_level(Level::DEBUG)
+            .with_level(level)
     };
 
     init_logging(config).expect("Failed to initialize logging");
