@@ -239,7 +239,7 @@ export class Manager {
     async ensureMods() {
         //console.log("Ensuring mods...");
         const mods = System.getMods();
-        //console.log(`mods:`, mods);
+        console.trace(`mods:`, mods);
         // Filter mods that are not loaded yet
         const toAnalize = mods.filter(mod => !mod.loaded);
 

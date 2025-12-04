@@ -944,49 +944,67 @@ async fn connect_to_game_server(
                 struct ModData {
                     mod_id: String,
                     manifest: ModManifest,
-                    entry_point_path: std::path::PathBuf,
-                    absolute_entry_point: std::path::PathBuf,
+                    /// Entry point path - None for asset-only mods (no executable code)
+                    entry_point_path: Option<std::path::PathBuf>,
+                    /// Absolute entry point - None for asset-only mods
+                    absolute_entry_point: Option<std::path::PathBuf>,
                 }
 
                 let mut mod_data_map: HashMap<String, ModData> = HashMap::new();
 
                 // First pass: Register mod aliases and collect mod data for AVAILABLE mods only
                 // This must happen BEFORE loading any mod, so that import "@mod-id" works
+                // Mods without entry_point are asset-only and automatically considered attached
                 debug!("Registering mod aliases for available mods...");
 
                 for (mod_id, (manifest, actual_mod_dir)) in &available_manifests {
-                    // Use actual_mod_dir (could be root or client/ subdirectory)
-                    let entry_point_path = actual_mod_dir.join(&manifest.entry_point);
+                    // Check if mod has an entry_point (asset-only mods don't)
+                    if let Some(ref entry_point) = manifest.entry_point {
+                        // Use actual_mod_dir (could be root or client/ subdirectory)
+                        let entry_point_path = actual_mod_dir.join(entry_point);
 
-                    // Convert to absolute path for reliable module resolution
-                    let absolute_entry_point = if entry_point_path.is_absolute() {
-                        entry_point_path.clone()
+                        // Convert to absolute path for reliable module resolution
+                        let absolute_entry_point = if entry_point_path.is_absolute() {
+                            entry_point_path.clone()
+                        } else {
+                            std::env::current_dir()?.join(&entry_point_path)
+                        };
+
+                        // Register alias before loading
+                        stam_mod_runtimes::adapters::js::register_mod_alias(
+                            mod_id,
+                            absolute_entry_point.clone(),
+                        );
+
+                        mod_data_map.insert(mod_id.clone(), ModData {
+                            mod_id: mod_id.clone(),
+                            manifest: manifest.clone(),
+                            entry_point_path: Some(entry_point_path),
+                            absolute_entry_point: Some(absolute_entry_point),
+                        });
                     } else {
-                        std::env::current_dir()?.join(&entry_point_path)
-                    };
-
-                    // Register alias before loading
-                    stam_mod_runtimes::adapters::js::register_mod_alias(
-                        mod_id,
-                        absolute_entry_point.clone(),
-                    );
-
-                    mod_data_map.insert(mod_id.clone(), ModData {
-                        mod_id: mod_id.clone(),
-                        manifest: manifest.clone(),
-                        entry_point_path,
-                        absolute_entry_point,
-                    });
+                        // Asset-only mod (no entry_point) - no alias to register, auto-attached
+                        debug!("Mod '{}' has no entry_point, registering as asset-only (auto-attached)", mod_id);
+                        mod_data_map.insert(mod_id.clone(), ModData {
+                            mod_id: mod_id.clone(),
+                            manifest: manifest.clone(),
+                            entry_point_path: None,
+                            absolute_entry_point: None,
+                        });
+                    }
                 }
 
                 // Register ALL mods in SystemApi (including missing ones)
                 // Available mods get their info from manifest, missing ones get minimal info
                 // All mods get download_url from server (for re-download if needed)
                 // exists=true for mods found locally, exists=false for missing mods
+                // Asset-only mods (no entry_point) are automatically loaded=true
                 for mod_info in &mods {
                     if let Some(mod_data) = mod_data_map.get(&mod_info.mod_id) {
                         // Available mod - use manifest info, exists=true
                         // Include archive info from server for display/validation
+                        // Asset-only mods (no entry_point) are auto-attached (loaded=true)
+                        let is_asset_only = mod_data.entry_point_path.is_none();
                         js_adapter.register_mod_info(ModInfo {
                             id: mod_info.mod_id.clone(),
                             version: mod_data.manifest.version.clone(),
@@ -995,7 +1013,7 @@ async fn connect_to_game_server(
                             mod_type: mod_data.manifest.mod_type.clone(),
                             priority: mod_data.manifest.priority,
                             bootstrapped: false,
-                            loaded: false,  // Will be set to true when actually loaded
+                            loaded: false,  // Asset-only mods are auto-attached
                             exists: true,   // Available locally
                             download_url: Some(mod_info.download_url.clone()),  // Keep URL for potential re-download
                             archive_sha512: if mod_info.archive_sha512.is_empty() { None } else { Some(mod_info.archive_sha512.clone()) },
@@ -1125,13 +1143,18 @@ async fn connect_to_game_server(
                 // Load ONLY bootstrap mods + their dependencies
                 // Non-bootstrap mods will be loaded by mods-manager when needed
                 // mods_to_load already contains bootstrap + dependencies in correct order
+                // Skip asset-only mods (no entry_point) - they are already auto-attached
                 debug!("Attaching {} mods (bootstrap + dependencies)...", mods_to_load.len());
                 for mod_id in &mods_to_load {
                     let mod_data = mod_data_map.get(mod_id).unwrap();
-                    runtime_manager.load_mod(mod_id, &mod_data.entry_point_path)?;
-                    runtime_manager.call_mod_function(mod_id, "onAttach")?;
-                    // Mark mod as loaded in SystemApi
-                    system_api.set_loaded(mod_id, true);
+                    // Skip asset-only mods - they have no code to load
+                    if let Some(ref entry_point_path) = mod_data.entry_point_path {
+                        runtime_manager.load_mod(mod_id, entry_point_path)?;
+                        runtime_manager.call_mod_function(mod_id, "onAttach")?;
+                        // Mark mod as loaded in SystemApi
+                        system_api.set_loaded(mod_id, true);
+                    }
+                    // Asset-only mods are already marked as loaded=true during registration
                 }
 
                 // Call onBootstrap ONLY for bootstrap mods (not for dependencies)
@@ -1588,33 +1611,42 @@ async fn handle_attach_mod_request(
     let manifest: stam_schema::ModManifest = serde_json::from_str(&manifest_content)
         .map_err(|e| format!("Failed to parse manifest: {}", e))?;
 
-    // Build entry point path
-    let entry_point_path = actual_mod_dir.join(&manifest.entry_point);
+    // Check if mod has an entry_point - asset-only mods are auto-attached (skip loading)
+    if let Some(ref entry_point) = manifest.entry_point {
+        // Build entry point path
+        let entry_point_path = actual_mod_dir.join(entry_point);
 
-    // Convert to absolute path for reliable module resolution
-    let absolute_entry_point = if entry_point_path.is_absolute() {
-        entry_point_path.clone()
+        // Convert to absolute path for reliable module resolution
+        let absolute_entry_point = if entry_point_path.is_absolute() {
+            entry_point_path.clone()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| format!("Failed to get current dir: {}", e))?
+                .join(&entry_point_path)
+        };
+
+        // Register mod alias before loading
+        stam_mod_runtimes::adapters::js::register_mod_alias(mod_id, absolute_entry_point.clone());
+
+        // Load the mod
+        runtime_manager.load_mod(mod_id, &entry_point_path)
+            .map_err(|e| format!("Failed to load mod: {}", e))?;
+
+        // Call onAttach
+        runtime_manager.call_mod_function(mod_id, "onAttach")
+            .map_err(|e| format!("Failed to call onAttach: {}", e))?;
+
+        // Mark mod as loaded in SystemApi
+        system_api.set_loaded(mod_id, true);
+
+        debug!("Mod '{}' attached successfully", mod_id);
     } else {
-        std::env::current_dir()
-            .map_err(|e| format!("Failed to get current dir: {}", e))?
-            .join(&entry_point_path)
-    };
+        // Asset-only mod (no entry_point) - already considered attached
+        debug!("Mod '{}' is asset-only (no entry_point), skipping load", mod_id);
+        // Still mark as loaded in case it wasn't already
+        system_api.set_loaded(mod_id, true);
+    }
 
-    // Register mod alias before loading
-    stam_mod_runtimes::adapters::js::register_mod_alias(mod_id, absolute_entry_point.clone());
-
-    // Load the mod
-    runtime_manager.load_mod(mod_id, &entry_point_path)
-        .map_err(|e| format!("Failed to load mod: {}", e))?;
-
-    // Call onAttach
-    runtime_manager.call_mod_function(mod_id, "onAttach")
-        .map_err(|e| format!("Failed to call onAttach: {}", e))?;
-
-    // Mark mod as loaded in SystemApi
-    system_api.set_loaded(mod_id, true);
-
-    debug!("Mod '{}' attached successfully", mod_id);
     Ok(())
 }
 

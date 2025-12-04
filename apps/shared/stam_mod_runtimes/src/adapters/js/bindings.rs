@@ -305,7 +305,7 @@ pub fn get_widget_handler<'js>(
 
 /// Setup console API in the JavaScript context
 ///
-/// Provides console.log, console.error, console.warn, console.info, console.debug
+/// Provides console.log, console.error, console.warn, console.info, console.debug, console.trace
 /// All functions accept variadic arguments and read the global __GAME_ID__ (optional) and __MOD_ID__ variables
 pub fn setup_console_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
     let globals = ctx.globals();
@@ -1035,7 +1035,7 @@ impl SystemJS {
             manifest_obj.set("name", pkg.manifest.name.as_str())?;
             manifest_obj.set("version", pkg.manifest.version.as_str())?;
             manifest_obj.set("description", pkg.manifest.description.as_str())?;
-            manifest_obj.set("entry_point", pkg.manifest.entry_point.as_str())?;
+            manifest_obj.set("entry_point", pkg.manifest.entry_point.as_deref())?;
             manifest_obj.set("priority", pkg.manifest.priority)?;
             if let Some(ref mod_type) = pkg.manifest.mod_type {
                 manifest_obj.set("type", mod_type.as_str())?;

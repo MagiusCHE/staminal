@@ -1,8 +1,7 @@
 {
-    "name": "bme-core",
+    "name": "bme-assets-01",
     "version": "0.1.0",
-    "description": "Beyond Midgard Era - Core",
-    "entry_point": "index.js",
+    "description": "Beyond Midgard Era - Assets pack 01",
     "execute_on": [
         "client"
     ],
@@ -10,7 +9,6 @@
     "priority": 0,
     "requires": {
         "@client": "0.1.0",
-        "@server": "0.1.0",
-        "bme-assets-01": "0.1.0"
+        "@server": "0.1.0"
     }
 }

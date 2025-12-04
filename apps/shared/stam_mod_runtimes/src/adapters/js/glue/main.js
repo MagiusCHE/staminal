@@ -266,6 +266,17 @@ globalThis.console = {
     warn: (...args) => __console_native._warn(__formatArgs(...args)),
     info: (...args) => __console_native._info(__formatArgs(...args)),
     debug: (...args) => __console_native._debug(__formatArgs(...args)),
+    trace: (...args) => {
+        // Generate stack trace
+        const err = new Error();
+        const stack = err.stack || '';
+        // Remove the first line (Error) and the trace() call itself from the stack
+        const stackLines = stack.split('\n').slice(2).join('\n');
+        // Format message: "Trace: <message>\n<stack>"
+        const message = args.length > 0 ? __formatArgs(...args) : '';
+        const traceOutput = message ? `Trace: ${message}\n${stackLines}` : `Trace\n${stackLines}`;
+        __console_native._log(traceOutput);
+    },
 };
 
 // =============================================================================

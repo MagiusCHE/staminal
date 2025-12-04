@@ -126,8 +126,11 @@ pub struct ModManifest {
     pub description: String,
 
     /// Entry point file for the mod (e.g., "index.js")
-    #[schemars(description = "Main entry point file for the mod runtime")]
-    pub entry_point: String,
+    /// Optional - mods without entry_point are automatically considered "attached"
+    /// (they provide assets/resources only, no executable code)
+    #[schemars(description = "Main entry point file for the mod runtime. Optional - mods without entry_point are asset-only.")]
+    #[serde(default)]
+    pub entry_point: Option<String>,
 
     /// Load priority (lower numbers load first)
     #[schemars(description = "Loading priority - lower values load earlier")]
@@ -184,7 +187,7 @@ mod tests {
         let manifest = ModManifest::from_json_str(json).unwrap();
         assert_eq!(manifest.name, "test-mod");
         assert_eq!(manifest.version, "1.0.0");
-        assert_eq!(manifest.entry_point, "index.js");
+        assert_eq!(manifest.entry_point, Some("index.js".to_string()));
     }
 
     #[test]
@@ -253,5 +256,20 @@ mod tests {
 
         let result = ModManifest::from_json_str(json);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_manifest_without_entry_point() {
+        // Asset-only mods don't need an entry_point
+        let json = r#"{
+            "name": "asset-pack",
+            "version": "1.0.0",
+            "description": "An asset-only mod"
+        }"#;
+
+        let manifest = ModManifest::from_json_str(json).unwrap();
+        assert_eq!(manifest.name, "asset-pack");
+        assert_eq!(manifest.version, "1.0.0");
+        assert_eq!(manifest.entry_point, None);
     }
 }

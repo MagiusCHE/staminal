@@ -62,7 +62,10 @@ pub struct ModPackageManifest {
     pub name: String,
     pub version: String,
     pub description: String,
-    pub entry_point: String,
+    /// Entry point file for the mod (e.g., "index.js")
+    /// Optional - mods without entry_point are asset-only (automatically considered attached)
+    #[serde(default)]
+    pub entry_point: Option<String>,
     #[serde(default)]
     pub execute_on: serde_json::Value, // Can be string or array
     #[serde(default)]
@@ -144,7 +147,10 @@ struct InstalledModManifest {
     pub name: String,
     pub version: String,
     pub description: String,
-    pub entry_point: String,
+    /// Entry point file for the mod (e.g., "index.js")
+    /// Optional - mods without entry_point are asset-only (automatically considered attached)
+    #[serde(default)]
+    pub entry_point: Option<String>,
     #[serde(default)]
     pub priority: i32,
     #[serde(rename = "type", default)]

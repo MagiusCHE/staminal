@@ -32,10 +32,13 @@ export class Game {
     }
     async loadPreliminaryResources() {
         console.warn("TODO: Loading preliminary resources...");
+        console.warn("TODO: Loading preliminary assets from bme-assets-* mod...");
+        await Resource.preload("@bme-assets-01/assets/background/title.jpg", "title-screen-background");
     }
     async load() {
-        console.warn("TODO: Loading remaining resources to start the game...");
-    }    
+        console.warn("TODO: Loading remaining required resources to start the game...");
+        console.warn("TODO: Loading remaining required assets from bme-assets-* mod...");
+    }
     async initializeWindow() {
         const windows = await Graphic.getWindows();
         const engine = await Graphic.getEngineInfo();
@@ -55,7 +58,23 @@ export class Game {
                     await win.setSize(this.#config.graphic.resolution.width, this.#config.graphic.resolution.height);
                     // FIXME: Should center the window
                     console.warn("FIXME: Center the window on screen");
-                }                
+                }
+
+                const cont = await win.createWidget(WidgetTypes.Container, {
+                    width: "100%",
+                    height: "100%",
+                    direction: FlexDirection.Column,
+                    justifyContent: JustifyContent.Center,
+                    alignItems: AlignItems.Center,
+                    backgroundColor: "#1a1a2e",
+                });
+
+                const bkg = await cont.createChild(WidgetTypes.Image, {
+                    resourceId: "title-screen-background",
+                    width: "100%",
+                    height: "100%",
+                    stretchMode: "cover"
+                });
             } else {
                 await win.close();
             }

@@ -284,6 +284,7 @@ fn initialize_game_mods(
         js_adapter.system_api().set_home_dir(home_dir.to_path_buf());
 
         // First pass: register aliases and mod info for all server mods
+        // Mods without entry_point are asset-only and automatically considered attached
         let mut mod_entries: Vec<(String, PathBuf, String)> = Vec::new();
         for mod_id in &server_mods {
             let manifest = server_manifests.get(mod_id).ok_or_else(|| {
@@ -291,39 +292,62 @@ fn initialize_game_mods(
             })?;
 
             let base_dir = server_manifest_dirs.get(mod_id).cloned().unwrap_or_else(|| mods_root.join(mod_id));
-            let entry_point_path = base_dir.join(&manifest.entry_point);
-            let absolute_entry_point = if entry_point_path.is_absolute() {
-                entry_point_path.clone()
+
+            // Check if mod has an entry_point
+            if let Some(ref entry_point) = manifest.entry_point {
+                let entry_point_path = base_dir.join(entry_point);
+                let absolute_entry_point = if entry_point_path.is_absolute() {
+                    entry_point_path.clone()
+                } else {
+                    std::env::current_dir()
+                        .map_err(|e| format!("Cannot resolve current directory: {}", e))?
+                        .join(&entry_point_path)
+                };
+
+                register_mod_alias(mod_id, absolute_entry_point);
+
+                // Register mod info with the system API
+                // Server loads all mods immediately, so loaded: true
+                // download_url is None on server (mods are already local)
+                // exists: true on server (all mods are local)
+                // archive fields are None on server (not needed)
+                js_adapter.register_mod_info(ModInfo {
+                    id: mod_id.clone(),
+                    version: manifest.version.clone(),
+                    name: manifest.name.clone(),
+                    description: manifest.description.clone(),
+                    mod_type: manifest.mod_type.clone(),
+                    priority: manifest.priority,
+                    bootstrapped: false,
+                    loaded: true,
+                    exists: true,
+                    download_url: None,
+                    archive_sha512: None,
+                    archive_bytes: None,
+                    uncompressed_bytes: None,
+                });
+
+                mod_entries.push((mod_id.clone(), entry_point_path, manifest.mod_type.clone().unwrap_or_default()));
             } else {
-                std::env::current_dir()
-                    .map_err(|e| format!("Cannot resolve current directory: {}", e))?
-                    .join(&entry_point_path)
-            };
-
-            register_mod_alias(mod_id, absolute_entry_point);
-
-            // Register mod info with the system API
-            // Server loads all mods immediately, so loaded: true
-            // download_url is None on server (mods are already local)
-            // exists: true on server (all mods are local)
-            // archive fields are None on server (not needed)
-            js_adapter.register_mod_info(ModInfo {
-                id: mod_id.clone(),
-                version: manifest.version.clone(),
-                name: manifest.name.clone(),
-                description: manifest.description.clone(),
-                mod_type: manifest.mod_type.clone(),
-                priority: manifest.priority,
-                bootstrapped: false,
-                loaded: true,
-                exists: true,
-                download_url: None,
-                archive_sha512: None,
-                archive_bytes: None,
-                uncompressed_bytes: None,
-            });
-
-            mod_entries.push((mod_id.clone(), entry_point_path, manifest.mod_type.clone().unwrap_or_default()));
+                // Asset-only mod (no entry_point) - automatically considered attached
+                info!("  - Mod '{}' has no entry_point, registering as asset-only (auto-attached)", mod_id);
+                js_adapter.register_mod_info(ModInfo {
+                    id: mod_id.clone(),
+                    version: manifest.version.clone(),
+                    name: manifest.name.clone(),
+                    description: manifest.description.clone(),
+                    mod_type: manifest.mod_type.clone(),
+                    priority: manifest.priority,
+                    bootstrapped: false, // No code to bootstrap
+                    loaded: false,       // This cannot be "loaded" since no code is present
+                    exists: true,
+                    download_url: None,
+                    archive_sha512: None,
+                    archive_bytes: None,
+                    uncompressed_bytes: None,
+                });
+                // Don't add to mod_entries - no code to load/attach
+            }
         }
 
         // Store reference to system API for setting bootstrapped state later
