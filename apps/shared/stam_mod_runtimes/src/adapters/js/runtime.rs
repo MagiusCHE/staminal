@@ -1125,8 +1125,8 @@ impl JsRuntimeAdapter {
             let meta = request.meta;
             let combo = request.combo.clone();
 
-            // Call the handler function with request and response objects
-            let result: Result<bool, String> = loaded_mod
+            // Step 1: Call the handler and detect if it returns a Promise
+            let call_result: Result<bool, String> = loaded_mod
                 .context
                 .with(|ctx| {
                     // Get the handler function from the context's handler map
@@ -1153,36 +1153,16 @@ impl JsRuntimeAdapter {
                             }).map_err(|e| format!("Failed to create setHandled: {:?}", e))?;
                             response_obj.set("setHandled", set_handled).map_err(|e| format!("Failed to set setHandled: {:?}", e))?;
 
-                            // Store response object as global for method access
+                            // Store response object as global for method access and later retrieval
                             ctx.globals().set("__currentTerminalKeyResponse", response_obj.clone()).map_err(|e| format!("Failed to set __currentTerminalKeyResponse: {:?}", e))?;
 
                             // Call the handler function
-                            let call_result = func.call::<(Object, Object), Value>((request_obj, response_obj.clone()));
+                            let call_result = func.call::<(Object, Object), Value>((request_obj, response_obj));
 
                             match call_result {
                                 Ok(result) => {
-                                    // If result is a Promise, try to resolve it
-                                    if let Some(promise) = result.into_promise() {
-                                        match promise.finish::<()>() {
-                                            Ok(_) => {
-                                                // Promise resolved successfully
-                                            }
-                                            Err(rquickjs::Error::WouldBlock) => {
-                                                // Promise is still pending - async handler is running in background
-                                                // This is expected for async handlers that perform I/O operations
-                                                debug!("Handler in mod '{}' returned pending Promise (async operation in progress)", mod_id);
-                                            }
-                                            Err(e) => {
-                                                let error_msg = Self::format_js_error(&ctx, &e);
-                                                error!("Handler error in mod '{}': {}", mod_id, error_msg);
-                                                return Err(format!("Handler error: {}", error_msg));
-                                            }
-                                        }
-                                    }
-
-                                    // Read back the response values
-                                    let handled: bool = response_obj.get("handled").unwrap_or(false);
-                                    Ok(handled)
+                                    // Return true if handler returned a Promise, false otherwise
+                                    Ok(result.is_promise())
                                 }
                                 Err(e) => {
                                     let error_msg = Self::format_js_error(&ctx, &e);
@@ -1200,6 +1180,40 @@ impl JsRuntimeAdapter {
                             Err(format!("Failed to get handler: {:?}", e))
                         }
                     }
+                })
+                .await;
+
+            // Check if handler call succeeded
+            let was_promise = match call_result {
+                Ok(is_promise) => is_promise,
+                Err(e) => {
+                    error!("Handler error: {}", e);
+                    continue;
+                }
+            };
+
+            // Step 2: If it was a Promise, let the runtime process pending jobs
+            if was_promise {
+                // Process pending JavaScript jobs (this allows async operations like
+                // system.exit(), res.handled = true, etc. to complete)
+                // Use a timeout to prevent potential deadlocks when called from block_on
+                let _ = tokio::time::timeout(
+                    tokio::time::Duration::from_millis(100),
+                    self.runtime.idle()
+                ).await;
+            }
+
+            // Step 3: Read the response object (after Promise has resolved if async)
+            let result: Result<bool, String> = loaded_mod
+                .context
+                .with(|ctx| {
+                    // Get the response object from globals
+                    let response_obj: Object = ctx.globals().get("__currentTerminalKeyResponse")
+                        .map_err(|e| format!("Failed to get response object: {:?}", e))?;
+
+                    // Read back the response values
+                    let handled: bool = response_obj.get("handled").unwrap_or(false);
+                    Ok(handled)
                 })
                 .await;
 
@@ -1776,8 +1790,8 @@ impl JsRuntimeAdapter {
             let event_name_for_handler = event_name.clone();
             let args_for_handler = args.clone();
 
-            // Call the handler function with request and response objects
-            let result: Result<(bool, std::collections::HashMap<String, String>), String> = loaded_mod
+            // Step 1: Call the handler and detect if it returns a Promise
+            let call_result: Result<bool, String> = loaded_mod
                 .context
                 .with(|ctx| {
                     // Get the handler function from the context's handler map
@@ -1815,40 +1829,16 @@ impl JsRuntimeAdapter {
                             }).map_err(|e| format!("Failed to create setHandled: {:?}", e))?;
                             response_obj.set("setHandled", set_handled).map_err(|e| format!("Failed to set setHandled: {:?}", e))?;
 
-                            // Store response object as global for method access
+                            // Store response object as global for method access and later retrieval
                             ctx.globals().set("__currentCustomEventResponse", response_obj.clone()).map_err(|e| format!("Failed to set __currentCustomEventResponse: {:?}", e))?;
 
                             // Call the handler function with request and response
-                            let call_result = func.call::<(Object, Object), Value>((request_obj, response_obj.clone()));
+                            let call_result = func.call::<(Object, Object), Value>((request_obj, response_obj));
 
                             match call_result {
-                                Ok(_result) => {
-                                    // Note: We don't await promises here - handlers should be synchronous
-                                    // or use callbacks. The response object is read immediately after the call.
-
-                                    // Read back the response values
-                                    let handled: bool = response_obj.get("handled").unwrap_or(false);
-
-                                    // Read all properties from the response object
-                                    let mut properties = std::collections::HashMap::new();
-                                    let keys = response_obj.keys::<String>();
-                                    for key_result in keys {
-                                        if let Ok(key) = key_result {
-                                            // Skip 'handled' and 'setHandled' - they are special
-                                            if key == "handled" || key == "setHandled" {
-                                                continue;
-                                            }
-                                            if let Ok(val) = response_obj.get::<_, Value>(&key) {
-                                                if let Ok(Some(json_str)) = ctx.json_stringify(val) {
-                                                    if let Ok(s) = json_str.to_string() {
-                                                        properties.insert(key, s);
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    Ok((handled, properties))
+                                Ok(result) => {
+                                    // Return true if handler returned a Promise, false otherwise
+                                    Ok(result.is_promise())
                                 }
                                 Err(e) => {
                                     let error_msg = Self::format_js_error(&ctx, &e);
@@ -1866,6 +1856,56 @@ impl JsRuntimeAdapter {
                             Err(format!("Failed to get handler: {:?}", e))
                         }
                     }
+                })
+                .await;
+
+            // Check if handler call succeeded
+            let was_promise = match call_result {
+                Ok(is_promise) => is_promise,
+                Err(e) => {
+                    error!("Handler error: {}", e);
+                    continue;
+                }
+            };
+
+            // Step 2: If it was a Promise, let the runtime process pending jobs
+            if was_promise {
+                // Process pending JavaScript jobs (this allows async operations like
+                // clearWidgets, close, etc. to complete via tokio channels)
+                self.runtime.idle().await;
+            }
+
+            // Step 3: Read the response object (after Promise has resolved if async)
+            let result: Result<(bool, std::collections::HashMap<String, String>), String> = loaded_mod
+                .context
+                .with(|ctx| {
+                    // Get the response object from globals
+                    let response_obj: Object = ctx.globals().get("__currentCustomEventResponse")
+                        .map_err(|e| format!("Failed to get response object: {:?}", e))?;
+
+                    // Read back the response values
+                    let handled: bool = response_obj.get("handled").unwrap_or(false);
+
+                    // Read all properties from the response object
+                    let mut properties = std::collections::HashMap::new();
+                    let keys = response_obj.keys::<String>();
+                    for key_result in keys {
+                        if let Ok(key) = key_result {
+                            // Skip 'handled' and 'setHandled' - they are special
+                            if key == "handled" || key == "setHandled" {
+                                continue;
+                            }
+                            if let Ok(val) = response_obj.get::<_, Value>(&key) {
+                                if let Ok(Some(json_str)) = ctx.json_stringify(val) {
+                                    if let Ok(s) = json_str.to_string() {
+                                        properties.insert(key, s);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Ok((handled, properties))
                 })
                 .await;
 

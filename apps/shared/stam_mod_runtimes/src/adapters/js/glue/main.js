@@ -64,7 +64,7 @@ const __formatArg = (arg) =>{
             return arg.toString();
         }
 
-        // Regular objects - use JSON.stringify
+        // Regular objects - only own enumerable properties (like Node.js)
         try {
             return JSON.stringify(arg, null, 2);
         } catch (e) {
@@ -148,12 +148,19 @@ const __inspectArg = (arg) => {
             return arg.toString();
         }
 
-        // Regular objects
+        // Regular objects - only own enumerable properties (like Node.js)
         try {
             const keys = Object.keys(arg);
             if (keys.length === 0) return '{}';
             const displayKeys = keys.slice(0, 10);
-            const pairs = displayKeys.map(k => k + ': ' + __inspectArg(arg[k]));
+            const pairs = displayKeys.map(k => {
+                const val = arg[k];
+                // Avoid infinite recursion
+                if (val === arg) {
+                    return k + ': [Circular]';
+                }
+                return k + ': ' + __inspectArg(val);
+            });
             return '{ ' + pairs.join(', ') + (keys.length > 10 ? ', ...' : '') + ' }';
         } catch (e) {
             return arg.toString();

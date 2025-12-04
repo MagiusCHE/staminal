@@ -109,7 +109,7 @@ impl GraphicProxy {
             enable_request_tx: Arc::new(RwLock::new(Some(enable_request_tx))),
             event_rx: Arc::new(tokio::sync::Mutex::new(None)),
             windows: Arc::new(RwLock::new(HashMap::new())),
-            next_window_id: AtomicU64::new(1),
+            next_window_id: AtomicU64::new(2), // Start from 2, ID 1 is reserved for main window
             widgets: Arc::new(RwLock::new(HashMap::new())),
             next_widget_id: AtomicU64::new(1),
             widget_subscriptions: Arc::new(RwLock::new(WidgetSubscriptions::new())),
@@ -129,7 +129,7 @@ impl GraphicProxy {
             enable_request_tx: Arc::new(RwLock::new(None)),
             event_rx: Arc::new(tokio::sync::Mutex::new(None)),
             windows: Arc::new(RwLock::new(HashMap::new())),
-            next_window_id: AtomicU64::new(1),
+            next_window_id: AtomicU64::new(2), // Start from 2, ID 1 is reserved for main window
             widgets: Arc::new(RwLock::new(HashMap::new())),
             next_widget_id: AtomicU64::new(1),
             widget_subscriptions: Arc::new(RwLock::new(WidgetSubscriptions::new())),
@@ -239,6 +239,9 @@ impl GraphicProxy {
         // Create response channel
         let (response_tx, response_rx) = oneshot::channel();
 
+        // Clone for local use after sending to main thread
+        let initial_window_config_clone = initial_window_config.clone();
+
         // Send enable request to main thread
         enable_tx
             .send(EnableEngineRequest {
@@ -262,6 +265,14 @@ impl GraphicProxy {
 
         // Set active engine
         *self.active_engine.write().unwrap() = Some(engine_type);
+
+        // Register main window (ID 1) in the cache
+        let main_window_config: WindowConfig = initial_window_config_clone
+            .unwrap_or_default()
+            .into();
+        let mut main_window_info = WindowInfo::new(1, main_window_config);
+        main_window_info.mark_created();
+        self.windows.write().unwrap().insert(1, main_window_info);
 
         tracing::info!("Graphic engine '{}' enabled", engine_type.name());
 
@@ -949,6 +960,45 @@ impl GraphicProxy {
             .filter(|w| w.window_id == window_id && w.parent_id.is_none())
             .map(|w| w.id)
             .collect()
+    }
+
+    /// Get a widget and all its descendants (recursive)
+    ///
+    /// Returns the widget ID and all children IDs recursively.
+    /// Useful for cleanup operations that need to process all nested widgets.
+    pub fn get_widget_and_descendants(&self, widget_id: u64) -> Vec<u64> {
+        let mut result = vec![widget_id];
+        let widgets = self.widgets.read().unwrap();
+
+        if let Some(widget) = widgets.get(&widget_id) {
+            for &child_id in &widget.children_ids {
+                drop(widgets); // Release lock before recursive call
+                result.extend(self.get_widget_and_descendants(child_id));
+                return result; // Return early since we dropped the lock
+            }
+        }
+
+        result
+    }
+
+    /// Helper to collect widget and descendants without lock issues
+    fn collect_descendants(&self, widget_id: u64, result: &mut Vec<u64>) {
+        let widgets = self.widgets.read().unwrap();
+        if let Some(widget) = widgets.get(&widget_id) {
+            let children = widget.children_ids.clone();
+            drop(widgets);
+            for child_id in children {
+                result.push(child_id);
+                self.collect_descendants(child_id, result);
+            }
+        }
+    }
+
+    /// Get all descendant IDs of a widget (children, grandchildren, etc.)
+    pub fn get_widget_descendants(&self, widget_id: u64) -> Vec<u64> {
+        let mut result = Vec::new();
+        self.collect_descendants(widget_id, &mut result);
+        result
     }
 
     // ========================================================================

@@ -147,6 +147,20 @@ impl Default for InitialWindowConfig {
     }
 }
 
+impl From<InitialWindowConfig> for WindowConfig {
+    fn from(initial: InitialWindowConfig) -> Self {
+        Self {
+            title: initial.title,
+            width: initial.width,
+            height: initial.height,
+            fullscreen: initial.fullscreen,
+            resizable: initial.resizable,
+            visible: true, // Main window is always visible after creation
+            position_mode: initial.position_mode,
+        }
+    }
+}
+
 /// Runtime information about a window
 ///
 /// This struct tracks the current state of a window managed by the graphic engine.

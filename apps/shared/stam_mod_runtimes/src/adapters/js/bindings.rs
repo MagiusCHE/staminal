@@ -273,6 +273,18 @@ pub fn remove_widget_handler(ctx: &Ctx<'_>, widget_id: u64, event_type: &str) ->
     Ok(exists)
 }
 
+/// Remove all event handlers for a widget
+///
+/// Removes handlers for all event types (click, hover, focus)
+pub fn remove_all_widget_handlers(ctx: &Ctx<'_>, widget_id: u64) -> rquickjs::Result<()> {
+    // Remove handlers for all known event types
+    let event_types = ["click", "hover", "focus"];
+    for event_type in event_types {
+        let _ = remove_widget_handler(ctx, widget_id, event_type)?;
+    }
+    Ok(())
+}
+
 /// Get a widget event callback from the context's widget handlers map
 pub fn get_widget_handler<'js>(
     ctx: &Ctx<'js>,
@@ -1610,6 +1622,38 @@ impl GraphicJS {
         Ok(obj)
     }
 
+    /// Get all windows currently managed by the graphic engine
+    ///
+    /// # Returns
+    /// Array of Window objects that can be operated on (e.g., win.close(), win.setTitle())
+    ///
+    /// # Throws
+    /// Error if called on server or if no engine is enabled
+    ///
+    /// # Example
+    /// ```javascript
+    /// const windows = await graphic.getWindows();
+    /// for (const win of windows) {
+    ///     console.log(`Window ${win.getId()}`);
+    /// }
+    /// ```
+    #[qjs(rename = "getWindows")]
+    pub fn get_windows<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<rquickjs::Array<'js>> {
+        let window_ids = self.graphic_proxy.get_window_ids();
+        let arr = rquickjs::Array::new(ctx.clone())?;
+        for (i, id) in window_ids.iter().enumerate() {
+            let window = rquickjs::Class::<WindowJS>::instance(
+                ctx.clone(),
+                WindowJS {
+                    id: *id,
+                    graphic_proxy: self.graphic_proxy.clone(),
+                },
+            )?;
+            arr.set(i, window)?;
+        }
+        Ok(arr)
+    }
+
     /// Create a new window
     ///
     /// # Arguments
@@ -1853,10 +1897,19 @@ impl WindowJS {
 
     /// Clear all widgets from this window
     ///
+    /// This also removes all event handlers registered for widgets in this window.
+    ///
     /// # Returns
     /// Promise that resolves when all widgets are destroyed
     #[qjs(rename = "clearWidgets")]
     pub async fn clear_widgets(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+        // First, remove all JavaScript handlers for widgets in this window
+        let widgets = self.graphic_proxy.get_window_widgets(self.id);
+        for widget in &widgets {
+            remove_all_widget_handlers(&ctx, widget.id)?;
+        }
+
+        // Then clear widgets from the graphic engine and proxy cache
         self.graphic_proxy
             .clear_window_widgets(self.id)
             .await
@@ -1996,8 +2049,18 @@ impl WidgetJS {
     }
 
     /// Destroy this widget and all its children
+    ///
+    /// This also removes all event handlers registered for this widget and its descendants.
     #[qjs(rename = "destroy")]
     pub async fn destroy(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
+        // First, remove all JavaScript handlers for this widget and its descendants
+        remove_all_widget_handlers(&ctx, self.id)?;
+        let descendants = self.graphic_proxy.get_widget_descendants(self.id);
+        for descendant_id in descendants {
+            remove_all_widget_handlers(&ctx, descendant_id)?;
+        }
+
+        // Then destroy the widget from the graphic engine and proxy cache
         self.graphic_proxy
             .destroy_widget(self.id)
             .await

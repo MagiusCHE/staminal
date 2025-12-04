@@ -1295,11 +1295,15 @@ async fn connect_to_game_server(
                     }
                 } => {
                     if let Some(key_request) = key_request {
+                        trace!("Terminal key received: key='{}' ctrl={} alt={} shift={}",
+                               key_request.key, key_request.ctrl, key_request.alt, key_request.shift);
+
                         // Dispatch to mods
                         let mut handled = false;
                         if let Some(ref runtime_manager) = runtime_manager_opt {
                             let response = runtime_manager.dispatch_terminal_key(&key_request);
                             handled = response.handled;
+                            trace!("Terminal key dispatch returned handled={}", handled);
                         }
 
                         // Check for Ctrl+C - default exit behavior
@@ -1627,7 +1631,7 @@ fn handle_send_event_request(
     args: &[String],
     runtime_manager_opt: &mut Option<ModRuntimeManager>,
 ) -> stam_mod_runtimes::api::CustomEventResponse {
-    debug!("Dispatching custom event '{}' with {} args", event_name, args.len());
+    trace!("Dispatching custom event '{}' with {} args", event_name, args.len());
 
     let runtime_manager = match runtime_manager_opt.as_mut() {
         Some(rm) => rm,
@@ -1643,7 +1647,7 @@ fn handle_send_event_request(
     // Dispatch to all handlers and get the aggregated response
     let response = runtime_manager.dispatch_custom_event(&request);
 
-    debug!("Custom event '{}' dispatched (handled={}, properties={})",
+    trace!("Custom event '{}' dispatched (handled={}, properties={})",
         event_name, response.handled, response.properties.len());
 
     response
