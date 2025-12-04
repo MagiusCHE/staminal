@@ -14,16 +14,16 @@ serde_json = "1.0"
 stam_log = { path = "../stam_log" }
 
 # Internationalization (for mod-specific locales)
-fluent = "0.16"
-fluent-bundle = "0.15"
+fluent = "0.17"
+fluent-bundle = "0.16"
 unic-langid = "0.9"
 
 # tar.gz file extraction
 tar = "0.4"
-flate2 = "1.0"
+flate2 = "1.1"
 
 # Terminal input handling (raw mode, key events)
-crossterm = "0.28"
+crossterm = "0.29"
 atty = "0.2"
 
 # Optional runtime-specific dependencies
