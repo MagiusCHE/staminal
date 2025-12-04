@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use tracing::{debug, error};
+use tracing::{debug, error, trace};
 
 /// Registry to track already-logged promise rejections to avoid duplicates
 /// QuickJS calls the rejection tracker multiple times for the same rejection
@@ -321,11 +321,11 @@ impl Loader for FilesystemLoader {
         // Try to read the file, with automatic .js extension fallback
         let (actual_path, content) = Self::read_with_js_fallback(path)?;
 
-        // debug!(
-        //     "FilesystemLoader: Successfully read {} bytes from '{}'",
-        //     content.len(),
-        //     actual_path
-        // );
+        trace!(
+            "FilesystemLoader: Successfully read {} bytes from '{}'",
+            content.len(),
+            actual_path
+        );
 
         // Compile and return the module using the actual path found
         Module::declare(ctx.clone(), actual_path.clone(), content).map_err(|e| {
@@ -538,10 +538,10 @@ impl JsRuntimeAdapter {
         let temp_dir = game_data_dir.join("tmp");
         temp_file_manager.set_temp_dir(temp_dir);
 
-        // debug!(
-        //     "setup_global_apis: game_data_dir={:?}, game_config_dir={:?}",
-        //     game_data_dir, game_config_dir
-        // );
+        trace!(
+            "setup_global_apis: game_data_dir={:?}, game_config_dir={:?}",
+            game_data_dir, game_config_dir
+        );
 
         context
             .with(|ctx| {
@@ -666,11 +666,11 @@ impl JsRuntimeAdapter {
         mod_path: &Path,
         mod_id: &str,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // debug!(
-        //     "Loading JavaScript module: {} from {}",
-        //     mod_id,
-        //     mod_path.display()
-        // );
+        trace!(
+            "Loading JavaScript module: {} from {}",
+            mod_id,
+            mod_path.display()
+        );
 
         // Get the mod directory (parent of the entry point file)
         let mod_dir = mod_path
@@ -1068,7 +1068,7 @@ impl JsRuntimeAdapter {
 
                     // If handler set handled=true, stop processing more handlers
                     if handled {
-                        // debug!("Handler in mod '{}' marked request as handled", handler.mod_id);
+                        trace!("Handler in mod '{}' marked request as handled", handler.mod_id);
                         break;
                     }
                 }
@@ -1210,7 +1210,7 @@ impl JsRuntimeAdapter {
 
                     // If handler set handled=true, stop processing more handlers
                     if handled {
-                        // debug!("Handler in mod '{}' marked TerminalKeyPressed as handled", handler.mod_id);
+                        trace!("Handler in mod '{}' marked TerminalKeyPressed as handled", handler.mod_id);
                         break;
                     }
                 }
@@ -1309,7 +1309,7 @@ impl JsRuntimeAdapter {
         event_name: &str,
         args: &[String],
     ) -> Result<(), Box<dyn std::error::Error>> {
-        // debug!("Calling event handler {} for event '{}'", handler_id, event_name);
+        trace!("Calling event handler {} for event '{}'", handler_id, event_name);
 
         // We need to find which mod context has this handler
         // For now, iterate through all loaded mods (could be optimized with a handler->mod map)
@@ -1516,7 +1516,7 @@ impl JsRuntimeAdapter {
                     // Note: For async handlers returning Promise, we set handled=true
                     // to indicate the handler was triggered (async completion via event loop)
                     if handled {
-                        // debug!("Handler in mod '{}' triggered for GraphicEngineReady", handler.mod_id);
+                        trace!("Handler in mod '{}' triggered for GraphicEngineReady", handler.mod_id);
                         break;
                     }
                 }
@@ -1597,7 +1597,7 @@ impl JsRuntimeAdapter {
                                     // If result is a Promise, DO NOT call promise.finish() here!
                                     // The Promise will execute asynchronously via the JS event loop.
                                     if result.is_promise() {
-                                        // debug!("Handler in mod '{}' returned Promise - will execute asynchronously via event loop", mod_id);
+                                        trace!("Handler in mod '{}' returned Promise - will execute asynchronously via event loop", mod_id);
                                         return Ok(true);
                                     }
 
@@ -1631,7 +1631,7 @@ impl JsRuntimeAdapter {
 
                     // If handler set handled=true, stop processing more handlers
                     if handled {
-                        // debug!("Handler in mod '{}' triggered for GraphicEngineWindowClosed", handler.mod_id);
+                        trace!("Handler in mod '{}' triggered for GraphicEngineWindowClosed", handler.mod_id);
                         break;
                     }
                 }

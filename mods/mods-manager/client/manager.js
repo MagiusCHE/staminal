@@ -238,21 +238,21 @@ export class Manager {
         const mods = system.getMods();
         //console.log(`mods:`, mods);
         // Filter mods that are not loaded yet
-        const toload = mods.filter(mod => !mod.loaded);
+        const toAnalize = mods.filter(mod => !mod.loaded);
 
         this.resetUiState();
 
         // Separate mods that need download vs just attach
-        const toDownload = toload.filter(mod => !mod.exists);
+        const toDownload = toAnalize.filter(mod => !mod.exists);
         for (const mod of toDownload) {
             this.#UIState.expected_total_bytes += mod.archive_bytes || 0;
         }
-        const toAttach = toload.filter(mod => mod.exists);
+        const toAttach = toAnalize.filter(mod => mod.exists);
 
         this.#UIState.to_download = toDownload.length;
         this.#UIState.to_attach = toAttach.length;
 
-        for (const mod of toload) {
+        for (const mod of toAnalize) {
             this.#UIState.mods[mod.id] = {
                 downloaded: false,
                 attached: false,
@@ -262,26 +262,15 @@ export class Manager {
             };
         }
 
-        // if (toDownload.length > 0) {
-        //     console.log(`${toDownload.length} mod(s) need to be downloaded:`, toDownload.map(m => m.id).join(", "));
-        // }
-        // if (toAttach.length > 0) {
-        //     console.log(`${toAttach.length} mod(s) need to be attached:`, toAttach.map(m => m.id).join(", "));
-        // }
-
         // We need 3 steps.
         // 1. Download missing mods (one by one)
         // 2. Install downloaded mods (one by one but soon after download)
         // 3. Attach existing mods (one by one)
 
-        // First, download all missing mods
-
-        // console.log("this.#UIState:", this.#UIState);
-
+        // Draw initial UI
         this.updateUI();
-
-        // this.#UIState.last_error_occurred = new Error("Test error"); // DEBUG
-        // return;
+        
+        // First, download all missing mods
 
         for (const mod of toDownload) {
             if (this.#UIState.cancelled) {
@@ -297,11 +286,6 @@ export class Manager {
             } catch (e) {
                 return;
             }
-
-            // console.error(`Failed to download mod "${mod.id}":`, e);
-            // if (!mod.exists) {
-            //     error_occurred = locale.getWithArgs("mod-download-failed", { mod_id: mod.id });
-            // }
         }
 
         //await wait(5000); // DEBUG
