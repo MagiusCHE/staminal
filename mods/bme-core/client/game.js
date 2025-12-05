@@ -33,7 +33,7 @@ export class Game {
     async loadPreliminaryResources() {
         console.warn("TODO: Loading preliminary resources...");
         console.warn("TODO: Loading preliminary assets from bme-assets-* mod...");
-        await Resource.preload("@bme-assets-01/assets/background/title.jpg", "title-screen-background");
+        await Resource.load("@bme-assets-01/assets/background/title.jpg", "title-screen-background");
     }
     async load() {
         console.warn("TODO: Loading remaining required resources to start the game...");
