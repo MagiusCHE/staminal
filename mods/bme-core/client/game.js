@@ -33,7 +33,18 @@ export class Game {
     async loadPreliminaryResources() {
         console.warn("TODO: Loading preliminary resources...");
         console.warn("TODO: Loading preliminary assets from bme-assets-* mod...");
-        await Resource.load("@bme-assets-01/assets/background/title.jpg", "title-screen-background");
+        Resource.load("@bme-assets-01/assets/background/title.jpg", "title-screen-background");
+
+        await this.waitForResources();
+    }
+    async waitForResources() {
+        console.log("Waiting for resources to load...", Resource.getLoadingProgress());
+        
+        while (!Resource.isLoadingCompleted()) {
+            await wait(100);
+        }
+
+        console.log("All resources loaded: ", Resource.getLoadingProgress());
     }
     async load() {
         console.warn("TODO: Loading remaining required resources to start the game...");

@@ -182,6 +182,11 @@ impl ResourceProxy {
     /// Gets the current loading state
     /// NOTE: Returns pre-calculated data, O(1)
     pub fn get_loading_progress(&self) -> LoadingState;
+
+    /// Checks if all requested resources have been loaded
+    /// NOTE: Returns pre-calculated data, O(1)
+    /// Returns true if requested == loaded (all done) or if requested == 0 (nothing pending)
+    pub fn loading_completed(&self) -> bool;
 }
 
 /// Loading state - updated incrementally, never calculated
@@ -272,6 +277,13 @@ declare const Resource: {
      * @returns Current loading state
      */
     getLoadingProgress(): LoadingProgress;
+
+    /**
+     * Checks if all requested resources have been loaded
+     * NOTE: Returns pre-calculated data, O(1)
+     * @returns true if all resources are loaded (or if no resources were requested)
+     */
+    isLoadingCompleted(): boolean;
 
     /**
      * Unloads a resource from cache
@@ -544,16 +556,15 @@ Resource.load("@assets/bg1.png", "bg1");
 Resource.load("@assets/bg2.png", "bg2");
 Resource.load("@assets/bg3.png", "bg3");
 
-// Progress polling
+// Progress polling with isLoadingCompleted()
 function checkProgress() {
-    const progress = Resource.getLoadingProgress();
-    console.log(`Loading: ${progress.loaded}/${progress.requested}`);
-
-    if (progress.loaded === progress.requested) {
+    if (Resource.isLoadingCompleted()) {
         // All loaded, proceed
         startGame();
     } else {
-        // Check again later
+        // Show progress and check again later
+        const progress = Resource.getLoadingProgress();
+        console.log(`Loading: ${progress.loaded}/${progress.requested}`);
         setTimeout(checkProgress, 100);
     }
 }
