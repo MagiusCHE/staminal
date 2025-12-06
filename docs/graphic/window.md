@@ -435,6 +435,80 @@ pub enum GraphicEngines {
 }
 ```
 
+## Per-Window Camera System
+
+The graphic engine implements a **lazy camera creation** system that automatically manages UI cameras for each window.
+
+### How It Works
+
+When widgets are created on a window, the engine needs a **Camera2D** that targets that specific window for the UI to be visible. The system handles this automatically:
+
+1. **First widget creation**: When the first widget is created for a window, the engine automatically creates a `Camera2D` that targets that window's entity
+2. **Subsequent widgets**: All additional widgets on the same window reuse the existing camera
+3. **Window close cleanup**: When a window is closed, its associated camera and root UI node are automatically despawned
+
+### Custom Camera Support
+
+If a mod needs a custom camera configuration (e.g., for special effects, multiple cameras, or 3D rendering), it can create its own camera **before** creating any widgets:
+
+```javascript
+// Create custom camera first (before any widgets)
+// This camera should target the specific window
+const customCamera = await window.createCamera({
+    // custom camera configuration
+});
+
+// Now create widgets - the default camera will NOT be created
+// because the window already has a camera
+const panel = await window.createWidget("panel", {
+    width: "100%",
+    height: "100%"
+});
+```
+
+**Important**: The automatic camera is only created if the window doesn't already have a camera when the first widget is created. If you need a custom camera, create it before creating any widgets.
+
+### Resource Cleanup
+
+When a window is closed (either via `window.close()` or by the user):
+
+1. **Camera**: The window's camera entity is despawned (if it was auto-created)
+2. **Root UI Node**: The root node that contains all widgets is despawned
+3. **All Widgets**: Since the root node is despawned, all child widgets are automatically despawned by Bevy's hierarchy system
+4. **Widget Registry**: All widget entries for that window are removed from the registry
+
+This ensures no orphaned entities remain in the ECS after a window is closed.
+
+### Multi-Window Considerations
+
+Each window has its own:
+- **Camera**: Targeting that specific window
+- **Root UI Node**: With `UiTargetCamera` pointing to the window's camera
+- **Widget Tree**: Hierarchy of UI widgets parented to the root
+
+This allows multiple windows to have independent UI layouts, cameras, and rendering pipelines.
+
+### Technical Details
+
+The camera system uses these Bevy components:
+
+```rust
+// Camera targeting a specific window
+Camera {
+    target: RenderTarget::Window(WindowRef::Entity(window_entity)),
+    ..default()
+}
+
+// Root UI node targeting the camera
+Node { width: Val::Percent(100.0), height: Val::Percent(100.0), .. }
+UiTargetCamera(camera_entity)
+```
+
+The `WidgetRegistry` tracks:
+- `window_cameras: HashMap<u64, Entity>` - Camera entity per window
+- `window_roots: HashMap<u64, Entity>` - Root UI node per window
+- `id_to_entity: HashMap<u64, Entity>` - Widget ID to entity mapping
+
 ## Best Practices
 
 1. **Always check engine availability** before graphic operations
@@ -444,3 +518,4 @@ pub enum GraphicEngines {
 5. **Handle window close events** for multi-window apps
 6. **Use percentage sizes** for responsive layouts
 7. **Preload large images** to avoid frame drops
+8. **Create custom cameras before widgets** if you need non-default camera configuration

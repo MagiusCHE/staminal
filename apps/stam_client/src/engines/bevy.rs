@@ -4,8 +4,9 @@
 //! Bevy runs on the main thread and communicates with the worker thread via channels.
 
 use bevy::prelude::*;
-use bevy::window::{PrimaryWindow, VideoModeSelection, WindowMode, WindowResolution};
+use bevy::window::{PrimaryWindow, VideoModeSelection, WindowMode, WindowResolution, WindowRef};
 use bevy::winit::{UpdateMode, WinitSettings, WINIT_WINDOWS};
+use bevy::camera::RenderTarget;
 use std::collections::HashMap;
 use std::sync::mpsc::Receiver;
 use std::sync::Mutex;
@@ -289,10 +290,6 @@ impl WindowRegistry {
     }
 }
 
-/// Resource to hold the default UI camera entity
-#[derive(Resource)]
-struct UiCamera(Entity);
-
 // ============================================================================
 // Widget System Resources and Components
 // ============================================================================
@@ -306,6 +303,8 @@ struct WidgetRegistry {
     entity_to_id: HashMap<Entity, u64>,
     /// Root UI nodes for each window (window_id -> root node entity)
     window_roots: HashMap<u64, Entity>,
+    /// Camera entities for each window (window_id -> camera entity)
+    window_cameras: HashMap<u64, Entity>,
 }
 
 impl WidgetRegistry {
@@ -337,6 +336,22 @@ impl WidgetRegistry {
 
     fn get_window_root(&self, window_id: u64) -> Option<Entity> {
         self.window_roots.get(&window_id).copied()
+    }
+
+    fn set_window_camera(&mut self, window_id: u64, camera_entity: Entity) {
+        self.window_cameras.insert(window_id, camera_entity);
+    }
+
+    fn get_window_camera(&self, window_id: u64) -> Option<Entity> {
+        self.window_cameras.get(&window_id).copied()
+    }
+
+    fn remove_window_camera(&mut self, window_id: u64) -> Option<Entity> {
+        self.window_cameras.remove(&window_id)
+    }
+
+    fn remove_window_root(&mut self, window_id: u64) -> Option<Entity> {
+        self.window_roots.remove(&window_id)
     }
 }
 
@@ -664,7 +679,6 @@ fn process_commands(
         Query<&mut TextColor>,
         Query<(&mut ButtonColors, Option<&Interaction>, Option<&Children>)>,
     ),
-    ui_camera: Option<Res<UiCamera>>,
 ) {
     let (cmd_rx, event_tx) = channels;
     let (registry, widget_registry, font_registry, resource_registry, pending_assets) = &mut registries;
@@ -727,6 +741,20 @@ fn process_commands(
                 tracing::debug!("Closing window {}", id);
 
                 if let Some(entity) = registry.unregister(id) {
+                    // Cleanup window-associated resources
+                    // Remove and despawn the camera for this window
+                    if let Some(camera_entity) = widget_registry.remove_window_camera(id) {
+                        commands.entity(camera_entity).despawn();
+                        tracing::debug!("Despawned camera {:?} for window {}", camera_entity, id);
+                    }
+
+                    // Remove and despawn the root UI node for this window (and all children)
+                    // Note: In Bevy 0.17+, despawn() automatically despawns descendants
+                    if let Some(root_entity) = widget_registry.remove_window_root(id) {
+                        commands.entity(root_entity).despawn();
+                        tracing::debug!("Despawned root UI node {:?} for window {}", root_entity, id);
+                    }
+
                     commands.entity(entity).despawn();
                     let _ = response_tx.send(Ok(()));
 
@@ -871,6 +899,34 @@ fn process_commands(
                 //     window_id
                 // );
 
+                // Ensure window has a camera for UI rendering
+                let camera_entity = if let Some(camera) = widget_registry.get_window_camera(window_id) {
+                    camera
+                } else {
+                    // Create a camera for this window
+                    // We need to find the window entity first to set TargetCamera
+                    let window_entity = registry.get_entity(window_id);
+
+                    let camera = if let Some(win_entity) = window_entity {
+                        // Create camera targeting this specific window
+                        commands.spawn((
+                            Camera2d,
+                            Camera {
+                                target: RenderTarget::Window(WindowRef::Entity(win_entity)),
+                                ..default()
+                            },
+                        )).id()
+                    } else {
+                        // Fallback: create default camera (shouldn't normally happen)
+                        tracing::warn!("Window {} entity not found, creating default camera", window_id);
+                        commands.spawn(Camera2d).id()
+                    };
+
+                    widget_registry.set_window_camera(window_id, camera);
+                    tracing::debug!("Created camera {:?} for window {}", camera, window_id);
+                    camera
+                };
+
                 // Ensure window has a root UI node
                 let root_entity = if let Some(root) = widget_registry.get_window_root(window_id) {
                     root
@@ -888,14 +944,12 @@ fn process_commands(
                         },
                     ));
 
-                    // Associate root UI node with the camera
-                    if let Some(ref camera) = ui_camera {
-                        root_cmd.insert(UiTargetCamera(camera.0));
-                        tracing::debug!(
-                            "Root UI node associated with camera {:?}",
-                            camera.0
-                        );
-                    }
+                    // Associate root UI node with the window's camera
+                    root_cmd.insert(UiTargetCamera(camera_entity));
+                    tracing::debug!(
+                        "Root UI node associated with camera {:?}",
+                        camera_entity
+                    );
 
                     let root = root_cmd.id();
                     widget_registry.set_window_root(window_id, root);
@@ -2084,25 +2138,15 @@ const PRIMARY_WINDOW_ID: u64 = 1;
 /// This system finds that window and registers it with ID 1 (PRIMARY_WINDOW_ID)
 /// so that JS code can modify it via `mainWindow` from `getEngineInfo()`.
 ///
-/// Also spawns a default 2D camera for UI rendering. Bevy UI requires a camera
-/// to render properly. This camera will be used until a mod decides to replace it.
+/// Note: Camera creation is now lazy - cameras are created per-window when the first
+/// widget is created for that window (in CreateWidget handler).
 fn register_primary_window(
-    mut commands: Commands,
     mut registry: ResMut<WindowRegistry>,
     primary_window_query: Query<Entity, With<PrimaryWindow>>,
 ) {
     if let Ok(entity) = primary_window_query.single() {
         registry.register(PRIMARY_WINDOW_ID, entity);
         tracing::debug!("Registered primary window as ID {}", PRIMARY_WINDOW_ID);
-
-        // Spawn a default 2D camera for UI rendering
-        // Bevy UI requires at least one camera in the scene
-        let camera_entity = commands.spawn(Camera2d).id();
-        commands.insert_resource(UiCamera(camera_entity));
-        tracing::debug!(
-            "Spawned default 2D camera {:?} for UI rendering",
-            camera_entity
-        );
     } else {
         tracing::warn!("No primary window found to register");
     }
