@@ -596,7 +596,9 @@ impl JsRuntimeAdapter {
 
                 // Register graphic API (graphic.enableEngine(), etc.) - client-side only
                 if let Some(proxy) = graphic_proxy.clone() {
-                    bindings::setup_graphic_api(ctx.clone(), proxy)?;
+                    bindings::setup_graphic_api(ctx.clone(), proxy.clone())?;
+                    // Register World API for ECS operations
+                    bindings::setup_world_api(ctx.clone(), proxy)?;
                 }
 
                 // Register resource API (Resource.load(), Resource.unload(), etc.) - client-side only
@@ -1969,6 +1971,94 @@ impl JsRuntimeAdapter {
 
         response
     }
+
+    /// Dispatch an entity event callback (async implementation)
+    ///
+    /// This looks up the callback in __ENTITY_EVENT_CALLBACKS__[entityId][eventType]
+    /// and invokes it with the event data.
+    async fn dispatch_entity_event_callback_async(
+        &self,
+        entity_id: u64,
+        event_type: &str,
+        event_data: serde_json::Value,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        // Entity callbacks are registered globally, not per-mod
+        // We need to iterate through all contexts to find the one with the callback
+        for loaded_mod in self.loaded_mods.values() {
+            let event_type_owned = event_type.to_string();
+            let event_data_clone = event_data.clone();
+
+            let result: Result<bool, String> = loaded_mod
+                .context
+                .with(|ctx| {
+                    // Get the callback registry
+                    let globals = ctx.globals();
+                    let registry: Option<rquickjs::Object> = globals.get("__ENTITY_EVENT_CALLBACKS__").ok();
+
+                    let registry = match registry {
+                        Some(r) => r,
+                        None => return Ok(false), // No callbacks registered in this context
+                    };
+
+                    // Get callbacks for this entity
+                    let entity_callbacks: Option<rquickjs::Object> = registry.get(&entity_id.to_string()).ok();
+                    let entity_callbacks = match entity_callbacks {
+                        Some(c) => c,
+                        None => return Ok(false), // No callbacks for this entity
+                    };
+
+                    // Get callback for this event type
+                    let callback: Option<rquickjs::Function> = entity_callbacks.get(&event_type_owned).ok();
+                    let callback = match callback {
+                        Some(c) => c,
+                        None => return Ok(false), // No callback for this event type
+                    };
+
+                    // Build the event data object to pass to the callback
+                    let event_obj = rquickjs::Object::new(ctx.clone())
+                        .map_err(|e| format!("Failed to create event object: {:?}", e))?;
+
+                    // Set x and y from event_data if present
+                    if let Some(x) = event_data_clone.get("x").and_then(|v| v.as_f64()) {
+                        event_obj.set("x", x as f32).ok();
+                    }
+                    if let Some(y) = event_data_clone.get("y").and_then(|v| v.as_f64()) {
+                        event_obj.set("y", y as f32).ok();
+                    }
+                    event_obj.set("entityId", entity_id).ok();
+                    event_obj.set("eventType", event_type_owned.as_str()).ok();
+
+                    // Call the callback with the event data
+                    match callback.call::<_, ()>((event_obj,)) {
+                        Ok(_) => {
+                            trace!(
+                                "Entity event callback invoked: entity_id={}, event_type={}",
+                                entity_id,
+                                event_type_owned
+                            );
+                            Ok(true)
+                        }
+                        Err(e) => {
+                            error!(
+                                "Entity event callback failed: entity_id={}, event_type={}, error={:?}",
+                                entity_id, event_type_owned, e
+                            );
+                            Err(format!("Callback execution failed: {:?}", e))
+                        }
+                    }
+                })
+                .await;
+
+            match result {
+                Ok(true) => return Ok(true), // Callback found and invoked
+                Ok(false) => continue, // Not in this context, try next
+                Err(e) => return Err(e.into()), // Error during invocation
+            }
+        }
+
+        // No callback found in any context
+        Ok(false)
+    }
 }
 
 impl Drop for JsRuntimeAdapter {
@@ -2079,6 +2169,18 @@ impl RuntimeAdapter for JsRuntimeAdapter {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
                 .block_on(self.dispatch_custom_event(request))
+        })
+    }
+
+    fn dispatch_entity_event_callback(
+        &self,
+        entity_id: u64,
+        event_type: &str,
+        event_data: serde_json::Value,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.dispatch_entity_event_callback_async(entity_id, event_type, event_data))
         })
     }
 }

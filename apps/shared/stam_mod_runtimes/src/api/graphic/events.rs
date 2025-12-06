@@ -244,6 +244,44 @@ pub enum GraphicEvent {
         /// Error message
         error: String,
     },
+
+    // ========== ECS Entity Events ==========
+    /// Entity interaction state changed
+    ///
+    /// This event is sent when an ECS entity with Interaction component changes state.
+    /// Only entities with both Button and Interaction components trigger this event.
+    EntityInteractionChanged {
+        /// The entity script ID
+        entity_id: u64,
+        /// New interaction state: "none", "hovered", "pressed"
+        interaction: String,
+        /// Cursor X position (if available)
+        x: f32,
+        /// Cursor Y position (if available)
+        y: f32,
+    },
+
+    /// Entity event callback triggered (direct dispatch)
+    ///
+    /// This event is sent when an entity with a registered event callback is triggered.
+    /// Unlike EntityInteractionChanged, this event triggers a direct callback execution
+    /// without going through the global event system.
+    ///
+    /// The event_type determines which callback to invoke:
+    /// - "click": on_click callback (triggered on "pressed" interaction)
+    /// - "hover": on_hover callback (triggered on hover state change)
+    /// - "enter": on_enter callback (triggered when cursor enters)
+    /// - "leave": on_leave callback (triggered when cursor leaves)
+    EntityEventCallback {
+        /// The entity script ID
+        entity_id: u64,
+        /// The event type (e.g., "click", "hover", "enter", "leave")
+        event_type: String,
+        /// Cursor X position
+        x: f32,
+        /// Cursor Y position
+        y: f32,
+    },
 }
 
 impl GraphicEvent {
@@ -277,6 +315,9 @@ impl GraphicEvent {
             // Resource events
             Self::ResourceLoaded { .. } => "graphic:resource:loaded",
             Self::ResourceFailed { .. } => "graphic:resource:failed",
+            // Entity events
+            Self::EntityInteractionChanged { .. } => "graphic:entity:interactionChanged",
+            Self::EntityEventCallback { .. } => "graphic:entity:eventCallback",
         }
     }
 
@@ -473,6 +514,23 @@ impl GraphicEvent {
                     format!("\"{}\"", alias),
                     asset_id.to_string(),
                     format!("\"{}\"", error.replace('"', "\\\"")),
+                ]
+            }
+            // Entity events
+            Self::EntityInteractionChanged { entity_id, interaction, x, y } => {
+                vec![
+                    entity_id.to_string(),
+                    format!("\"{}\"", interaction),
+                    x.to_string(),
+                    y.to_string(),
+                ]
+            }
+            Self::EntityEventCallback { entity_id, event_type, x, y } => {
+                vec![
+                    entity_id.to_string(),
+                    format!("\"{}\"", event_type),
+                    x.to_string(),
+                    y.to_string(),
                 ]
             }
         }

@@ -1905,6 +1905,51 @@ fn handle_graphic_event(
                 warn!("ResourceFailed event received but no ResourceProxy available");
             }
         }
+        // ECS Entity events
+        GraphicEvent::EntityInteractionChanged { entity_id, interaction, x, y } => {
+            trace!("Entity {} interaction changed to '{}' at ({}, {})", entity_id, interaction, x, y);
+
+            // Dispatch to mods via the event system
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                // Use the existing event dispatch mechanism
+                let event_name = "graphic:entity:interactionChanged";
+                let args_json = format!(
+                    r#"{{"entityId":{},"interaction":"{}","x":{},"y":{}}}"#,
+                    entity_id, interaction, x, y
+                );
+                let request = stam_mod_runtimes::api::CustomEventRequest::new(
+                    event_name,
+                    vec![args_json],
+                );
+                runtime_manager.dispatch_custom_event(&request);
+            }
+        }
+        GraphicEvent::EntityEventCallback { entity_id, event_type, x, y } => {
+            trace!("Entity {} event '{}' callback triggered at ({}, {})", entity_id, event_type, x, y);
+
+            // Dispatch direct callback to the mod that registered it
+            // This bypasses the global event system for efficient, isolated dispatch
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                // Build event data
+                let event_data = serde_json::json!({
+                    "x": x,
+                    "y": y
+                });
+
+                // Invoke the callback directly in the runtime
+                match runtime_manager.dispatch_entity_event_callback(entity_id, &event_type, event_data) {
+                    Ok(true) => {
+                        trace!("Entity {} event '{}' callback invoked successfully", entity_id, event_type);
+                    }
+                    Ok(false) => {
+                        warn!("Entity {} event '{}' callback not found", entity_id, event_type);
+                    }
+                    Err(e) => {
+                        error!("Entity {} event '{}' callback failed: {}", entity_id, event_type, e);
+                    }
+                }
+            }
+        }
     }
 }
 

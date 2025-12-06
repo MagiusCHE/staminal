@@ -3,7 +3,8 @@
 # Messaggi caricamento mod
 mods-downloading-title = Download mod [{$done}/{$todo}]
 mods-installing-title = Installazione mod [{$done}/{$todo}]
-mods-ensuring-title = Verifica mod
+mods-attaching-title = Aggancio mods [{$done}/{$todo}]
+mods-ensuring-title = Verifica mod...
 mods-downloading-progress = {$bps} ({$received} / {$total})
 mods-installing-progress = Installazione mod...
 mods-attaching-progress = Attivazione mod...

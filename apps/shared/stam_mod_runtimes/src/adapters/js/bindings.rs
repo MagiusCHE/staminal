@@ -3126,6 +3126,12 @@ pub fn setup_graphic_api(ctx: Ctx, graphic_proxy: Arc<GraphicProxy>) -> Result<(
     align.set("Baseline", 4u32)?;
     ctx.globals().set("AlignItems", align)?;
 
+    // Create PositionType enum
+    let pos_type = Object::new(ctx.clone())?;
+    pos_type.set("Relative", 0u32)?;
+    pos_type.set("Absolute", 1u32)?;
+    ctx.globals().set("PositionType", pos_type)?;
+
     // Create ImageScaleModes enum
     // Maps to ImageScaleMode variants:
     // - Auto (0): Natural dimensions
@@ -3552,6 +3558,908 @@ pub fn setup_resource_api(
     resource_types.set("Text", ResourceType::Text.as_str())?;
     resource_types.set("Binary", ResourceType::Binary.as_str())?;
     ctx.globals().set("ResourceTypes", resource_types)?;
+
+    Ok(())
+}
+
+// ============================================================================
+// ECS World API Bindings
+// ============================================================================
+
+use crate::api::graphic::ecs::{
+    ComponentSchema, DeclaredSystem, FieldType, QueryOptions, QueryResult, SystemBehavior,
+};
+
+/// JavaScript World API class
+///
+/// Exposed as the `World` global object in JavaScript.
+/// Provides ECS (Entity-Component-System) functionality for creating entities,
+/// managing components, querying entities, and declaring systems.
+///
+/// This is a client-only API. On the server, all methods will throw an error.
+#[rquickjs::class]
+#[derive(Clone, Trace, JsLifetime)]
+pub struct WorldJS {
+    #[qjs(skip_trace)]
+    graphic_proxy: Arc<GraphicProxy>,
+}
+
+/// JavaScript Entity handle class
+///
+/// Returned by World.spawn(), provides methods to manipulate a single entity.
+#[rquickjs::class]
+#[derive(Clone, Trace, JsLifetime)]
+pub struct EntityJS {
+    /// Entity ID
+    id: u64,
+    #[qjs(skip_trace)]
+    graphic_proxy: Arc<GraphicProxy>,
+}
+
+#[rquickjs::methods]
+impl WorldJS {
+    /// Spawn a new entity with optional initial components
+    ///
+    /// # Arguments
+    /// * `components` - Optional object with component_name: component_data pairs
+    /// * `parent` - Optional parent entity ID or Entity handle. If provided, the new entity
+    ///              will be a child of this entity. For UI entities, this determines layout hierarchy.
+    ///
+    /// # Returns
+    /// Promise that resolves to an Entity handle
+    ///
+    /// # Throws
+    /// Error if called on server or if graphic engine is not enabled
+    ///
+    /// # Example
+    /// ```javascript
+    /// // Spawn with no parent (will be parented to window root if UI entity)
+    /// const entity = await World.spawn({
+    ///     Position: { x: 0, y: 0 },
+    ///     Velocity: { x: 1, y: 0 }
+    /// });
+    ///
+    /// // Spawn as child of another entity
+    /// const child = await World.spawn({
+    ///     Node: { width: "100px", height: "50px" }
+    /// }, parent.id);
+    /// ```
+    #[qjs(rename = "spawn")]
+    pub async fn spawn<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        components: Opt<Object<'js>>,
+        parent: Opt<u64>,
+    ) -> rquickjs::Result<rquickjs::Class<'js, EntityJS>> {
+        // Get mod ID from global __MOD_ID__ variable for ownership tracking
+        let mod_id: String = ctx
+            .globals()
+            .get("__MOD_ID__")
+            .unwrap_or_else(|_| "unknown".to_string());
+
+        // Collect event callbacks (on_click, on_hover, etc.) before serializing
+        // These are stored in __ENTITY_EVENT_CALLBACKS__[entityId][eventType] = callback
+        let mut event_callbacks: Vec<(String, Function<'js>)> = Vec::new();
+
+        // Convert JavaScript object to HashMap
+        let mut component_map = std::collections::HashMap::new();
+        if let Some(ref obj) = components.0 {
+            for result in obj.props::<String, Value>() {
+                if let Ok((key, value)) = result {
+                    // Check if this is a component with event callbacks (e.g., Button with on_click)
+                    if let Some(comp_obj) = value.as_object() {
+                        // Clone the component object to remove callbacks before serializing
+                        let filtered_obj = Object::new(ctx.clone())?;
+                        for prop_result in comp_obj.props::<String, Value>() {
+                            if let Ok((prop_key, prop_value)) = prop_result {
+                                // Check if this is an event callback (starts with "on_")
+                                if prop_key.starts_with("on_") {
+                                    // Extract the event type (e.g., "on_click" -> "click")
+                                    let event_type = prop_key.strip_prefix("on_").unwrap().to_string();
+                                    // Check if the value is a function
+                                    if let Some(func) = prop_value.as_function() {
+                                        event_callbacks.push((event_type, func.clone()));
+                                    }
+                                    // Don't add this property to the filtered object (not serializable)
+                                } else {
+                                    // Regular property, keep it
+                                    filtered_obj.set(&prop_key, prop_value)?;
+                                }
+                            }
+                        }
+                        // Serialize the filtered object (without callbacks)
+                        if let Ok(json_str) = ctx.json_stringify(filtered_obj.clone().into_value()) {
+                            if let Some(s) = json_str {
+                                if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&s.to_string()?) {
+                                    component_map.insert(key, json_value);
+                                }
+                            }
+                        }
+                    } else {
+                        // Not an object, serialize directly
+                        if let Ok(json_str) = ctx.json_stringify(value.clone()) {
+                            if let Some(s) = json_str {
+                                if let Ok(json_value) = serde_json::from_str::<serde_json::Value>(&s.to_string()?) {
+                                    component_map.insert(key, json_value);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Spawn the entity with optional parent
+        let entity_id = self
+            .graphic_proxy
+            .spawn_entity(component_map, mod_id, parent.0)
+            .await
+            .map_err(|e| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), &e)
+                        .unwrap()
+                        .into(),
+                )
+            })?;
+
+        // Register event callbacks if any were found
+        if !event_callbacks.is_empty() {
+            // Get or create the global callback registry
+            let globals = ctx.globals();
+            let registry: Object = match globals.get("__ENTITY_EVENT_CALLBACKS__") {
+                Ok(r) => r,
+                Err(_) => {
+                    let new_registry = Object::new(ctx.clone())?;
+                    globals.set("__ENTITY_EVENT_CALLBACKS__", new_registry.clone())?;
+                    new_registry
+                }
+            };
+
+            // Create entity's callback map
+            let entity_callbacks = Object::new(ctx.clone())?;
+
+            for (event_type, callback) in event_callbacks {
+                // Store callback in JS registry
+                entity_callbacks.set(&event_type, callback)?;
+
+                // Register with graphic engine for direct dispatch
+                self.graphic_proxy
+                    .register_entity_event_callback(entity_id, &event_type)
+                    .await
+                    .map_err(|e| {
+                        ctx.throw(
+                            rquickjs::String::from_str(ctx.clone(), &e)
+                                .unwrap()
+                                .into(),
+                        )
+                    })?;
+            }
+
+            // Store under entity ID
+            registry.set(entity_id.to_string(), entity_callbacks)?;
+        }
+
+        // Create and return an Entity handle
+        rquickjs::Class::<EntityJS>::instance(
+            ctx,
+            EntityJS {
+                id: entity_id,
+                graphic_proxy: self.graphic_proxy.clone(),
+            },
+        )
+    }
+
+    /// Despawn an entity by ID
+    ///
+    /// # Arguments
+    /// * `entity_id` - The entity ID to despawn (can be number or Entity handle)
+    ///
+    /// # Returns
+    /// Promise that resolves when entity is despawned
+    #[qjs(rename = "despawn")]
+    pub async fn despawn<'js>(&self, ctx: Ctx<'js>, entity_id: u64) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .despawn_entity(entity_id)
+            .await
+            .map_err(|e| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), &e)
+                        .unwrap()
+                        .into(),
+                )
+            })
+    }
+
+    /// Query entities matching criteria
+    ///
+    /// # Arguments
+    /// * `options` - Query options object:
+    ///   - withComponents: array of component names that entities must have
+    ///   - withoutComponents: array of component names that entities must NOT have
+    ///   - limit: optional maximum number of results
+    ///
+    /// # Returns
+    /// Promise that resolves to array of query results
+    ///
+    /// # Example
+    /// ```javascript
+    /// const entities = await World.query({
+    ///     withComponents: ["Position", "Velocity"],
+    ///     withoutComponents: ["Frozen"],
+    ///     limit: 100
+    /// });
+    /// for (const entity of entities) {
+    ///     console.log(entity.id, entity.components.Position);
+    /// }
+    /// ```
+    #[qjs(rename = "query")]
+    pub async fn query<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        options: Object<'js>,
+    ) -> rquickjs::Result<Array<'js>> {
+        // Parse query options
+        let with_components: Vec<String> = options
+            .get::<_, Array>("withComponents")
+            .ok()
+            .map(|arr| {
+                arr.iter::<String>()
+                    .filter_map(|r| r.ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let without_components: Vec<String> = options
+            .get::<_, Array>("withoutComponents")
+            .ok()
+            .map(|arr| {
+                arr.iter::<String>()
+                    .filter_map(|r| r.ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let limit: Option<usize> = options.get("limit").ok();
+
+        let query_options = QueryOptions {
+            with_components,
+            without_components,
+            limit,
+        };
+
+        // Execute query
+        let results = self
+            .graphic_proxy
+            .query_entities(query_options)
+            .await
+            .map_err(|e| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), &e)
+                        .unwrap()
+                        .into(),
+                )
+            })?;
+
+        // Convert results to JavaScript array
+        let result_array = Array::new(ctx.clone())?;
+        for (i, result) in results.iter().enumerate() {
+            let obj = Object::new(ctx.clone())?;
+            obj.set("id", result.entity_id)?;
+
+            // Convert components to JS object
+            let components_obj = Object::new(ctx.clone())?;
+            for (name, data) in &result.components {
+                let json_str = serde_json::to_string(data).unwrap_or_default();
+                if let Ok(parsed) = ctx.json_parse(json_str) {
+                    components_obj.set(name.as_str(), parsed)?;
+                }
+            }
+            obj.set("components", components_obj)?;
+
+            result_array.set(i, obj)?;
+        }
+
+        Ok(result_array)
+    }
+
+    /// Register a custom component type with optional schema
+    ///
+    /// # Arguments
+    /// * `name` - Component type name
+    /// * `schema` - Optional schema object for validation
+    ///
+    /// # Example
+    /// ```javascript
+    /// await World.registerComponent("Player", {
+    ///     health: "number",
+    ///     name: "string",
+    ///     position: "vec2"
+    /// });
+    /// ```
+    #[qjs(rename = "registerComponent")]
+    pub async fn register_component<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        name: String,
+        schema: Opt<Object<'js>>,
+    ) -> rquickjs::Result<()> {
+        let mut component_schema = ComponentSchema::new(name);
+
+        // Parse schema fields if provided
+        if let Some(schema_obj) = schema.0 {
+            for result in schema_obj.props::<String, Value>() {
+                if let Ok((field_name, type_value)) = result {
+                    if let Some(type_str) = type_value.as_string() {
+                        let type_string = type_str.to_string()?;
+                        let field_type = match type_string.as_str() {
+                            "number" => FieldType::Number,
+                            "string" => FieldType::String,
+                            "bool" | "boolean" => FieldType::Bool,
+                            "vec2" => FieldType::Vec2,
+                            "vec3" => FieldType::Vec3,
+                            "color" => FieldType::Color,
+                            "entity" => FieldType::Entity,
+                            "any" => FieldType::Any,
+                            _ => FieldType::Any,
+                        };
+                        component_schema.fields.insert(field_name, field_type);
+                    }
+                }
+            }
+        }
+
+        self.graphic_proxy
+            .register_component(component_schema)
+            .await
+            .map_err(|e| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), &e)
+                        .unwrap()
+                        .into(),
+                )
+            })
+    }
+
+    /// Declare a system with a predefined behavior or formulas
+    ///
+    /// # Arguments
+    /// * `config` - System configuration object:
+    ///   - name: unique system name
+    ///   - query: { withComponents: [...], withoutComponents: [...] }
+    ///   - behavior: SystemBehaviors enum value (optional)
+    ///   - config: behavior configuration (optional)
+    ///   - formulas: array of formula strings (optional)
+    ///   - order: execution order (default 0)
+    ///   - enabled: whether system is active (default true)
+    ///
+    /// # Example
+    /// ```javascript
+    /// await World.declareSystem({
+    ///     name: "gravity",
+    ///     query: { withComponents: ["Velocity"] },
+    ///     behavior: SystemBehaviors.ApplyGravity,
+    ///     config: { strength: 9.8 },
+    ///     order: 0,
+    ///     enabled: true
+    /// });
+    /// ```
+    #[qjs(rename = "declareSystem")]
+    pub async fn declare_system<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        config: Object<'js>,
+    ) -> rquickjs::Result<()> {
+        // Parse system configuration
+        let name: String = config.get("name")?;
+
+        // Parse query options
+        let query_obj: Object = config.get("query")?;
+        let with_components: Vec<String> = query_obj
+            .get::<_, Array>("withComponents")
+            .ok()
+            .map(|arr| {
+                arr.iter::<String>()
+                    .filter_map(|r| r.ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let without_components: Vec<String> = query_obj
+            .get::<_, Array>("withoutComponents")
+            .ok()
+            .map(|arr| {
+                arr.iter::<String>()
+                    .filter_map(|r| r.ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let query = QueryOptions {
+            with_components,
+            without_components,
+            limit: None,
+        };
+
+        // Parse behavior (optional)
+        let behavior: Option<SystemBehavior> = config
+            .get::<_, u32>("behavior")
+            .ok()
+            .map(|b| match b {
+                0 => SystemBehavior::ApplyVelocity,
+                1 => SystemBehavior::ApplyGravity,
+                2 => SystemBehavior::ApplyFriction,
+                3 => SystemBehavior::RegenerateOverTime,
+                4 => SystemBehavior::DecayOverTime,
+                5 => SystemBehavior::FollowEntity,
+                6 => SystemBehavior::OrbitAround,
+                7 => SystemBehavior::BounceOnBounds,
+                8 => SystemBehavior::DespawnWhenZero,
+                9 => SystemBehavior::AnimateSprite,
+                _ => SystemBehavior::ApplyVelocity,
+            });
+
+        // Parse behavior config (optional)
+        let behavior_config: Option<serde_json::Value> = config
+            .get::<_, Value>("config")
+            .ok()
+            .and_then(|v| {
+                ctx.json_stringify(v)
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.to_string().ok())
+                    .and_then(|s| serde_json::from_str(&s).ok())
+            });
+
+        // Parse formulas (optional)
+        let formulas: Option<Vec<String>> = config
+            .get::<_, Array>("formulas")
+            .ok()
+            .map(|arr| {
+                arr.iter::<String>()
+                    .filter_map(|r| r.ok())
+                    .collect()
+            });
+
+        let order: i32 = config.get("order").unwrap_or(0);
+        let enabled: bool = config.get("enabled").unwrap_or(true);
+
+        let system = DeclaredSystem {
+            name,
+            query,
+            behavior,
+            config: behavior_config,
+            formulas,
+            enabled,
+            order,
+        };
+
+        self.graphic_proxy
+            .declare_system(system)
+            .await
+            .map_err(|e| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), &e)
+                        .unwrap()
+                        .into(),
+                )
+            })
+    }
+
+    /// Enable or disable a declared system
+    #[qjs(rename = "setSystemEnabled")]
+    pub async fn set_system_enabled<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        name: String,
+        enabled: bool,
+    ) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .set_system_enabled(name, enabled)
+            .await
+            .map_err(|e| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), &e)
+                        .unwrap()
+                        .into(),
+                )
+            })
+    }
+
+    /// Remove a declared system
+    #[qjs(rename = "removeSystem")]
+    pub async fn remove_system<'js>(&self, ctx: Ctx<'js>, name: String) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .remove_system(name)
+            .await
+            .map_err(|e| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), &e)
+                        .unwrap()
+                        .into(),
+                )
+            })
+    }
+
+    /// Register an event callback for an entity
+    ///
+    /// When registered, the engine will send direct callback events for this
+    /// entity instead of generic interaction events.
+    /// This enables efficient direct callback dispatch.
+    ///
+    /// # Arguments
+    /// * `entity_id` - The entity ID to register a callback for
+    /// * `event_type` - The event type (e.g., "click", "hover", "enter", "leave")
+    ///
+    /// # Example
+    /// ```javascript
+    /// // After spawning, register for direct click callbacks
+    /// await World.registerEntityEventCallback(entity.id, "click");
+    /// ```
+    #[qjs(rename = "registerEntityEventCallback")]
+    pub async fn register_entity_event_callback<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        entity_id: u64,
+        event_type: String,
+    ) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .register_entity_event_callback(entity_id, &event_type)
+            .await
+            .map_err(|e| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), &e)
+                        .unwrap()
+                        .into(),
+                )
+            })
+    }
+
+    /// Unregister an event callback for an entity
+    ///
+    /// After unregistering, the engine will revert to sending generic
+    /// interaction events for this entity.
+    ///
+    /// # Arguments
+    /// * `entity_id` - The entity ID to unregister
+    /// * `event_type` - The event type to unregister
+    #[qjs(rename = "unregisterEntityEventCallback")]
+    pub async fn unregister_entity_event_callback<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        entity_id: u64,
+        event_type: String,
+    ) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .unregister_entity_event_callback(entity_id, &event_type)
+            .await
+            .map_err(|e| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), &e)
+                        .unwrap()
+                        .into(),
+                )
+            })
+    }
+}
+
+#[rquickjs::methods]
+impl EntityJS {
+    /// Get the entity ID
+    #[qjs(get, rename = "id")]
+    pub fn get_id(&self) -> u64 {
+        self.id
+    }
+
+    /// Insert or update component(s) on this entity
+    ///
+    /// Supports two call signatures:
+    /// - `entity.insert("ComponentName", data)` - Insert a single component
+    /// - `entity.insert({ ComponentName: data, OtherComponent: data2 })` - Batch insert multiple components
+    ///
+    /// # Arguments
+    /// * `name_or_components` - Either a component name (string) or an object with component names as keys
+    /// * `data` - Component data (only when first argument is a string)
+    ///
+    /// # Example
+    /// ```javascript
+    /// // Single component
+    /// await entity.insert("Health", { current: 100, max: 100 });
+    ///
+    /// // Batch insert
+    /// await entity.insert({
+    ///     Node: { width: 200, height: 50 },
+    ///     BackgroundColor: "#ff0000"
+    /// });
+    /// ```
+    #[qjs(rename = "insert")]
+    pub async fn insert<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        name_or_components: Value<'js>,
+        data: Opt<Value<'js>>,
+    ) -> rquickjs::Result<()> {
+        // Check if first argument is a string (single component) or object (batch)
+        if let Some(component_name) = name_or_components.as_string() {
+            // Single component mode: insert("ComponentName", data)
+            let component_name = component_name.to_string()?;
+            let data_value = data.0.ok_or_else(|| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), "insert() with component name requires a second argument for data")
+                        .unwrap()
+                        .into(),
+                )
+            })?;
+
+            let json_value = ctx
+                .json_stringify(data_value)
+                .ok()
+                .flatten()
+                .and_then(|s| s.to_string().ok())
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(serde_json::Value::Null);
+
+            self.graphic_proxy
+                .insert_component(self.id, component_name, json_value)
+                .await
+                .map_err(|e| {
+                    ctx.throw(
+                        rquickjs::String::from_str(ctx.clone(), &e)
+                            .unwrap()
+                            .into(),
+                    )
+                })
+        } else if let Some(obj) = name_or_components.as_object() {
+            // Batch mode: insert({ ComponentName: data, ... })
+            for result in obj.props::<String, Value>() {
+                if let Ok((component_name, component_data)) = result {
+                    let json_value = ctx
+                        .json_stringify(component_data)
+                        .ok()
+                        .flatten()
+                        .and_then(|s| s.to_string().ok())
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or(serde_json::Value::Null);
+
+                    self.graphic_proxy
+                        .insert_component(self.id, component_name, json_value)
+                        .await
+                        .map_err(|e| {
+                            ctx.throw(
+                                rquickjs::String::from_str(ctx.clone(), &e)
+                                    .unwrap()
+                                    .into(),
+                            )
+                        })?;
+                }
+            }
+            Ok(())
+        } else {
+            Err(ctx.throw(
+                rquickjs::String::from_str(ctx.clone(), "insert() expects either a string (component name) or an object (batch components)")
+                    .unwrap()
+                    .into(),
+            ))
+        }
+    }
+
+    /// Update specific fields of component(s) on this entity (merge with existing)
+    ///
+    /// Unlike `insert` which replaces the entire component, `update` merges
+    /// the provided fields with the existing component data.
+    ///
+    /// Supports two call signatures:
+    /// - `entity.update("ComponentName", data)` - Update a single component
+    /// - `entity.update({ ComponentName: data, OtherComponent: data2 })` - Batch update multiple components
+    ///
+    /// # Arguments
+    /// * `name_or_components` - Either a component name (string) or an object with component names as keys
+    /// * `data` - Partial component data to merge (only when first argument is a string)
+    ///
+    /// # Example
+    /// ```javascript
+    /// // Single component - only update width, keep other Node properties
+    /// await entity.update("Node", { width: "50%" });
+    ///
+    /// // Batch update
+    /// await entity.update({
+    ///     Node: { width: "50%" },
+    ///     Text: { value: "New text" }
+    /// });
+    /// ```
+    #[qjs(rename = "update")]
+    pub async fn update<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        name_or_components: Value<'js>,
+        data: Opt<Value<'js>>,
+    ) -> rquickjs::Result<()> {
+        // Check if first argument is a string (single component) or object (batch)
+        if let Some(component_name) = name_or_components.as_string() {
+            // Single component mode: update("ComponentName", data)
+            let component_name = component_name.to_string()?;
+            let data_value = data.0.ok_or_else(|| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), "update() with component name requires a second argument for data")
+                        .unwrap()
+                        .into(),
+                )
+            })?;
+
+            let json_value = ctx
+                .json_stringify(data_value)
+                .ok()
+                .flatten()
+                .and_then(|s| s.to_string().ok())
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or(serde_json::Value::Null);
+
+            self.graphic_proxy
+                .update_component(self.id, component_name, json_value)
+                .await
+                .map_err(|e| {
+                    ctx.throw(
+                        rquickjs::String::from_str(ctx.clone(), &e)
+                            .unwrap()
+                            .into(),
+                    )
+                })
+        } else if let Some(obj) = name_or_components.as_object() {
+            // Batch mode: update({ ComponentName: data, ... })
+            for result in obj.props::<String, Value>() {
+                if let Ok((component_name, component_data)) = result {
+                    let json_value = ctx
+                        .json_stringify(component_data)
+                        .ok()
+                        .flatten()
+                        .and_then(|s| s.to_string().ok())
+                        .and_then(|s| serde_json::from_str(&s).ok())
+                        .unwrap_or(serde_json::Value::Null);
+
+                    self.graphic_proxy
+                        .update_component(self.id, component_name, json_value)
+                        .await
+                        .map_err(|e| {
+                            ctx.throw(
+                                rquickjs::String::from_str(ctx.clone(), &e)
+                                    .unwrap()
+                                    .into(),
+                            )
+                        })?;
+                }
+            }
+            Ok(())
+        } else {
+            Err(ctx.throw(
+                rquickjs::String::from_str(ctx.clone(), "update() expects either a string (component name) or an object (batch components)")
+                    .unwrap()
+                    .into(),
+            ))
+        }
+    }
+
+    /// Remove a component from this entity
+    #[qjs(rename = "remove")]
+    pub async fn remove<'js>(&self, ctx: Ctx<'js>, component_name: String) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .remove_component(self.id, component_name)
+            .await
+            .map_err(|e| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), &e)
+                        .unwrap()
+                        .into(),
+                )
+            })
+    }
+
+    /// Get a component's data from this entity
+    ///
+    /// # Returns
+    /// The component data, or null if not present
+    #[qjs(rename = "get")]
+    pub async fn get<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        component_name: String,
+    ) -> rquickjs::Result<Value<'js>> {
+        let result = self
+            .graphic_proxy
+            .get_component(self.id, component_name)
+            .await
+            .map_err(|e| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), &e)
+                        .unwrap()
+                        .into(),
+                )
+            })?;
+
+        match result {
+            Some(data) => {
+                let json_str = serde_json::to_string(&data).unwrap_or_default();
+                ctx.json_parse(json_str)
+            }
+            None => Ok(Value::new_null(ctx)),
+        }
+    }
+
+    /// Check if this entity has a component
+    #[qjs(rename = "has")]
+    pub async fn has<'js>(&self, ctx: Ctx<'js>, component_name: String) -> rquickjs::Result<bool> {
+        self.graphic_proxy
+            .has_component(self.id, component_name)
+            .await
+            .map_err(|e| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), &e)
+                        .unwrap()
+                        .into(),
+                )
+            })
+    }
+
+    /// Despawn this entity
+    #[qjs(rename = "despawn")]
+    pub async fn despawn<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<()> {
+        self.graphic_proxy
+            .despawn_entity(self.id)
+            .await
+            .map_err(|e| {
+                ctx.throw(
+                    rquickjs::String::from_str(ctx.clone(), &e)
+                        .unwrap()
+                        .into(),
+                )
+            })
+    }
+}
+
+/// Set up the World API in a JavaScript context
+///
+/// # Arguments
+/// * `ctx` - JavaScript context
+/// * `graphic_proxy` - The shared GraphicProxy instance
+pub fn setup_world_api(
+    ctx: Ctx,
+    graphic_proxy: Arc<GraphicProxy>,
+) -> Result<(), rquickjs::Error> {
+    // Define classes
+    rquickjs::Class::<WorldJS>::define(&ctx.globals())?;
+    rquickjs::Class::<EntityJS>::define(&ctx.globals())?;
+
+    // Create World instance
+    let world_obj = rquickjs::Class::<WorldJS>::instance(
+        ctx.clone(),
+        WorldJS {
+            graphic_proxy,
+        },
+    )?;
+    ctx.globals().set("World", world_obj)?;
+
+    // Create SystemBehaviors enum
+    let behaviors = Object::new(ctx.clone())?;
+    behaviors.set("ApplyVelocity", 0u32)?;
+    behaviors.set("ApplyGravity", 1u32)?;
+    behaviors.set("ApplyFriction", 2u32)?;
+    behaviors.set("RegenerateOverTime", 3u32)?;
+    behaviors.set("DecayOverTime", 4u32)?;
+    behaviors.set("FollowEntity", 5u32)?;
+    behaviors.set("OrbitAround", 6u32)?;
+    behaviors.set("BounceOnBounds", 7u32)?;
+    behaviors.set("DespawnWhenZero", 8u32)?;
+    behaviors.set("AnimateSprite", 9u32)?;
+    ctx.globals().set("SystemBehaviors", behaviors)?;
+
+    // Create FieldTypes enum for component schema definitions
+    let field_types = Object::new(ctx.clone())?;
+    field_types.set("Number", "number")?;
+    field_types.set("String", "string")?;
+    field_types.set("Bool", "bool")?;
+    field_types.set("Vec2", "vec2")?;
+    field_types.set("Vec3", "vec3")?;
+    field_types.set("Color", "color")?;
+    field_types.set("Entity", "entity")?;
+    field_types.set("Any", "any")?;
+    ctx.globals().set("FieldTypes", field_types)?;
 
     Ok(())
 }

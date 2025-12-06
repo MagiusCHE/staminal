@@ -4,7 +4,7 @@
 //! Bevy runs on the main thread and communicates with the worker thread via channels.
 
 use bevy::prelude::*;
-use bevy::window::{PrimaryWindow, VideoModeSelection, WindowMode, WindowResolution, WindowRef};
+use bevy::window::{PrimaryWindow, VideoModeSelection, WindowMode, WindowResolution, WindowRef, CursorIcon, SystemCursorIcon};
 use bevy::winit::{UpdateMode, WinitSettings, WINIT_WINDOWS};
 use bevy::camera::RenderTarget;
 use std::collections::HashMap;
@@ -18,6 +18,7 @@ use stam_mod_runtimes::api::{
     PropertyValue, SizeValue, WidgetConfig, WidgetEventType, WidgetType, WindowPositionMode,
     AlignItems, WindowMode as StamWindowMode, ResourceType, ResourceState, ResourceInfo,
     ImageScaleMode, ImageSource,
+    graphic::ecs::{ComponentSchema, DeclaredSystem, QueryOptions, QueryResult, FieldType, SystemBehavior},
 };
 
 /// System sets for ordering Bevy systems
@@ -25,6 +26,8 @@ use stam_mod_runtimes::api::{
 enum BevySystemSet {
     /// Process commands from the worker thread (first)
     ProcessCommands,
+    /// Run declared systems (behaviors and formulas)
+    DeclaredSystems,
     /// Systems that run after commands are processed
     AfterCommands,
 }
@@ -119,6 +122,11 @@ impl GraphicEngine for BevyEngine {
         app.insert_resource(ResourceRegistry::default());
         app.insert_resource(PendingAssetRegistry::default());
         app.insert_resource(EngineReadySent::default());
+        // ECS scripting resources
+        app.insert_resource(ScriptEntityRegistry::default());
+        app.insert_resource(ScriptComponentRegistry::default());
+        app.insert_resource(DeclaredSystemRegistry::default());
+        app.insert_resource(EntityEventCallbackRegistry::default());
 
         // Force continuous updates even without windows or when unfocused
         // This ensures the Update schedule runs continuously to process commands
@@ -130,10 +138,15 @@ impl GraphicEngine for BevyEngine {
         // Add startup system to register the primary window in our registry
         app.add_systems(Startup, register_primary_window);
 
-        // Configure system set ordering
+        // Configure system set ordering:
+        // ProcessCommands -> DeclaredSystems -> AfterCommands
         app.configure_sets(
             Update,
-            BevySystemSet::AfterCommands.after(BevySystemSet::ProcessCommands),
+            (
+                BevySystemSet::ProcessCommands,
+                BevySystemSet::DeclaredSystems.after(BevySystemSet::ProcessCommands),
+                BevySystemSet::AfterCommands.after(BevySystemSet::DeclaredSystems),
+            ),
         );
 
         // Add our systems with explicit ordering via SystemSets
@@ -144,6 +157,7 @@ impl GraphicEngine for BevyEngine {
         // Note: process_commands has too many parameters to use .in_set() directly.
         // We use a separate add_systems call and configure the set to run first.
         app.add_systems(Update, process_commands);
+        app.add_systems(Update, run_declared_systems.in_set(BevySystemSet::DeclaredSystems));
         app.add_systems(
             Update,
             (
@@ -154,15 +168,12 @@ impl GraphicEngine for BevyEngine {
                 handle_mouse_input,
                 handle_window_events,
                 handle_widget_interactions,
+                handle_script_entity_interactions,
+                apply_script_button_colors,
+                apply_disabled_button_colors,
+                apply_enabled_button_colors,
                 update_cover_contain_images,
             ).in_set(BevySystemSet::AfterCommands),
-        );
-
-        // Ensure AfterCommands runs after the default ordering (process_commands)
-        // by adding an explicit First/Last ordering
-        app.configure_sets(
-            Update,
-            BevySystemSet::ProcessCommands.before(BevySystemSet::AfterCommands),
         );
 
         tracing::info!("Bevy engine starting main loop");
@@ -414,6 +425,41 @@ impl Default for ButtonColors {
     }
 }
 
+/// Button colors component for ECS script entities
+///
+/// Optional component that defines background colors for different button states.
+/// When present on an entity with Button+Interaction, Bevy will automatically
+/// apply the appropriate color based on the interaction state.
+#[derive(Component, Clone, Debug)]
+struct ScriptButtonColors {
+    /// Background color in normal state
+    normal: Color,
+    /// Background color when hovered
+    hovered: Option<Color>,
+    /// Background color when pressed
+    pressed: Option<Color>,
+    /// Background color when disabled
+    disabled: Option<Color>,
+}
+
+impl ScriptButtonColors {
+    /// Get the color for the current interaction state
+    fn color_for_interaction(&self, interaction: Interaction, is_disabled: bool) -> Color {
+        if is_disabled {
+            return self.disabled.unwrap_or(self.normal);
+        }
+        match interaction {
+            Interaction::None => self.normal,
+            Interaction::Hovered => self.hovered.unwrap_or(self.normal),
+            Interaction::Pressed => self.pressed.unwrap_or(self.hovered.unwrap_or(self.normal)),
+        }
+    }
+}
+
+/// Marker component for disabled script entities (buttons)
+#[derive(Component)]
+struct ScriptButtonDisabled;
+
 /// Font configuration for inheritance
 #[derive(Clone, Debug)]
 struct InheritedFontConfig {
@@ -575,6 +621,53 @@ impl ResourceRegistry {
 }
 
 // ============================================================================
+// Entity Event Callback Registry
+// ============================================================================
+
+/// Registry of entities that have registered event callbacks
+///
+/// When an entity in this registry receives an interaction matching
+/// a registered event type, the engine sends EntityEventCallback
+/// instead of the generic EntityInteractionChanged.
+#[derive(Resource, Default)]
+struct EntityEventCallbackRegistry {
+    /// Map of entity ID -> set of registered event types (e.g., "click", "hover")
+    entities: std::collections::HashMap<u64, std::collections::HashSet<String>>,
+}
+
+impl EntityEventCallbackRegistry {
+    /// Register an entity for a specific event type
+    fn register(&mut self, entity_id: u64, event_type: &str) {
+        self.entities
+            .entry(entity_id)
+            .or_default()
+            .insert(event_type.to_string());
+    }
+
+    /// Unregister an entity for a specific event type
+    fn unregister(&mut self, entity_id: u64, event_type: &str) {
+        if let Some(events) = self.entities.get_mut(&entity_id) {
+            events.remove(event_type);
+            if events.is_empty() {
+                self.entities.remove(&entity_id);
+            }
+        }
+    }
+
+    /// Remove all callbacks for an entity (used on despawn)
+    fn remove_entity(&mut self, entity_id: u64) {
+        self.entities.remove(&entity_id);
+    }
+
+    /// Check if entity has a registered callback for an event type
+    fn has_callback(&self, entity_id: u64, event_type: &str) -> bool {
+        self.entities
+            .get(&entity_id)
+            .map_or(false, |events| events.contains(event_type))
+    }
+}
+
+// ============================================================================
 // Pending Asset Tracker
 // ============================================================================
 
@@ -607,6 +700,941 @@ impl PendingAssetRegistry {
             alias,
             handle_id,
         });
+    }
+}
+
+// ============================================================================
+// ECS Scripting Support
+// ============================================================================
+
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Marker component for entities created by scripts
+///
+/// This component identifies entities that were spawned via the ECS scripting API.
+/// It stores the script-facing ID and the owning mod for security purposes.
+#[derive(Component)]
+struct ScriptEntity {
+    /// Unique ID exposed to scripts (NOT the Bevy Entity index)
+    script_id: u64,
+    /// The mod that created this entity
+    owner_mod: String,
+}
+
+/// Component holding custom data defined by scripts
+///
+/// Script-defined components are stored as JSON since Rust cannot dynamically
+/// create struct types at runtime. Each ScriptComponent stores data for ONE
+/// custom component type.
+#[derive(Component, Clone, Debug)]
+struct ScriptComponent {
+    /// Component type name (e.g., "Player", "Velocity")
+    type_name: String,
+    /// Component data as JSON
+    data: serde_json::Value,
+}
+
+/// Registry mapping script IDs to Bevy Entities
+///
+/// This registry provides bidirectional mapping between the IDs exposed to
+/// scripts and the actual Bevy Entity handles.
+#[derive(Resource)]
+struct ScriptEntityRegistry {
+    /// Map from script ID to Bevy Entity
+    id_to_entity: HashMap<u64, Entity>,
+    /// Map from Bevy Entity to script ID
+    entity_to_id: HashMap<Entity, u64>,
+    /// Next available script ID
+    next_id: AtomicU64,
+}
+
+impl Default for ScriptEntityRegistry {
+    fn default() -> Self {
+        Self {
+            id_to_entity: HashMap::new(),
+            entity_to_id: HashMap::new(),
+            next_id: AtomicU64::new(1), // Start from 1, 0 is reserved/invalid
+        }
+    }
+}
+
+impl ScriptEntityRegistry {
+    /// Allocate a new script ID
+    fn allocate_id(&self) -> u64 {
+        self.next_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Register an entity with a script ID
+    fn register(&mut self, script_id: u64, entity: Entity) {
+        self.id_to_entity.insert(script_id, entity);
+        self.entity_to_id.insert(entity, script_id);
+    }
+
+    /// Unregister an entity by script ID
+    fn unregister(&mut self, script_id: u64) -> Option<Entity> {
+        if let Some(entity) = self.id_to_entity.remove(&script_id) {
+            self.entity_to_id.remove(&entity);
+            Some(entity)
+        } else {
+            None
+        }
+    }
+
+    /// Get Bevy Entity by script ID
+    fn get_entity(&self, script_id: u64) -> Option<Entity> {
+        self.id_to_entity.get(&script_id).copied()
+    }
+
+    /// Get script ID by Bevy Entity
+    fn get_id(&self, entity: Entity) -> Option<u64> {
+        self.entity_to_id.get(&entity).copied()
+    }
+}
+
+/// Registry for custom component types defined by scripts
+///
+/// Scripts must register component types with schemas before using them.
+/// The registry validates component data against schemas.
+#[derive(Resource, Default)]
+struct ScriptComponentRegistry {
+    /// Registered component schemas by name
+    schemas: HashMap<String, ComponentSchema>,
+}
+
+impl ScriptComponentRegistry {
+    /// Register a component schema
+    fn register(&mut self, schema: ComponentSchema) -> Result<(), String> {
+        if self.schemas.contains_key(&schema.name) {
+            return Err(format!("Component '{}' is already registered", schema.name));
+        }
+        tracing::debug!("Registered component type: {}", schema.name);
+        self.schemas.insert(schema.name.clone(), schema);
+        Ok(())
+    }
+
+    /// Get a schema by name
+    fn get_schema(&self, name: &str) -> Option<&ComponentSchema> {
+        self.schemas.get(name)
+    }
+
+    /// Validate component data against its schema
+    fn validate(&self, name: &str, data: &serde_json::Value) -> Result<(), String> {
+        if let Some(schema) = self.schemas.get(name) {
+            schema.validate(data)
+        } else {
+            // Allow unregistered components (for flexibility)
+            // They won't be validated but can still be used
+            Ok(())
+        }
+    }
+}
+
+/// Registry for declared systems (behaviors and formulas)
+#[derive(Resource, Default)]
+struct DeclaredSystemRegistry {
+    /// Declared systems by name
+    systems: HashMap<String, DeclaredSystem>,
+}
+
+impl DeclaredSystemRegistry {
+    /// Register a declared system
+    fn register(&mut self, system: DeclaredSystem) -> Result<(), String> {
+        if self.systems.contains_key(&system.name) {
+            return Err(format!("System '{}' is already declared", system.name));
+        }
+        tracing::debug!("Declared system: {} (behavior: {:?})", system.name, system.behavior);
+        self.systems.insert(system.name.clone(), system);
+        Ok(())
+    }
+
+    /// Get a system by name
+    fn get(&self, name: &str) -> Option<&DeclaredSystem> {
+        self.systems.get(name)
+    }
+
+    /// Get mutable reference to a system
+    fn get_mut(&mut self, name: &str) -> Option<&mut DeclaredSystem> {
+        self.systems.get_mut(name)
+    }
+
+    /// Remove a system
+    fn remove(&mut self, name: &str) -> Option<DeclaredSystem> {
+        self.systems.remove(name)
+    }
+
+    /// Iterate over enabled systems in order
+    fn iter_enabled(&self) -> impl Iterator<Item = &DeclaredSystem> {
+        let mut systems: Vec<_> = self.systems.values().filter(|s| s.enabled).collect();
+        systems.sort_by_key(|s| s.order);
+        systems.into_iter()
+    }
+}
+
+// ============================================================================
+// Native Component Reflection System
+// ============================================================================
+
+/// Whitelist of native Bevy components that scripts can access
+///
+/// This enum defines which Bevy components are safe for scripts to read/write.
+/// Each variant maps to a specific Bevy component type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum NativeComponent {
+    // === Core Components ===
+    /// Transform component (translation, rotation, scale)
+    Transform,
+    /// Sprite component for 2D rendering
+    Sprite,
+    /// Visibility component
+    Visibility,
+
+    // === UI Components ===
+    /// Node component for UI layout (flexbox)
+    Node,
+    /// BackgroundColor component for UI elements
+    BackgroundColor,
+    /// Text component for UI text rendering
+    Text,
+    /// BorderRadius component for rounded corners
+    BorderRadius,
+    /// Interaction component for UI input handling (click, hover)
+    Interaction,
+    /// Button marker component for clickable UI elements
+    Button,
+}
+
+impl NativeComponent {
+    /// Get the component name as used in JavaScript
+    fn name(&self) -> &'static str {
+        match self {
+            NativeComponent::Transform => "Transform",
+            NativeComponent::Sprite => "Sprite",
+            NativeComponent::Visibility => "Visibility",
+            NativeComponent::Node => "Node",
+            NativeComponent::BackgroundColor => "BackgroundColor",
+            NativeComponent::Text => "Text",
+            NativeComponent::BorderRadius => "BorderRadius",
+            NativeComponent::Interaction => "Interaction",
+            NativeComponent::Button => "Button",
+        }
+    }
+
+    /// Try to parse a component name into a native component
+    fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "Transform" => Some(NativeComponent::Transform),
+            "Sprite" => Some(NativeComponent::Sprite),
+            "Visibility" => Some(NativeComponent::Visibility),
+            "Node" => Some(NativeComponent::Node),
+            "BackgroundColor" => Some(NativeComponent::BackgroundColor),
+            "Text" => Some(NativeComponent::Text),
+            "BorderRadius" => Some(NativeComponent::BorderRadius),
+            "Interaction" => Some(NativeComponent::Interaction),
+            "Button" => Some(NativeComponent::Button),
+            _ => None,
+        }
+    }
+
+    /// Check if a component name is a native component
+    fn is_native(name: &str) -> bool {
+        Self::from_name(name).is_some()
+    }
+}
+
+/// Helper functions for converting between JSON and Bevy components
+mod native_component_converters {
+    use super::*;
+    use serde_json::{json, Value};
+
+    /// Merge two JSON objects, with `updates` overwriting `base`
+    ///
+    /// Only top-level keys from `updates` are merged into `base`.
+    /// Nested objects are replaced entirely, not recursively merged.
+    pub fn merge_json(base: &Value, updates: &Value) -> Value {
+        if let (Some(base_obj), Some(updates_obj)) = (base.as_object(), updates.as_object()) {
+            let mut result = base_obj.clone();
+            for (key, value) in updates_obj {
+                result.insert(key.clone(), value.clone());
+            }
+            Value::Object(result)
+        } else {
+            // If not both objects, just return the update value
+            updates.clone()
+        }
+    }
+
+    /// Convert a Transform component to JSON
+    pub fn transform_to_json(transform: &Transform) -> Value {
+        json!({
+            "translation": {
+                "x": transform.translation.x,
+                "y": transform.translation.y,
+                "z": transform.translation.z
+            },
+            "rotation": {
+                "x": transform.rotation.x,
+                "y": transform.rotation.y,
+                "z": transform.rotation.z,
+                "w": transform.rotation.w
+            },
+            "scale": {
+                "x": transform.scale.x,
+                "y": transform.scale.y,
+                "z": transform.scale.z
+            }
+        })
+    }
+
+    /// Convert JSON to Transform values (for updating)
+    pub fn json_to_transform(json: &Value, current: &mut Transform) -> Result<(), String> {
+        if let Some(obj) = json.as_object() {
+            // Update translation if provided
+            if let Some(translation) = obj.get("translation") {
+                if let Some(t) = translation.as_object() {
+                    if let Some(x) = t.get("x").and_then(|v| v.as_f64()) {
+                        current.translation.x = x as f32;
+                    }
+                    if let Some(y) = t.get("y").and_then(|v| v.as_f64()) {
+                        current.translation.y = y as f32;
+                    }
+                    if let Some(z) = t.get("z").and_then(|v| v.as_f64()) {
+                        current.translation.z = z as f32;
+                    }
+                }
+            }
+
+            // Update rotation if provided
+            if let Some(rotation) = obj.get("rotation") {
+                if let Some(r) = rotation.as_object() {
+                    let x = r.get("x").and_then(|v| v.as_f64()).unwrap_or(current.rotation.x as f64) as f32;
+                    let y = r.get("y").and_then(|v| v.as_f64()).unwrap_or(current.rotation.y as f64) as f32;
+                    let z = r.get("z").and_then(|v| v.as_f64()).unwrap_or(current.rotation.z as f64) as f32;
+                    let w = r.get("w").and_then(|v| v.as_f64()).unwrap_or(current.rotation.w as f64) as f32;
+                    current.rotation = Quat::from_xyzw(x, y, z, w);
+                }
+            }
+
+            // Update scale if provided
+            if let Some(scale) = obj.get("scale") {
+                if let Some(s) = scale.as_object() {
+                    if let Some(x) = s.get("x").and_then(|v| v.as_f64()) {
+                        current.scale.x = x as f32;
+                    }
+                    if let Some(y) = s.get("y").and_then(|v| v.as_f64()) {
+                        current.scale.y = y as f32;
+                    }
+                    if let Some(z) = s.get("z").and_then(|v| v.as_f64()) {
+                        current.scale.z = z as f32;
+                    }
+                }
+            }
+
+            Ok(())
+        } else {
+            Err("Transform data must be an object".to_string())
+        }
+    }
+
+    /// Create a new Transform from JSON
+    pub fn json_to_new_transform(json: &Value) -> Result<Transform, String> {
+        let mut transform = Transform::IDENTITY;
+        json_to_transform(json, &mut transform)?;
+        Ok(transform)
+    }
+
+    /// Convert a Sprite component to JSON
+    ///
+    /// Note: We only expose safe fields. Handle<Image> is converted to path if available.
+    pub fn sprite_to_json(sprite: &Sprite) -> Value {
+        let color = sprite.color;
+        let (r, g, b, a) = color.to_srgba().to_f32_array().into();
+
+        json!({
+            "color": {
+                "r": r,
+                "g": g,
+                "b": b,
+                "a": a
+            },
+            "flip_x": sprite.flip_x,
+            "flip_y": sprite.flip_y,
+            "custom_size": sprite.custom_size.map(|v| json!({"width": v.x, "height": v.y})),
+            "rect": sprite.rect.map(|r| json!({
+                "min": {"x": r.min.x, "y": r.min.y},
+                "max": {"x": r.max.x, "y": r.max.y}
+            }))
+        })
+    }
+
+    /// Update a Sprite from JSON
+    pub fn json_to_sprite(json: &Value, current: &mut Sprite) -> Result<(), String> {
+        if let Some(obj) = json.as_object() {
+            // Update color if provided
+            if let Some(color) = obj.get("color") {
+                if let Some(c) = color.as_object() {
+                    let r = c.get("r").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                    let g = c.get("g").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                    let b = c.get("b").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                    let a = c.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+                    current.color = Color::srgba(r, g, b, a);
+                }
+            }
+
+            // Update flip flags
+            if let Some(flip_x) = obj.get("flip_x").and_then(|v| v.as_bool()) {
+                current.flip_x = flip_x;
+            }
+            if let Some(flip_y) = obj.get("flip_y").and_then(|v| v.as_bool()) {
+                current.flip_y = flip_y;
+            }
+
+            // Update custom_size
+            if let Some(custom_size) = obj.get("custom_size") {
+                if custom_size.is_null() {
+                    current.custom_size = None;
+                } else if let Some(size) = custom_size.as_object() {
+                    let width = size.get("width").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                    let height = size.get("height").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                    current.custom_size = Some(Vec2::new(width, height));
+                }
+            }
+
+            // Update rect
+            if let Some(rect) = obj.get("rect") {
+                if rect.is_null() {
+                    current.rect = None;
+                } else if let Some(r) = rect.as_object() {
+                    if let (Some(min), Some(max)) = (r.get("min"), r.get("max")) {
+                        let min_x = min.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                        let min_y = min.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                        let max_x = max.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                        let max_y = max.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                        current.rect = Some(Rect::new(min_x, min_y, max_x, max_y));
+                    }
+                }
+            }
+
+            Ok(())
+        } else {
+            Err("Sprite data must be an object".to_string())
+        }
+    }
+
+    /// Create a new default Sprite from JSON
+    pub fn json_to_new_sprite(json: &Value) -> Result<Sprite, String> {
+        let mut sprite = Sprite::default();
+        json_to_sprite(json, &mut sprite)?;
+        Ok(sprite)
+    }
+
+    /// Convert Visibility to JSON
+    pub fn visibility_to_json(visibility: &Visibility) -> Value {
+        let visible = match visibility {
+            Visibility::Inherited => "inherited",
+            Visibility::Hidden => "hidden",
+            Visibility::Visible => "visible",
+        };
+        json!({ "value": visible })
+    }
+
+    /// Update Visibility from JSON
+    pub fn json_to_visibility(json: &Value) -> Result<Visibility, String> {
+        if let Some(obj) = json.as_object() {
+            if let Some(value) = obj.get("value").and_then(|v| v.as_str()) {
+                match value {
+                    "inherited" => Ok(Visibility::Inherited),
+                    "hidden" => Ok(Visibility::Hidden),
+                    "visible" => Ok(Visibility::Visible),
+                    _ => Err(format!("Invalid visibility value: {}. Expected 'inherited', 'hidden', or 'visible'", value)),
+                }
+            } else {
+                Err("Visibility must have a 'value' field".to_string())
+            }
+        } else if let Some(s) = json.as_str() {
+            // Also accept direct string value
+            match s {
+                "inherited" => Ok(Visibility::Inherited),
+                "hidden" => Ok(Visibility::Hidden),
+                "visible" => Ok(Visibility::Visible),
+                _ => Err(format!("Invalid visibility value: {}. Expected 'inherited', 'hidden', or 'visible'", s)),
+            }
+        } else {
+            Err("Visibility data must be an object with 'value' field or a string".to_string())
+        }
+    }
+
+    // ========================================================================
+    // UI Component Converters
+    // ========================================================================
+
+    /// Helper to parse a Val from JSON
+    fn parse_val(json: &Value) -> Val {
+        if let Some(s) = json.as_str() {
+            if s == "auto" {
+                return Val::Auto;
+            }
+            if let Some(pct) = s.strip_suffix('%') {
+                if let Ok(v) = pct.parse::<f32>() {
+                    return Val::Percent(v);
+                }
+            }
+            if let Some(px) = s.strip_suffix("px") {
+                if let Ok(v) = px.parse::<f32>() {
+                    return Val::Px(v);
+                }
+            }
+            // Try parsing as plain number (px)
+            if let Ok(v) = s.parse::<f32>() {
+                return Val::Px(v);
+            }
+        }
+        if let Some(n) = json.as_f64() {
+            return Val::Px(n as f32);
+        }
+        Val::Auto
+    }
+
+    /// Convert a Node component to JSON
+    pub fn node_to_json(node: &Node) -> Value {
+        json!({
+            "width": val_to_json(&node.width),
+            "height": val_to_json(&node.height),
+            "min_width": val_to_json(&node.min_width),
+            "min_height": val_to_json(&node.min_height),
+            "max_width": val_to_json(&node.max_width),
+            "max_height": val_to_json(&node.max_height),
+            "left": val_to_json(&node.left),
+            "right": val_to_json(&node.right),
+            "top": val_to_json(&node.top),
+            "bottom": val_to_json(&node.bottom),
+            "display": format!("{:?}", node.display).to_lowercase(),
+            "position_type": format!("{:?}", node.position_type).to_lowercase(),
+            "flex_direction": format!("{:?}", node.flex_direction).to_lowercase(),
+            "justify_content": format!("{:?}", node.justify_content).to_lowercase(),
+            "align_items": format!("{:?}", node.align_items).to_lowercase()
+        })
+    }
+
+    fn val_to_json(val: &Val) -> Value {
+        match val {
+            Val::Auto => json!("auto"),
+            Val::Px(v) => json!(v),
+            Val::Percent(v) => json!(format!("{}%", v)),
+            Val::Vw(v) => json!(format!("{}vw", v)),
+            Val::Vh(v) => json!(format!("{}vh", v)),
+            Val::VMin(v) => json!(format!("{}vmin", v)),
+            Val::VMax(v) => json!(format!("{}vmax", v)),
+        }
+    }
+
+    /// Update a Node from JSON
+    pub fn json_to_node(json: &Value, current: &mut Node) -> Result<(), String> {
+        if let Some(obj) = json.as_object() {
+            if let Some(width) = obj.get("width") {
+                current.width = parse_val(width);
+            }
+            if let Some(height) = obj.get("height") {
+                current.height = parse_val(height);
+            }
+            if let Some(min_width) = obj.get("min_width") {
+                current.min_width = parse_val(min_width);
+            }
+            if let Some(min_height) = obj.get("min_height") {
+                current.min_height = parse_val(min_height);
+            }
+            if let Some(max_width) = obj.get("max_width") {
+                current.max_width = parse_val(max_width);
+            }
+            if let Some(max_height) = obj.get("max_height") {
+                current.max_height = parse_val(max_height);
+            }
+            if let Some(left) = obj.get("left") {
+                current.left = parse_val(left);
+            }
+            if let Some(right) = obj.get("right") {
+                current.right = parse_val(right);
+            }
+            if let Some(top) = obj.get("top") {
+                current.top = parse_val(top);
+            }
+            if let Some(bottom) = obj.get("bottom") {
+                current.bottom = parse_val(bottom);
+            }
+            if let Some(display) = obj.get("display").and_then(|v| v.as_str()) {
+                current.display = match display {
+                    "flex" => Display::Flex,
+                    "grid" => Display::Grid,
+                    "block" => Display::Block,
+                    "none" => Display::None,
+                    _ => Display::Flex,
+                };
+            }
+            if let Some(pos_val) = obj.get("position_type") {
+                current.position_type = if let Some(pos) = pos_val.as_str() {
+                    match pos {
+                        "relative" => PositionType::Relative,
+                        "absolute" => PositionType::Absolute,
+                        _ => PositionType::Relative,
+                    }
+                } else if let Some(n) = pos_val.as_u64() {
+                    // PositionType enum: Relative=0, Absolute=1
+                    match n {
+                        0 => PositionType::Relative,
+                        1 => PositionType::Absolute,
+                        _ => PositionType::Relative,
+                    }
+                } else {
+                    PositionType::Relative
+                };
+            }
+            if let Some(dir_val) = obj.get("flex_direction") {
+                current.flex_direction = if let Some(dir) = dir_val.as_str() {
+                    match dir {
+                        "row" => bevy::ui::FlexDirection::Row,
+                        "column" => bevy::ui::FlexDirection::Column,
+                        "row_reverse" | "rowreverse" => bevy::ui::FlexDirection::RowReverse,
+                        "column_reverse" | "columnreverse" => bevy::ui::FlexDirection::ColumnReverse,
+                        _ => bevy::ui::FlexDirection::Row,
+                    }
+                } else if let Some(n) = dir_val.as_u64() {
+                    // FlexDirection enum: Row=0, Column=1, RowReverse=2, ColumnReverse=3
+                    match n {
+                        0 => bevy::ui::FlexDirection::Row,
+                        1 => bevy::ui::FlexDirection::Column,
+                        2 => bevy::ui::FlexDirection::RowReverse,
+                        3 => bevy::ui::FlexDirection::ColumnReverse,
+                        _ => bevy::ui::FlexDirection::Row,
+                    }
+                } else {
+                    bevy::ui::FlexDirection::Row
+                };
+            }
+            if let Some(justify_val) = obj.get("justify_content") {
+                current.justify_content = if let Some(justify) = justify_val.as_str() {
+                    match justify {
+                        "start" | "flex_start" | "flexstart" => bevy::ui::JustifyContent::Start,
+                        "end" | "flex_end" | "flexend" => bevy::ui::JustifyContent::End,
+                        "center" => bevy::ui::JustifyContent::Center,
+                        "space_between" | "spacebetween" => bevy::ui::JustifyContent::SpaceBetween,
+                        "space_around" | "spacearound" => bevy::ui::JustifyContent::SpaceAround,
+                        "space_evenly" | "spaceevenly" => bevy::ui::JustifyContent::SpaceEvenly,
+                        _ => bevy::ui::JustifyContent::Start,
+                    }
+                } else if let Some(n) = justify_val.as_u64() {
+                    // JustifyContent enum: FlexStart=0, FlexEnd=1, Center=2, SpaceBetween=3, SpaceAround=4, SpaceEvenly=5
+                    match n {
+                        0 => bevy::ui::JustifyContent::FlexStart,
+                        1 => bevy::ui::JustifyContent::FlexEnd,
+                        2 => bevy::ui::JustifyContent::Center,
+                        3 => bevy::ui::JustifyContent::SpaceBetween,
+                        4 => bevy::ui::JustifyContent::SpaceAround,
+                        5 => bevy::ui::JustifyContent::SpaceEvenly,
+                        _ => bevy::ui::JustifyContent::Start,
+                    }
+                } else {
+                    bevy::ui::JustifyContent::Start
+                };
+            }
+            if let Some(align_val) = obj.get("align_items") {
+                current.align_items = if let Some(align) = align_val.as_str() {
+                    match align {
+                        "start" | "flex_start" | "flexstart" => bevy::ui::AlignItems::Start,
+                        "end" | "flex_end" | "flexend" => bevy::ui::AlignItems::End,
+                        "center" => bevy::ui::AlignItems::Center,
+                        "stretch" => bevy::ui::AlignItems::Stretch,
+                        "baseline" => bevy::ui::AlignItems::Baseline,
+                        _ => bevy::ui::AlignItems::Start,
+                    }
+                } else if let Some(n) = align_val.as_u64() {
+                    // AlignItems enum: Stretch=0, FlexStart=1, FlexEnd=2, Center=3, Baseline=4
+                    match n {
+                        0 => bevy::ui::AlignItems::Stretch,
+                        1 => bevy::ui::AlignItems::FlexStart,
+                        2 => bevy::ui::AlignItems::FlexEnd,
+                        3 => bevy::ui::AlignItems::Center,
+                        4 => bevy::ui::AlignItems::Baseline,
+                        _ => bevy::ui::AlignItems::Start,
+                    }
+                } else {
+                    bevy::ui::AlignItems::Start
+                };
+            }
+            // Padding support - can be number (all sides) or {top, right, bottom, left}
+            if let Some(padding) = obj.get("padding") {
+                current.padding = parse_ui_rect(padding);
+            }
+            // Margin support
+            if let Some(margin) = obj.get("margin") {
+                current.margin = parse_ui_rect(margin);
+            }
+            // Gap support
+            if let Some(row_gap) = obj.get("row_gap") {
+                current.row_gap = parse_val(row_gap);
+            }
+            if let Some(column_gap) = obj.get("column_gap") {
+                current.column_gap = parse_val(column_gap);
+            }
+            // Combined gap (sets both row and column gap)
+            if let Some(gap) = obj.get("gap") {
+                let gap_val = parse_val(gap);
+                current.row_gap = gap_val;
+                current.column_gap = gap_val;
+            }
+            Ok(())
+        } else {
+            Err("Node data must be an object".to_string())
+        }
+    }
+
+    /// Parse a UiRect from JSON (can be number or {top, right, bottom, left})
+    fn parse_ui_rect(json: &Value) -> UiRect {
+        if let Some(n) = json.as_f64() {
+            UiRect::all(Val::Px(n as f32))
+        } else if let Some(obj) = json.as_object() {
+            UiRect {
+                top: obj.get("top").map(parse_val).unwrap_or(Val::Px(0.0)),
+                right: obj.get("right").map(parse_val).unwrap_or(Val::Px(0.0)),
+                bottom: obj.get("bottom").map(parse_val).unwrap_or(Val::Px(0.0)),
+                left: obj.get("left").map(parse_val).unwrap_or(Val::Px(0.0)),
+            }
+        } else {
+            UiRect::all(Val::Px(0.0))
+        }
+    }
+
+    /// Create a new Node from JSON
+    pub fn json_to_new_node(json: &Value) -> Result<Node, String> {
+        let mut node = Node::default();
+        json_to_node(json, &mut node)?;
+        Ok(node)
+    }
+
+    /// Convert BackgroundColor to JSON
+    pub fn background_color_to_json(bg: &BackgroundColor) -> Value {
+        let color = bg.0;
+        let rgba = color.to_srgba().to_f32_array();
+        json!({
+            "r": rgba[0],
+            "g": rgba[1],
+            "b": rgba[2],
+            "a": rgba[3]
+        })
+    }
+
+    /// Parse a color from JSON (supports {r,g,b,a} or hex string)
+    pub fn json_to_color(json: &Value) -> Result<Color, String> {
+        if let Some(obj) = json.as_object() {
+            let r = obj.get("r").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            let g = obj.get("g").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            let b = obj.get("b").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            let a = obj.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            Ok(Color::srgba(r, g, b, a))
+        } else if let Some(hex) = json.as_str() {
+            // Parse hex color
+            let hex = hex.trim_start_matches('#');
+            if hex.len() == 6 {
+                let r = u8::from_str_radix(&hex[0..2], 16).map_err(|_| "Invalid hex color")?;
+                let g = u8::from_str_radix(&hex[2..4], 16).map_err(|_| "Invalid hex color")?;
+                let b = u8::from_str_radix(&hex[4..6], 16).map_err(|_| "Invalid hex color")?;
+                Ok(Color::srgb_u8(r, g, b))
+            } else if hex.len() == 8 {
+                let r = u8::from_str_radix(&hex[0..2], 16).map_err(|_| "Invalid hex color")?;
+                let g = u8::from_str_radix(&hex[2..4], 16).map_err(|_| "Invalid hex color")?;
+                let b = u8::from_str_radix(&hex[4..6], 16).map_err(|_| "Invalid hex color")?;
+                let a = u8::from_str_radix(&hex[6..8], 16).map_err(|_| "Invalid hex color")?;
+                Ok(Color::srgba_u8(r, g, b, a))
+            } else {
+                Err(format!("Invalid hex color: {}", hex))
+            }
+        } else {
+            Err("Color must be {r,g,b,a} object or hex string".to_string())
+        }
+    }
+
+    /// Create BackgroundColor from JSON
+    pub fn json_to_background_color(json: &Value) -> Result<BackgroundColor, String> {
+        let color = json_to_color(json)?;
+        Ok(BackgroundColor(color))
+    }
+
+    /// Convert Text component to JSON
+    pub fn text_to_json(text: &bevy::prelude::Text) -> Value {
+        json!({
+            "content": text.0.clone()
+        })
+    }
+
+    /// Text bundle result containing Text, TextFont, and TextColor components
+    pub struct TextComponents {
+        pub text: bevy::prelude::Text,
+        pub font: bevy::text::TextFont,
+        pub color: bevy::text::TextColor,
+    }
+
+    /// Parsed text configuration from JSON (without font handle resolution)
+    pub struct TextConfig {
+        pub content: String,
+        pub font_alias: Option<String>,
+        pub font_size: f32,
+        pub color: bevy::color::Color,
+    }
+
+    /// Parse Text config from JSON without resolving font handle
+    pub fn json_to_text_config(json: &Value) -> Result<TextConfig, String> {
+        if let Some(obj) = json.as_object() {
+            // Support both "value" and "content" as the text field
+            let content = obj.get("value")
+                .or_else(|| obj.get("content"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let font_alias = obj.get("font")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            let font_size = obj.get("font_size")
+                .and_then(|v| v.as_f64())
+                .map(|v| v as f32)
+                .unwrap_or(16.0);
+
+            let color = if let Some(color_val) = obj.get("color") {
+                json_to_color(color_val).unwrap_or(bevy::color::Color::WHITE)
+            } else {
+                bevy::color::Color::WHITE
+            };
+
+            Ok(TextConfig {
+                content,
+                font_alias,
+                font_size,
+                color,
+            })
+        } else if let Some(s) = json.as_str() {
+            Ok(TextConfig {
+                content: s.to_string(),
+                font_alias: None,
+                font_size: 16.0,
+                color: bevy::color::Color::WHITE,
+            })
+        } else {
+            Err("Text must be {value: string, font?: string, font_size?: number, color?: string} or a string".to_string())
+        }
+    }
+
+    /// Create Text components from JSON (legacy, without font handle)
+    /// Supports both {value, font_size, color} and {content} formats, plus plain string
+    pub fn json_to_new_text_components(json: &Value) -> Result<TextComponents, String> {
+        let config = json_to_text_config(json)?;
+        Ok(TextComponents {
+            text: bevy::prelude::Text::new(config.content),
+            font: bevy::text::TextFont {
+                font_size: config.font_size,
+                ..default()
+            },
+            color: bevy::text::TextColor(config.color),
+        })
+    }
+
+    /// Create Text from JSON (legacy, for compatibility)
+    pub fn json_to_new_text(json: &Value) -> Result<bevy::prelude::Text, String> {
+        if let Some(obj) = json.as_object() {
+            let content = obj.get("value")
+                .or_else(|| obj.get("content"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Ok(bevy::prelude::Text::new(content))
+        } else if let Some(s) = json.as_str() {
+            Ok(bevy::prelude::Text::new(s.to_string()))
+        } else {
+            Err("Text must be {value: string} or a string".to_string())
+        }
+    }
+
+    /// Update Text from JSON
+    pub fn json_to_text(json: &Value, current: &mut bevy::prelude::Text) -> Result<(), String> {
+        if let Some(obj) = json.as_object() {
+            if let Some(content) = obj.get("value").or_else(|| obj.get("content")).and_then(|v| v.as_str()) {
+                current.0 = content.to_string();
+            }
+            Ok(())
+        } else if let Some(s) = json.as_str() {
+            current.0 = s.to_string();
+            Ok(())
+        } else {
+            Err("Text must be {value: string} or a string".to_string())
+        }
+    }
+
+    /// Convert BorderRadius to JSON
+    pub fn border_radius_to_json(radius: &BorderRadius) -> Value {
+        json!({
+            "top_left": val_to_json(&radius.top_left),
+            "top_right": val_to_json(&radius.top_right),
+            "bottom_left": val_to_json(&radius.bottom_left),
+            "bottom_right": val_to_json(&radius.bottom_right)
+        })
+    }
+
+    /// Create BorderRadius from JSON
+    pub fn json_to_border_radius(json: &Value) -> Result<BorderRadius, String> {
+        if let Some(n) = json.as_f64() {
+            // Single value for all corners
+            let v = Val::Px(n as f32);
+            Ok(BorderRadius::all(v))
+        } else if let Some(obj) = json.as_object() {
+            let top_left = obj.get("top_left").map(parse_val).unwrap_or(Val::Px(0.0));
+            let top_right = obj.get("top_right").map(parse_val).unwrap_or(Val::Px(0.0));
+            let bottom_left = obj.get("bottom_left").map(parse_val).unwrap_or(Val::Px(0.0));
+            let bottom_right = obj.get("bottom_right").map(parse_val).unwrap_or(Val::Px(0.0));
+            Ok(BorderRadius {
+                top_left,
+                top_right,
+                bottom_left,
+                bottom_right,
+            })
+        } else {
+            Err("BorderRadius must be a number or {top_left, top_right, bottom_left, bottom_right}".to_string())
+        }
+    }
+
+    /// Convert Interaction component to JSON
+    pub fn interaction_to_json(interaction: &Interaction) -> Value {
+        match interaction {
+            Interaction::None => json!("none"),
+            Interaction::Hovered => json!("hovered"),
+            Interaction::Pressed => json!("pressed"),
+        }
+    }
+
+    /// Create Interaction from JSON
+    /// Note: Interaction is typically managed by Bevy internally, but scripts can read it
+    pub fn json_to_interaction(json: &Value) -> Result<Interaction, String> {
+        if let Some(s) = json.as_str() {
+            match s {
+                "none" => Ok(Interaction::None),
+                "hovered" => Ok(Interaction::Hovered),
+                "pressed" => Ok(Interaction::Pressed),
+                _ => Err(format!("Invalid Interaction value: {}. Use 'none', 'hovered', or 'pressed'", s)),
+            }
+        } else if json.is_object() || json.is_null() {
+            // Default to None if object or null - allows spawning with Interaction: {}
+            Ok(Interaction::None)
+        } else {
+            Err("Interaction must be a string ('none', 'hovered', 'pressed') or empty object".to_string())
+        }
+    }
+
+    /// Button component doesn't need conversion - it's a marker component
+    /// Scripts spawn it with Button: {} or Button: true
+    pub fn json_to_button(json: &Value) -> Result<bevy::ui::widget::Button, String> {
+        // Button is a marker component, any value means "add button"
+        if json.is_null() {
+            Err("Button component cannot be null. Use {} or true to add it.".to_string())
+        } else {
+            Ok(bevy::ui::widget::Button)
+        }
     }
 }
 
@@ -668,21 +1696,50 @@ fn process_commands(
         ResMut<ResourceRegistry>,
         ResMut<PendingAssetRegistry>,
     ),
+    mut ecs_registries: (
+        ResMut<ScriptEntityRegistry>,
+        ResMut<ScriptComponentRegistry>,
+        ResMut<DeclaredSystemRegistry>,
+        ResMut<EntityEventCallbackRegistry>,
+    ),
     asset_server: Res<AssetServer>,
     mut windows: Query<&mut Window>,
     mut app_exit: EventWriter<bevy::app::AppExit>,
     primary_window_query: Query<Entity, With<PrimaryWindow>>,
     mut widget_queries: (
-        Query<&mut Text>,
-        Query<&mut BackgroundColor>,
-        Query<&mut Node>,
+        Query<&mut Text, Without<ScriptEntity>>,
+        Query<&mut BackgroundColor, Without<ScriptEntity>>,
+        Query<&mut Node, Without<ScriptEntity>>,
         Query<&mut TextColor>,
         Query<(&mut ButtonColors, Option<&Interaction>, Option<&Children>)>,
     ),
+    // ECS queries for script components
+    script_entity_query: Query<(Entity, &ScriptEntity)>,
+    mut script_component_query: Query<(Entity, &mut ScriptComponent)>,
+    // ECS queries for native components
+    mut native_queries: (
+        Query<&mut Transform, With<ScriptEntity>>,
+        Query<&mut Sprite, With<ScriptEntity>>,
+        Query<&mut Visibility, With<ScriptEntity>>,
+    ),
+    // Additional UI component queries for ECS API
+    mut ui_queries: (
+        Query<&mut Node, With<ScriptEntity>>,
+        Query<&mut BackgroundColor, With<ScriptEntity>>,
+        Query<&mut Text, With<ScriptEntity>>,
+        Query<&mut BorderRadius, With<ScriptEntity>>,
+        Query<&Interaction, With<ScriptEntity>>,
+        Query<&bevy::ui::widget::Button, With<ScriptEntity>>,
+    ),
+    // Query for ScriptButtonColors (pseudo-components for button state colors)
+    mut button_colors_query: Query<&mut ScriptButtonColors, With<ScriptEntity>>,
 ) {
     let (cmd_rx, event_tx) = channels;
     let (registry, widget_registry, font_registry, resource_registry, pending_assets) = &mut registries;
+    let (script_entity_registry, script_component_registry, declared_system_registry, entity_event_callback_registry) = &mut ecs_registries;
     let (text_query, bg_color_query, node_query, text_color_query, button_query) = &mut widget_queries;
+    let (transform_query, sprite_query, visibility_query) = &mut native_queries;
+    let (ecs_node_query, ecs_bg_color_query, ecs_text_query, ecs_border_radius_query, ecs_interaction_query, ecs_button_query) = &mut ui_queries;
     // Lock the receiver and process all available commands (non-blocking)
     let receiver = match cmd_rx.0.lock() {
         Ok(r) => r,
@@ -728,8 +1785,35 @@ fn process_commands(
 
                 tracing::debug!("Bevy Window struct: {:?}", window);
 
-                let entity = commands.spawn(window).id();
-                registry.register(id, entity);
+                let window_entity = commands.spawn(window).id();
+                registry.register(id, window_entity);
+
+                // Create camera and root UI node for this window immediately
+                // This ensures ECS entities can be parented to the window even before any widget is created
+                let camera_entity = commands.spawn((
+                    Camera2d::default(),
+                    Camera {
+                        target: RenderTarget::Window(WindowRef::Entity(window_entity)),
+                        clear_color: ClearColorConfig::Custom(Color::srgb(0.1, 0.1, 0.1)),
+                        ..default()
+                    },
+                )).id();
+                widget_registry.set_window_camera(id, camera_entity);
+                tracing::debug!("Created camera {:?} for window {}", camera_entity, id);
+
+                // Create root UI node for this window
+                let root = commands.spawn((
+                    Node {
+                        width: Val::Percent(100.0),
+                        height: Val::Percent(100.0),
+                        flex_direction: bevy::ui::FlexDirection::Column,
+                        align_items: bevy::ui::AlignItems::Stretch,
+                        ..default()
+                    },
+                    UiTargetCamera(camera_entity),
+                )).id();
+                widget_registry.set_window_root(id, root);
+                tracing::debug!("Created root UI node {:?} for window {}", root, id);
 
                 let _ = response_tx.send(Ok(()));
 
@@ -1413,6 +2497,997 @@ fn process_commands(
                 resource_registry.clear();
                 let _ = response_tx.send(Ok(()));
             }
+
+            // ================================================================
+            // ECS Commands
+            // ================================================================
+
+            GraphicCommand::SpawnEntity {
+                components,
+                owner_mod,
+                parent,
+                response_tx,
+            } => {
+                use native_component_converters::*;
+
+                // Allocate a new script ID
+                let script_id = script_entity_registry.allocate_id();
+
+                // Spawn the entity with the ScriptEntity marker
+                let mut entity_commands = commands.spawn(ScriptEntity {
+                    script_id,
+                    owner_mod: owner_mod.clone(),
+                });
+
+                // Track if this entity has UI components (Node, Text, BackgroundColor)
+                // If so, we'll parent it to the main window's root UI node (unless parent is specified)
+                let mut is_ui_entity = false;
+
+                // Track button color pseudo-components
+                let mut normal_color: Option<Color> = None;
+                let mut hover_color: Option<Color> = None;
+                let mut pressed_color: Option<Color> = None;
+                let mut disabled_color: Option<Color> = None;
+                let mut is_disabled: Option<bool> = None;
+
+                // Add initial components, separating native from custom
+                for (component_name, component_data) in components {
+                    // Handle button color pseudo-components
+                    match component_name.as_str() {
+                        "HoverBackgroundColor" => {
+                            if let Ok(bg) = json_to_background_color(&component_data) {
+                                hover_color = Some(bg.0);
+                            }
+                            continue;
+                        }
+                        "PressedBackgroundColor" => {
+                            if let Ok(bg) = json_to_background_color(&component_data) {
+                                pressed_color = Some(bg.0);
+                            }
+                            continue;
+                        }
+                        "DisabledBackgroundColor" => {
+                            if let Ok(bg) = json_to_background_color(&component_data) {
+                                disabled_color = Some(bg.0);
+                            }
+                            continue;
+                        }
+                        "Disabled" => {
+                            // Parse boolean value for disabled state
+                            if let Some(disabled) = component_data.as_bool() {
+                                is_disabled = Some(disabled);
+                            } else if let Some(disabled_str) = component_data.as_str() {
+                                is_disabled = Some(disabled_str.eq_ignore_ascii_case("true"));
+                            }
+                            continue;
+                        }
+                        _ => {}
+                    }
+
+                    // Check if this is a native Bevy component
+                    if let Some(native) = NativeComponent::from_name(&component_name) {
+                        match native {
+                            NativeComponent::Transform => {
+                                match json_to_new_transform(&component_data) {
+                                    Ok(transform) => {
+                                        entity_commands.insert(transform);
+                                        tracing::debug!("Added native Transform component to entity {}", script_id);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to create Transform component: {}", e);
+                                    }
+                                }
+                            }
+                            NativeComponent::Sprite => {
+                                match json_to_new_sprite(&component_data) {
+                                    Ok(sprite) => {
+                                        entity_commands.insert(sprite);
+                                        tracing::debug!("Added native Sprite component to entity {}", script_id);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to create Sprite component: {}", e);
+                                    }
+                                }
+                            }
+                            NativeComponent::Visibility => {
+                                match json_to_visibility(&component_data) {
+                                    Ok(visibility) => {
+                                        entity_commands.insert(visibility);
+                                        tracing::debug!("Added native Visibility component to entity {}", script_id);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to create Visibility component: {}", e);
+                                    }
+                                }
+                            }
+                            // UI Components
+                            NativeComponent::Node => {
+                                match json_to_new_node(&component_data) {
+                                    Ok(node) => {
+                                        entity_commands.insert(node);
+                                        is_ui_entity = true;  // Mark as UI entity
+                                        tracing::debug!("Added native Node component to entity {}", script_id);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to create Node component: {}", e);
+                                    }
+                                }
+                            }
+                            NativeComponent::BackgroundColor => {
+                                match json_to_background_color(&component_data) {
+                                    Ok(bg) => {
+                                        // Store the normal color for ScriptButtonColors
+                                        normal_color = Some(bg.0);
+                                        entity_commands.insert(bg);
+                                        is_ui_entity = true;  // Mark as UI entity
+                                        tracing::debug!("Added native BackgroundColor component to entity {}", script_id);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to create BackgroundColor component: {}", e);
+                                    }
+                                }
+                            }
+                            NativeComponent::Text => {
+                                match json_to_text_config(&component_data) {
+                                    Ok(config) => {
+                                        // Resolve font handle from registry if specified, or use window default
+                                        let font_handle = config.font_alias
+                                            .as_ref()
+                                            .and_then(|alias| font_registry.get_font(alias))
+                                            .or_else(|| {
+                                                // Try to get window's default font
+                                                widget_registry.window_roots.keys().next()
+                                                    .and_then(|&window_id| {
+                                                        let window_font = font_registry.get_window_font(window_id);
+                                                        font_registry.get_font(&window_font.family)
+                                                    })
+                                            });
+
+                                        let text_font = bevy::text::TextFont {
+                                            font: font_handle.unwrap_or_default(),
+                                            font_size: config.font_size,
+                                            ..default()
+                                        };
+
+                                        entity_commands.insert((
+                                            bevy::prelude::Text::new(config.content),
+                                            text_font,
+                                            bevy::text::TextColor(config.color),
+                                        ));
+                                        is_ui_entity = true;  // Mark as UI entity
+                                        tracing::debug!("Added native Text component to entity {}", script_id);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to create Text component: {}", e);
+                                    }
+                                }
+                            }
+                            NativeComponent::BorderRadius => {
+                                match json_to_border_radius(&component_data) {
+                                    Ok(radius) => {
+                                        entity_commands.insert(radius);
+                                        tracing::debug!("Added native BorderRadius component to entity {}", script_id);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to create BorderRadius component: {}", e);
+                                    }
+                                }
+                            }
+                            NativeComponent::Interaction => {
+                                match json_to_interaction(&component_data) {
+                                    Ok(interaction) => {
+                                        // Also add PreviousInteraction for change tracking
+                                        entity_commands.insert((
+                                            interaction,
+                                            ScriptEntityPreviousInteraction::default(),
+                                        ));
+                                        tracing::debug!("Added native Interaction component to entity {}", script_id);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to create Interaction component: {}", e);
+                                    }
+                                }
+                            }
+                            NativeComponent::Button => {
+                                match json_to_button(&component_data) {
+                                    Ok(button) => {
+                                        entity_commands.insert(button);
+                                        tracing::debug!("Added native Button component to entity {}", script_id);
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to create Button component: {}", e);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // Custom script component
+                        // Validate component data if schema exists
+                        if let Err(e) = script_component_registry.validate(&component_name, &component_data) {
+                            tracing::warn!("Component '{}' validation warning: {}", component_name, e);
+                            // Continue anyway - validation is advisory
+                        }
+
+                        entity_commands.with_child(ScriptComponent {
+                            type_name: component_name,
+                            data: component_data,
+                        });
+                    }
+                }
+
+                // If any button color was specified, add ScriptButtonColors component
+                if hover_color.is_some() || pressed_color.is_some() || disabled_color.is_some() {
+                    if let Some(normal) = normal_color {
+                        entity_commands.insert(ScriptButtonColors {
+                            normal,
+                            hovered: hover_color,
+                            pressed: pressed_color,
+                            disabled: disabled_color,
+                        });
+                        tracing::debug!("Added ScriptButtonColors to entity {}", script_id);
+                    } else {
+                        tracing::warn!("Button color states specified without BackgroundColor on entity {}", script_id);
+                    }
+                }
+
+                // If Disabled is true, add the marker component
+                if is_disabled == Some(true) {
+                    entity_commands.insert(ScriptButtonDisabled);
+                    tracing::debug!("Added ScriptButtonDisabled marker to entity {}", script_id);
+                }
+
+                let entity = entity_commands.id();
+                script_entity_registry.register(script_id, entity);
+
+                // Handle parenting: explicit parent takes precedence over auto-parenting
+                if let Some(parent_script_id) = parent {
+                    // Explicit parent specified - use it
+                    if let Some(parent_entity) = script_entity_registry.get_entity(parent_script_id) {
+                        commands.entity(entity).insert(ChildOf(parent_entity));
+                        tracing::debug!(
+                            "Entity {} parented to entity {} (Bevy {:?})",
+                            script_id, parent_script_id, parent_entity
+                        );
+                    } else {
+                        tracing::warn!(
+                            "Parent entity {} not found, entity {} will not be parented",
+                            parent_script_id, script_id
+                        );
+                    }
+                } else if is_ui_entity {
+                    // No explicit parent but this is a UI entity - parent to window root
+                    if let Some(main_window_id) = widget_registry.window_roots.keys().next().copied() {
+                        if let Some(root_entity) = widget_registry.get_window_root(main_window_id) {
+                            commands.entity(entity).insert(ChildOf(root_entity));
+                            tracing::debug!(
+                                "UI entity {} parented to window {} root {:?}",
+                                script_id, main_window_id, root_entity
+                            );
+                        } else {
+                            tracing::warn!(
+                                "No root UI node found for window {}, UI entity {} may not be visible",
+                                main_window_id, script_id
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            "No window available, UI entity {} may not be visible",
+                            script_id
+                        );
+                    }
+                }
+
+                tracing::debug!(
+                    "Spawned entity {} (Bevy {:?}) for mod '{}'",
+                    script_id, entity, owner_mod
+                );
+
+                let _ = response_tx.send(Ok(script_id));
+            }
+
+            GraphicCommand::DespawnEntity { entity_id, response_tx } => {
+                if let Some(entity) = script_entity_registry.unregister(entity_id) {
+                    // Clean up any registered event callbacks for this entity
+                    entity_event_callback_registry.remove_entity(entity_id);
+                    commands.entity(entity).despawn();
+                    tracing::debug!("Despawned entity {} (Bevy {:?})", entity_id, entity);
+                    let _ = response_tx.send(Ok(()));
+                } else {
+                    let _ = response_tx.send(Err(format!("Entity {} not found", entity_id)));
+                }
+            }
+
+            GraphicCommand::InsertComponent {
+                entity_id,
+                component_name,
+                component_data,
+                response_tx,
+            } => {
+                use native_component_converters::*;
+
+                let result = (|| -> Result<(), String> {
+                    let entity = script_entity_registry
+                        .get_entity(entity_id)
+                        .ok_or_else(|| format!("Entity {} not found", entity_id))?;
+
+                    // Check if this is a native Bevy component
+                    if let Some(native) = NativeComponent::from_name(&component_name) {
+                        match native {
+                            NativeComponent::Transform => {
+                                // Check if entity already has Transform, update or insert
+                                if let Ok(mut transform) = transform_query.get_mut(entity) {
+                                    json_to_transform(&component_data, &mut transform)?;
+                                    tracing::debug!("Updated native Transform on entity {}", entity_id);
+                                } else {
+                                    let transform = json_to_new_transform(&component_data)?;
+                                    commands.entity(entity).insert(transform);
+                                    tracing::debug!("Inserted native Transform on entity {}", entity_id);
+                                }
+                            }
+                            NativeComponent::Sprite => {
+                                if let Ok(mut sprite) = sprite_query.get_mut(entity) {
+                                    json_to_sprite(&component_data, &mut sprite)?;
+                                    tracing::debug!("Updated native Sprite on entity {}", entity_id);
+                                } else {
+                                    let sprite = json_to_new_sprite(&component_data)?;
+                                    commands.entity(entity).insert(sprite);
+                                    tracing::debug!("Inserted native Sprite on entity {}", entity_id);
+                                }
+                            }
+                            NativeComponent::Visibility => {
+                                let visibility = json_to_visibility(&component_data)?;
+                                commands.entity(entity).insert(visibility);
+                                tracing::debug!("Inserted/Updated native Visibility on entity {}", entity_id);
+                            }
+                            // UI Components
+                            NativeComponent::Node => {
+                                if let Ok(mut node) = ecs_node_query.get_mut(entity) {
+                                    json_to_node(&component_data, &mut node)?;
+                                    tracing::debug!("Updated native Node on entity {}", entity_id);
+                                } else {
+                                    let node = json_to_new_node(&component_data)?;
+                                    commands.entity(entity).insert(node);
+                                    tracing::debug!("Inserted native Node on entity {}", entity_id);
+                                }
+                            }
+                            NativeComponent::BackgroundColor => {
+                                let bg = json_to_background_color(&component_data)?;
+                                commands.entity(entity).insert(bg);
+                                tracing::debug!("Inserted/Updated native BackgroundColor on entity {}", entity_id);
+                            }
+                            NativeComponent::Text => {
+                                // Always re-insert all text components to ensure font_size, font, and color are updated
+                                let config = json_to_text_config(&component_data)?;
+
+                                // Resolve font handle from registry if specified, or use window default
+                                let font_handle = config.font_alias
+                                    .as_ref()
+                                    .and_then(|alias| font_registry.get_font(alias))
+                                    .or_else(|| {
+                                        // Try to get window's default font
+                                        widget_registry.window_roots.keys().next()
+                                            .and_then(|&window_id| {
+                                                let window_font = font_registry.get_window_font(window_id);
+                                                font_registry.get_font(&window_font.family)
+                                            })
+                                    });
+
+                                let text_font = bevy::text::TextFont {
+                                    font: font_handle.unwrap_or_default(),
+                                    font_size: config.font_size,
+                                    ..default()
+                                };
+
+                                commands.entity(entity).insert((
+                                    bevy::prelude::Text::new(config.content),
+                                    text_font,
+                                    bevy::text::TextColor(config.color),
+                                ));
+                                tracing::debug!("Updated native Text on entity {}", entity_id);
+                            }
+                            NativeComponent::BorderRadius => {
+                                let radius = json_to_border_radius(&component_data)?;
+                                commands.entity(entity).insert(radius);
+                                tracing::debug!("Inserted/Updated native BorderRadius on entity {}", entity_id);
+                            }
+                            NativeComponent::Interaction => {
+                                let interaction = json_to_interaction(&component_data)?;
+                                // Also add PreviousInteraction for change tracking
+                                commands.entity(entity).insert((
+                                    interaction,
+                                    ScriptEntityPreviousInteraction::default(),
+                                ));
+                                tracing::debug!("Inserted/Updated native Interaction on entity {}", entity_id);
+                            }
+                            NativeComponent::Button => {
+                                let button = json_to_button(&component_data)?;
+                                commands.entity(entity).insert(button);
+                                tracing::debug!("Inserted native Button on entity {}", entity_id);
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    // Custom script component
+                    // Validate component data if schema exists
+                    if let Err(e) = script_component_registry.validate(&component_name, &component_data) {
+                        tracing::warn!("Component '{}' validation warning: {}", component_name, e);
+                    }
+
+                    // Check if this component type already exists on the entity
+                    // We need to iterate children to find ScriptComponents
+                    let mut found = false;
+                    for (_comp_entity, mut comp) in script_component_query.iter_mut() {
+                        // Check if this component belongs to our entity (is a child)
+                        // For now, we use a simpler approach: spawn as child
+                        if comp.type_name == component_name {
+                            // Component exists, update it
+                            comp.data = component_data.clone();
+                            found = true;
+                            break;
+                        }
+                    }
+
+                    if !found {
+                        // Add new component as child entity
+                        commands.entity(entity).with_child(ScriptComponent {
+                            type_name: component_name.clone(),
+                            data: component_data,
+                        });
+                    }
+
+                    tracing::debug!("Inserted component '{}' on entity {}", component_name, entity_id);
+                    Ok(())
+                })();
+
+                let _ = response_tx.send(result);
+            }
+
+            GraphicCommand::UpdateComponent {
+                entity_id,
+                component_name,
+                component_data,
+                response_tx,
+            } => {
+                use native_component_converters::*;
+
+                let result = (|| -> Result<(), String> {
+                    let entity = script_entity_registry
+                        .get_entity(entity_id)
+                        .ok_or_else(|| format!("Entity {} not found", entity_id))?;
+
+                    // Handle Disabled pseudo-component
+                    if component_name == "Disabled" {
+                        let disabled = component_data.as_bool()
+                            .or_else(|| component_data.as_str().map(|s| s.eq_ignore_ascii_case("true")))
+                            .unwrap_or(false);
+
+                        if disabled {
+                            commands.entity(entity).insert(ScriptButtonDisabled);
+                            tracing::debug!("Added ScriptButtonDisabled marker to entity {}", entity_id);
+                        } else {
+                            commands.entity(entity).remove::<ScriptButtonDisabled>();
+                            tracing::debug!("Removed ScriptButtonDisabled marker from entity {}", entity_id);
+                        }
+                        return Ok(());
+                    }
+
+                    // Handle button color pseudo-components (HoverBackgroundColor, PressedBackgroundColor, DisabledBackgroundColor)
+                    // These update the ScriptButtonColors component if present on the entity
+                    if component_name == "HoverBackgroundColor"
+                        || component_name == "PressedBackgroundColor"
+                        || component_name == "DisabledBackgroundColor"
+                    {
+                        if let Ok(mut button_colors) = button_colors_query.get_mut(entity) {
+                            let color = json_to_color(&component_data)?;
+                            match component_name.as_str() {
+                                "HoverBackgroundColor" => {
+                                    button_colors.hovered = Some(color);
+                                    tracing::debug!("Updated HoverBackgroundColor on entity {}", entity_id);
+                                }
+                                "PressedBackgroundColor" => {
+                                    button_colors.pressed = Some(color);
+                                    tracing::debug!("Updated PressedBackgroundColor on entity {}", entity_id);
+                                }
+                                "DisabledBackgroundColor" => {
+                                    button_colors.disabled = Some(color);
+                                    tracing::debug!("Updated DisabledBackgroundColor on entity {}", entity_id);
+                                }
+                                _ => unreachable!()
+                            }
+                            return Ok(());
+                        } else {
+                            // Entity doesn't have ScriptButtonColors - create one with default normal color
+                            // and the specified state color
+                            let normal_color = if let Ok(bg) = ecs_bg_color_query.get(entity) {
+                                bg.0
+                            } else {
+                                Color::srgb(0.3, 0.3, 0.3) // default gray
+                            };
+                            let color = json_to_color(&component_data)?;
+                            let button_colors = match component_name.as_str() {
+                                "HoverBackgroundColor" => ScriptButtonColors {
+                                    normal: normal_color,
+                                    hovered: Some(color),
+                                    pressed: None,
+                                    disabled: None,
+                                },
+                                "PressedBackgroundColor" => ScriptButtonColors {
+                                    normal: normal_color,
+                                    hovered: None,
+                                    pressed: Some(color),
+                                    disabled: None,
+                                },
+                                "DisabledBackgroundColor" => ScriptButtonColors {
+                                    normal: normal_color,
+                                    hovered: None,
+                                    pressed: None,
+                                    disabled: Some(color),
+                                },
+                                _ => unreachable!()
+                            };
+                            commands.entity(entity).insert(button_colors);
+                            tracing::debug!("Created ScriptButtonColors with {} on entity {}", component_name, entity_id);
+                            return Ok(());
+                        }
+                    }
+
+                    // Check if this is a native Bevy component
+                    if let Some(native) = NativeComponent::from_name(&component_name) {
+                        match native {
+                            NativeComponent::Node => {
+                                // Get existing Node and merge with new data
+                                // Use ecs_node_query which includes ScriptEntity entities
+                                if let Ok(existing_node) = ecs_node_query.get(entity) {
+                                    let mut new_node = existing_node.clone();
+                                    json_to_node(&component_data, &mut new_node)?;
+                                    commands.entity(entity).insert(new_node);
+                                    tracing::debug!("Updated native Node on entity {}", entity_id);
+                                } else {
+                                    return Err(format!("Entity {} does not have Node component", entity_id));
+                                }
+                            }
+                            NativeComponent::Text => {
+                                // For Text update, we only support updating the value field
+                                // Other fields (font_size, color) require full insert
+                                if let Ok(mut existing_text) = ecs_text_query.get_mut(entity) {
+                                    // Only update text content if provided
+                                    if let Some(value) = component_data.get("value").or(component_data.get("content")) {
+                                        if let Some(text_str) = value.as_str() {
+                                            **existing_text = text_str.to_string();
+                                            tracing::debug!("Updated native Text value on entity {}", entity_id);
+                                        }
+                                    }
+                                } else {
+                                    return Err(format!("Entity {} does not have Text component", entity_id));
+                                }
+                            }
+                            NativeComponent::BackgroundColor => {
+                                // For simple components, just replace (no merge needed for single value)
+                                let bg = json_to_background_color(&component_data)?;
+                                commands.entity(entity).insert(bg);
+                                // Also update normal color in ScriptButtonColors if present
+                                if let Ok(mut button_colors) = button_colors_query.get_mut(entity) {
+                                    button_colors.normal = bg.0;
+                                    tracing::debug!("Updated normal color in ScriptButtonColors on entity {}", entity_id);
+                                }
+                                tracing::debug!("Updated native BackgroundColor on entity {}", entity_id);
+                            }
+                            NativeComponent::BorderRadius => {
+                                let radius = json_to_border_radius(&component_data)?;
+                                commands.entity(entity).insert(radius);
+                                tracing::debug!("Updated native BorderRadius on entity {}", entity_id);
+                            }
+                            _ => {
+                                return Err(format!("Update not supported for component '{}'", component_name));
+                            }
+                        }
+                        return Ok(());
+                    }
+
+                    // Custom script component - merge data
+                    for (_comp_entity, mut comp) in script_component_query.iter_mut() {
+                        if comp.type_name == component_name {
+                            let merged = merge_json(&comp.data, &component_data);
+                            comp.data = merged;
+                            tracing::debug!("Updated component '{}' on entity {}", component_name, entity_id);
+                            return Ok(());
+                        }
+                    }
+
+                    Err(format!("Component '{}' not found on entity {}", component_name, entity_id))
+                })();
+
+                let _ = response_tx.send(result);
+            }
+
+            GraphicCommand::RemoveComponent {
+                entity_id,
+                component_name,
+                response_tx,
+            } => {
+                let result = (|| -> Result<(), String> {
+                    let entity = script_entity_registry
+                        .get_entity(entity_id)
+                        .ok_or_else(|| format!("Entity {} not found", entity_id))?;
+
+                    // Check if this is a native Bevy component
+                    if let Some(native) = NativeComponent::from_name(&component_name) {
+                        match native {
+                            NativeComponent::Transform => {
+                                if transform_query.get(entity).is_ok() {
+                                    commands.entity(entity).remove::<Transform>();
+                                    tracing::debug!("Removed native Transform from entity {}", entity_id);
+                                    return Ok(());
+                                }
+                            }
+                            NativeComponent::Sprite => {
+                                if sprite_query.get(entity).is_ok() {
+                                    commands.entity(entity).remove::<Sprite>();
+                                    tracing::debug!("Removed native Sprite from entity {}", entity_id);
+                                    return Ok(());
+                                }
+                            }
+                            NativeComponent::Visibility => {
+                                if visibility_query.get(entity).is_ok() {
+                                    commands.entity(entity).remove::<Visibility>();
+                                    tracing::debug!("Removed native Visibility from entity {}", entity_id);
+                                    return Ok(());
+                                }
+                            }
+                            // UI Components
+                            NativeComponent::Node => {
+                                if ecs_node_query.get(entity).is_ok() {
+                                    commands.entity(entity).remove::<Node>();
+                                    tracing::debug!("Removed native Node from entity {}", entity_id);
+                                    return Ok(());
+                                }
+                            }
+                            NativeComponent::BackgroundColor => {
+                                if ecs_bg_color_query.get(entity).is_ok() {
+                                    commands.entity(entity).remove::<BackgroundColor>();
+                                    tracing::debug!("Removed native BackgroundColor from entity {}", entity_id);
+                                    return Ok(());
+                                }
+                            }
+                            NativeComponent::Text => {
+                                if ecs_text_query.get(entity).is_ok() {
+                                    commands.entity(entity).remove::<Text>();
+                                    tracing::debug!("Removed native Text from entity {}", entity_id);
+                                    return Ok(());
+                                }
+                            }
+                            NativeComponent::BorderRadius => {
+                                if ecs_border_radius_query.get(entity).is_ok() {
+                                    commands.entity(entity).remove::<BorderRadius>();
+                                    tracing::debug!("Removed native BorderRadius from entity {}", entity_id);
+                                    return Ok(());
+                                }
+                            }
+                            NativeComponent::Interaction => {
+                                commands.entity(entity).remove::<Interaction>();
+                                commands.entity(entity).remove::<ScriptEntityPreviousInteraction>();
+                                tracing::debug!("Removed native Interaction from entity {}", entity_id);
+                                return Ok(());
+                            }
+                            NativeComponent::Button => {
+                                commands.entity(entity).remove::<bevy::ui::widget::Button>();
+                                tracing::debug!("Removed native Button from entity {}", entity_id);
+                                return Ok(());
+                            }
+                        }
+                        return Err(format!(
+                            "Native component '{}' not found on entity {}",
+                            component_name, entity_id
+                        ));
+                    }
+
+                    // Custom script component
+                    // Find and despawn the component child entity
+                    let mut removed = false;
+                    for (comp_entity, comp) in script_component_query.iter() {
+                        if comp.type_name == component_name {
+                            commands.entity(comp_entity).despawn();
+                            removed = true;
+                            break;
+                        }
+                    }
+
+                    if removed {
+                        tracing::debug!("Removed component '{}' from entity {}", component_name, entity_id);
+                        Ok(())
+                    } else {
+                        Err(format!(
+                            "Component '{}' not found on entity {}",
+                            component_name, entity_id
+                        ))
+                    }
+                })();
+
+                let _ = response_tx.send(result);
+            }
+
+            GraphicCommand::GetComponent {
+                entity_id,
+                component_name,
+                response_tx,
+            } => {
+                use native_component_converters::*;
+
+                let result = (|| -> Result<Option<serde_json::Value>, String> {
+                    let entity = script_entity_registry
+                        .get_entity(entity_id)
+                        .ok_or_else(|| format!("Entity {} not found", entity_id))?;
+
+                    // Check if this is a native Bevy component
+                    if let Some(native) = NativeComponent::from_name(&component_name) {
+                        match native {
+                            NativeComponent::Transform => {
+                                if let Ok(transform) = transform_query.get(entity) {
+                                    return Ok(Some(transform_to_json(&transform)));
+                                }
+                            }
+                            NativeComponent::Sprite => {
+                                if let Ok(sprite) = sprite_query.get(entity) {
+                                    return Ok(Some(sprite_to_json(&sprite)));
+                                }
+                            }
+                            NativeComponent::Visibility => {
+                                if let Ok(visibility) = visibility_query.get(entity) {
+                                    return Ok(Some(visibility_to_json(&visibility)));
+                                }
+                            }
+                            // UI Components
+                            NativeComponent::Node => {
+                                if let Ok(node) = ecs_node_query.get(entity) {
+                                    return Ok(Some(node_to_json(&node)));
+                                }
+                            }
+                            NativeComponent::BackgroundColor => {
+                                if let Ok(bg) = ecs_bg_color_query.get(entity) {
+                                    return Ok(Some(background_color_to_json(&bg)));
+                                }
+                            }
+                            NativeComponent::Text => {
+                                if let Ok(text) = ecs_text_query.get(entity) {
+                                    return Ok(Some(text_to_json(&text)));
+                                }
+                            }
+                            NativeComponent::BorderRadius => {
+                                if let Ok(radius) = ecs_border_radius_query.get(entity) {
+                                    return Ok(Some(border_radius_to_json(&radius)));
+                                }
+                            }
+                            NativeComponent::Interaction => {
+                                if let Ok(interaction) = ecs_interaction_query.get(entity) {
+                                    return Ok(Some(interaction_to_json(&interaction)));
+                                }
+                            }
+                            NativeComponent::Button => {
+                                if ecs_button_query.get(entity).is_ok() {
+                                    // Button is a marker component, return true/empty object
+                                    return Ok(Some(serde_json::json!(true)));
+                                }
+                            }
+                        }
+                        return Ok(None);
+                    }
+
+                    // Custom script component
+                    // Find the component among children
+                    for (_comp_entity, comp) in script_component_query.iter() {
+                        if comp.type_name == component_name {
+                            return Ok(Some(comp.data.clone()));
+                        }
+                    }
+
+                    Ok(None)
+                })();
+
+                let _ = response_tx.send(result);
+            }
+
+            GraphicCommand::HasComponent {
+                entity_id,
+                component_name,
+                response_tx,
+            } => {
+                let result = (|| -> Result<bool, String> {
+                    let entity = script_entity_registry
+                        .get_entity(entity_id)
+                        .ok_or_else(|| format!("Entity {} not found", entity_id))?;
+
+                    // Check if this is a native Bevy component
+                    if let Some(native) = NativeComponent::from_name(&component_name) {
+                        match native {
+                            NativeComponent::Transform => {
+                                return Ok(transform_query.get(entity).is_ok());
+                            }
+                            NativeComponent::Sprite => {
+                                return Ok(sprite_query.get(entity).is_ok());
+                            }
+                            NativeComponent::Visibility => {
+                                return Ok(visibility_query.get(entity).is_ok());
+                            }
+                            // UI Components
+                            NativeComponent::Node => {
+                                return Ok(ecs_node_query.get(entity).is_ok());
+                            }
+                            NativeComponent::BackgroundColor => {
+                                return Ok(ecs_bg_color_query.get(entity).is_ok());
+                            }
+                            NativeComponent::Text => {
+                                return Ok(ecs_text_query.get(entity).is_ok());
+                            }
+                            NativeComponent::BorderRadius => {
+                                return Ok(ecs_border_radius_query.get(entity).is_ok());
+                            }
+                            NativeComponent::Interaction => {
+                                return Ok(ecs_interaction_query.get(entity).is_ok());
+                            }
+                            NativeComponent::Button => {
+                                return Ok(ecs_button_query.get(entity).is_ok());
+                            }
+                        }
+                    }
+
+                    // Custom script component
+                    // Check if component exists among children
+                    for (_comp_entity, comp) in script_component_query.iter() {
+                        if comp.type_name == component_name {
+                            return Ok(true);
+                        }
+                    }
+
+                    Ok(false)
+                })();
+
+                let _ = response_tx.send(result);
+            }
+
+            GraphicCommand::QueryEntities { options, response_tx } => {
+                use native_component_converters::*;
+
+                let mut results = Vec::new();
+
+                // Iterate all script entities
+                for (entity, script_entity) in script_entity_query.iter() {
+                    let mut matches = true;
+                    let mut components_data = HashMap::new();
+
+                    // Collect native components for this entity
+                    if let Ok(transform) = transform_query.get(entity) {
+                        components_data.insert("Transform".to_string(), transform_to_json(&transform));
+                    }
+                    if let Ok(sprite) = sprite_query.get(entity) {
+                        components_data.insert("Sprite".to_string(), sprite_to_json(&sprite));
+                    }
+                    if let Ok(visibility) = visibility_query.get(entity) {
+                        components_data.insert("Visibility".to_string(), visibility_to_json(&visibility));
+                    }
+
+                    // Collect UI components for this entity
+                    if let Ok(node) = ecs_node_query.get(entity) {
+                        components_data.insert("Node".to_string(), node_to_json(&node));
+                    }
+                    if let Ok(bg_color) = ecs_bg_color_query.get(entity) {
+                        components_data.insert("BackgroundColor".to_string(), background_color_to_json(&bg_color));
+                    }
+                    if let Ok(text) = ecs_text_query.get(entity) {
+                        components_data.insert("Text".to_string(), text_to_json(&text));
+                    }
+                    if let Ok(border_radius) = ecs_border_radius_query.get(entity) {
+                        components_data.insert("BorderRadius".to_string(), border_radius_to_json(&border_radius));
+                    }
+                    if let Ok(interaction) = ecs_interaction_query.get(entity) {
+                        components_data.insert("Interaction".to_string(), interaction_to_json(&interaction));
+                    }
+                    if ecs_button_query.get(entity).is_ok() {
+                        components_data.insert("Button".to_string(), serde_json::json!(true));
+                    }
+
+                    // Collect custom script components for this entity
+                    // Note: This is a simplified approach. In a real implementation,
+                    // we'd need to properly associate ScriptComponents with their parent entities.
+                    for (_comp_entity, comp) in script_component_query.iter() {
+                        components_data.insert(comp.type_name.clone(), comp.data.clone());
+                    }
+
+                    // Check "with" conditions
+                    for with_name in &options.with_components {
+                        if !components_data.contains_key(with_name) {
+                            matches = false;
+                            break;
+                        }
+                    }
+
+                    // Check "without" conditions
+                    if matches {
+                        for without_name in &options.without_components {
+                            if components_data.contains_key(without_name) {
+                                matches = false;
+                                break;
+                            }
+                        }
+                    }
+
+                    if matches {
+                        // Only include requested components in result
+                        let mut result_components = HashMap::new();
+                        for with_name in &options.with_components {
+                            if let Some(data) = components_data.get(with_name) {
+                                result_components.insert(with_name.clone(), data.clone());
+                            }
+                        }
+
+                        results.push(QueryResult {
+                            entity_id: script_entity.script_id,
+                            components: result_components,
+                        });
+
+                        // Check limit
+                        if let Some(limit) = options.limit {
+                            if results.len() >= limit {
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                tracing::debug!("Query returned {} entities", results.len());
+                let _ = response_tx.send(Ok(results));
+            }
+
+            GraphicCommand::RegisterComponent { schema, response_tx } => {
+                let result = script_component_registry.register(schema);
+                let _ = response_tx.send(result);
+            }
+
+            GraphicCommand::DeclareSystem { system, response_tx } => {
+                let result = declared_system_registry.register(system);
+                let _ = response_tx.send(result);
+            }
+
+            GraphicCommand::SetSystemEnabled { name, enabled, response_tx } => {
+                let result = if let Some(system) = declared_system_registry.get_mut(&name) {
+                    system.enabled = enabled;
+                    tracing::debug!("System '{}' enabled={}", name, enabled);
+                    Ok(())
+                } else {
+                    Err(format!("System '{}' not found", name))
+                };
+                let _ = response_tx.send(result);
+            }
+
+            GraphicCommand::RemoveSystem { name, response_tx } => {
+                let result = if declared_system_registry.remove(&name).is_some() {
+                    tracing::debug!("Removed system '{}'", name);
+                    Ok(())
+                } else {
+                    Err(format!("System '{}' not found", name))
+                };
+                let _ = response_tx.send(result);
+            }
+
+            GraphicCommand::RegisterEntityEventCallback {
+                entity_id,
+                event_type,
+                response_tx,
+            } => {
+                entity_event_callback_registry.register(entity_id, &event_type);
+                tracing::trace!("Registered '{}' callback for entity {}", event_type, entity_id);
+                let _ = response_tx.send(Ok(()));
+            }
+
+            GraphicCommand::UnregisterEntityEventCallback {
+                entity_id,
+                event_type,
+                response_tx,
+            } => {
+                entity_event_callback_registry.unregister(entity_id, &event_type);
+                tracing::trace!("Unregistered '{}' callback for entity {}", event_type, entity_id);
+                let _ = response_tx.send(Ok(()));
+            }
         }
     }
 }
@@ -1956,9 +4031,9 @@ fn update_widget_property(
     entity: Entity,
     property: &str,
     value: &PropertyValue,
-    text_query: &mut Query<&mut Text>,
-    bg_color_query: &mut Query<&mut BackgroundColor>,
-    node_query: &mut Query<&mut Node>,
+    text_query: &mut Query<&mut Text, Without<ScriptEntity>>,
+    bg_color_query: &mut Query<&mut BackgroundColor, Without<ScriptEntity>>,
+    node_query: &mut Query<&mut Node, Without<ScriptEntity>>,
     text_color_query: &mut Query<&mut TextColor>,
     button_query: &mut Query<(&mut ButtonColors, Option<&Interaction>, Option<&Children>)>,
     commands: &mut Commands,
@@ -2142,11 +4217,40 @@ const PRIMARY_WINDOW_ID: u64 = 1;
 /// widget is created for that window (in CreateWidget handler).
 fn register_primary_window(
     mut registry: ResMut<WindowRegistry>,
+    mut widget_registry: ResMut<WidgetRegistry>,
     primary_window_query: Query<Entity, With<PrimaryWindow>>,
+    mut commands: Commands,
 ) {
-    if let Ok(entity) = primary_window_query.single() {
-        registry.register(PRIMARY_WINDOW_ID, entity);
+    if let Ok(window_entity) = primary_window_query.single() {
+        registry.register(PRIMARY_WINDOW_ID, window_entity);
         tracing::debug!("Registered primary window as ID {}", PRIMARY_WINDOW_ID);
+
+        // Create camera and root UI node for the primary window immediately
+        // This ensures ECS entities can be parented to the window even before any widget is created
+        let camera_entity = commands.spawn((
+            Camera2d::default(),
+            Camera {
+                target: RenderTarget::Window(WindowRef::Entity(window_entity)),
+                clear_color: ClearColorConfig::Custom(Color::srgb(0.1, 0.1, 0.1)),
+                ..default()
+            },
+        )).id();
+        widget_registry.set_window_camera(PRIMARY_WINDOW_ID, camera_entity);
+        tracing::debug!("Created camera {:?} for primary window {}", camera_entity, PRIMARY_WINDOW_ID);
+
+        // Create root UI node for this window
+        let root = commands.spawn((
+            Node {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                flex_direction: bevy::ui::FlexDirection::Column,
+                align_items: bevy::ui::AlignItems::Stretch,
+                ..default()
+            },
+            UiTargetCamera(camera_entity),
+        )).id();
+        widget_registry.set_window_root(PRIMARY_WINDOW_ID, root);
+        tracing::debug!("Created root UI node {:?} for primary window {}", root, PRIMARY_WINDOW_ID);
     } else {
         tracing::warn!("No primary window found to register");
     }
@@ -2183,7 +4287,7 @@ fn check_pending_assets(
         return;
     }
 
-    tracing::trace!("check_pending_assets: {} assets pending", pending_assets.pending.len());
+    //tracing::trace!("check_pending_assets: {} assets pending", pending_assets.pending.len());
 
     // Take all pending assets and check each one
     let mut still_pending = Vec::new();
@@ -2191,10 +4295,10 @@ fn check_pending_assets(
     for entry in std::mem::take(&mut pending_assets.pending) {
         // Check if the asset is loaded
         let load_state = asset_server.get_load_state(entry.handle_id);
-        tracing::trace!(
-            "Asset '{}' (id={:?}) load_state={:?}",
-            entry.alias, entry.handle_id, load_state
-        );
+        // tracing::trace!(
+        //     "Asset '{}' (id={:?}) load_state={:?}",
+        //     entry.alias, entry.handle_id, load_state
+        // );
 
         match load_state {
             Some(bevy::asset::LoadState::Loaded) => {
@@ -2455,6 +4559,165 @@ fn handle_widget_interactions(
     }
 }
 
+/// Component to track previous interaction state for ECS entities
+#[derive(Component, Default)]
+struct ScriptEntityPreviousInteraction(Interaction);
+
+/// System to handle interactions on ECS entities with Button + Interaction components
+fn handle_script_entity_interactions(
+    mut commands: Commands,
+    event_tx: Res<EventSenderRes>,
+    event_callback_registry: Res<EntityEventCallbackRegistry>,
+    mut changed_query: Query<
+        (
+            &ScriptEntity,
+            &Interaction,
+            &mut ScriptEntityPreviousInteraction,
+        ),
+        (Changed<Interaction>, With<bevy::ui::widget::Button>),
+    >,
+    all_buttons_query: Query<&Interaction, With<bevy::ui::widget::Button>>,
+    windows: Query<(Entity, &Window), With<PrimaryWindow>>,
+) {
+    // Get window entity and cursor position for events
+    let (window_entity, cursor_pos) = windows
+        .single()
+        .map(|(entity, w)| (Some(entity), w.cursor_position().unwrap_or(Vec2::ZERO)))
+        .unwrap_or((None, Vec2::ZERO));
+
+    // Process changed interactions and send events
+    for (script_entity, interaction, mut prev_interaction) in changed_query.iter_mut() {
+        let prev = prev_interaction.0;
+        prev_interaction.0 = *interaction;
+
+        // Only send event when state actually changes
+        if *interaction != prev {
+            let entity_id = script_entity.script_id;
+
+            // Check if entity has a direct click callback registered
+            // If so, send EntityEventCallback on "pressed" instead of EntityInteractionChanged
+            if *interaction == Interaction::Pressed && event_callback_registry.has_callback(entity_id, "click") {
+                tracing::trace!(
+                    "Entity {} clicked - triggering direct callback at ({}, {})",
+                    entity_id,
+                    cursor_pos.x,
+                    cursor_pos.y
+                );
+                let _ = event_tx.0.try_send(GraphicEvent::EntityEventCallback {
+                    entity_id,
+                    event_type: "click".to_string(),
+                    x: cursor_pos.x,
+                    y: cursor_pos.y,
+                });
+            } else {
+                // Send generic interaction changed event
+                let interaction_str = match *interaction {
+                    Interaction::None => "none",
+                    Interaction::Hovered => "hovered",
+                    Interaction::Pressed => "pressed",
+                };
+
+                tracing::trace!(
+                    "Entity {} interaction changed to '{}' at ({}, {})",
+                    entity_id,
+                    interaction_str,
+                    cursor_pos.x,
+                    cursor_pos.y
+                );
+
+                let _ = event_tx.0.try_send(GraphicEvent::EntityInteractionChanged {
+                    entity_id,
+                    interaction: interaction_str.to_string(),
+                    x: cursor_pos.x,
+                    y: cursor_pos.y,
+                });
+            }
+        }
+    }
+
+    // Check if any button is hovered to update cursor
+    let any_hovered = all_buttons_query.iter().any(|interaction| {
+        *interaction == Interaction::Hovered || *interaction == Interaction::Pressed
+    });
+
+    // Update window cursor based on hover state
+    if let Some(window_entity) = window_entity {
+        let cursor = if any_hovered {
+            CursorIcon::System(SystemCursorIcon::Pointer)
+        } else {
+            CursorIcon::System(SystemCursorIcon::Default)
+        };
+        commands.entity(window_entity).insert(cursor);
+    }
+}
+
+/// System to apply ScriptButtonColors based on interaction state
+///
+/// This system automatically updates the BackgroundColor of entities that have
+/// ScriptButtonColors component based on their current Interaction state.
+fn apply_script_button_colors(
+    mut query: Query<
+        (
+            &Interaction,
+            &ScriptButtonColors,
+            &mut BackgroundColor,
+            Option<&ScriptButtonDisabled>,
+        ),
+        (Changed<Interaction>, With<bevy::ui::widget::Button>),
+    >,
+) {
+    for (interaction, colors, mut bg_color, disabled) in query.iter_mut() {
+        let is_disabled = disabled.is_some();
+        let new_color = colors.color_for_interaction(*interaction, is_disabled);
+        *bg_color = BackgroundColor(new_color);
+    }
+}
+
+/// System to update button colors when ScriptButtonDisabled is added or removed.
+/// This complements apply_script_button_colors which only triggers on Interaction changes.
+fn apply_disabled_button_colors(
+    mut query: Query<
+        (
+            &Interaction,
+            &ScriptButtonColors,
+            &mut BackgroundColor,
+        ),
+        (
+            Changed<ScriptButtonDisabled>,
+            With<bevy::ui::widget::Button>,
+        ),
+    >,
+    disabled_query: Query<&ScriptButtonDisabled>,
+) {
+    for (interaction, colors, mut bg_color) in query.iter_mut() {
+        // Check if entity has ScriptButtonDisabled (we can't use Option in Changed<> filter)
+        let is_disabled = true; // If we got here via Changed<ScriptButtonDisabled>, it was added
+        let new_color = colors.color_for_interaction(*interaction, is_disabled);
+        *bg_color = BackgroundColor(new_color);
+    }
+}
+
+/// System to update button colors when ScriptButtonDisabled is removed.
+/// RemovedComponents detects when the marker component is removed from an entity.
+fn apply_enabled_button_colors(
+    mut removed: RemovedComponents<ScriptButtonDisabled>,
+    mut query: Query<
+        (
+            &Interaction,
+            &ScriptButtonColors,
+            &mut BackgroundColor,
+        ),
+        With<bevy::ui::widget::Button>,
+    >,
+) {
+    for entity in removed.read() {
+        if let Ok((interaction, colors, mut bg_color)) = query.get_mut(entity) {
+            let new_color = colors.color_for_interaction(*interaction, false);
+            *bg_color = BackgroundColor(new_color);
+        }
+    }
+}
+
 /// System to update Cover/Contain images based on actual image dimensions
 ///
 /// This system runs each frame and checks for images with CoverContainImage component.
@@ -2586,4 +4849,549 @@ fn update_cover_contain_images(
         // Remember the container size to detect changes
         cover_contain.last_container_size = parent_size;
     }
+}
+
+// ============================================================================
+// Declared Systems Execution
+// ============================================================================
+
+/// Run all declared systems (behaviors and formulas)
+///
+/// This system iterates through all enabled declared systems and executes
+/// their behaviors on matching entities. This runs every frame after
+/// process_commands but before event handlers.
+fn run_declared_systems(
+    time: Res<Time>,
+    declared_system_registry: Res<DeclaredSystemRegistry>,
+    script_entity_registry: Res<ScriptEntityRegistry>,
+    script_entity_query: Query<(Entity, &ScriptEntity)>,
+    mut script_component_query: Query<(Entity, &mut ScriptComponent)>,
+    mut transform_query: Query<&mut Transform, With<ScriptEntity>>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    let total_time = time.elapsed_secs();
+
+    // Get sorted list of enabled systems
+    let systems: Vec<_> = {
+        let mut systems: Vec<_> = declared_system_registry
+            .systems
+            .values()
+            .filter(|s| s.enabled)
+            .collect();
+        systems.sort_by_key(|s| s.order);
+        systems
+    };
+
+    if systems.is_empty() {
+        return;
+    }
+
+    // For each declared system
+    for system in systems {
+        // Skip systems without behavior or formulas
+        if system.behavior.is_none() && system.formulas.is_none() {
+            continue;
+        }
+
+        // Find matching entities based on query
+        let matching_entities: Vec<Entity> = script_entity_query
+            .iter()
+            .filter_map(|(entity, script_entity)| {
+                // Check "with" components
+                let has_required = system.query.with_components.iter().all(|comp_name| {
+                    // Check if entity has this component
+                    // For native components, check directly
+                    if comp_name == "Transform" {
+                        return transform_query.get(entity).is_ok();
+                    }
+                    // For script components, search
+                    script_component_query.iter().any(|(comp_entity, comp)| {
+                        // Check if this component belongs to this entity
+                        // Note: We need a parent relationship check here
+                        comp.type_name == *comp_name
+                    })
+                });
+
+                if !has_required {
+                    return None;
+                }
+
+                // Check "without" components
+                let has_excluded = system.query.without_components.iter().any(|comp_name| {
+                    if comp_name == "Transform" {
+                        return transform_query.get(entity).is_ok();
+                    }
+                    script_component_query
+                        .iter()
+                        .any(|(_, comp)| comp.type_name == *comp_name)
+                });
+
+                if has_excluded {
+                    return None;
+                }
+
+                Some(entity)
+            })
+            .collect();
+
+        // Execute behavior or formulas for each matching entity
+        for entity in matching_entities {
+            // Execute behavior if present
+            if let Some(behavior) = &system.behavior {
+                execute_behavior(
+                    behavior,
+                    entity,
+                    &system.config,
+                    dt,
+                    total_time,
+                    &mut transform_query,
+                    &mut script_component_query,
+                    &mut commands,
+                );
+            }
+
+            // Execute formulas if present
+            if let Some(formulas) = &system.formulas {
+                execute_formulas(
+                    formulas,
+                    entity,
+                    dt,
+                    total_time,
+                    &mut transform_query,
+                    &mut script_component_query,
+                );
+            }
+        }
+    }
+}
+
+/// Execute a single behavior on an entity
+fn execute_behavior(
+    behavior: &SystemBehavior,
+    entity: Entity,
+    config: &Option<serde_json::Value>,
+    dt: f32,
+    _total_time: f32,
+    transform_query: &mut Query<&mut Transform, With<ScriptEntity>>,
+    script_component_query: &mut Query<(Entity, &mut ScriptComponent)>,
+    _commands: &mut Commands,
+) {
+    match behavior {
+        SystemBehavior::ApplyVelocity => {
+            // Get Velocity component data
+            let velocity_data = script_component_query
+                .iter()
+                .find(|(_, comp)| comp.type_name == "Velocity")
+                .map(|(_, comp)| comp.data.clone());
+
+            if let Some(velocity) = velocity_data {
+                let vx = velocity.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                let vy = velocity.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                let vz = velocity.get("z").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+
+                if let Ok(mut transform) = transform_query.get_mut(entity) {
+                    transform.translation.x += vx * dt;
+                    transform.translation.y += vy * dt;
+                    transform.translation.z += vz * dt;
+                }
+            }
+        }
+
+        SystemBehavior::ApplyGravity => {
+            // Get config
+            let strength = config
+                .as_ref()
+                .and_then(|c| c.get("strength"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(980.0) as f32;
+
+            let direction = config
+                .as_ref()
+                .and_then(|c| c.get("direction"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("down");
+
+            let (gx, gy) = match direction {
+                "down" => (0.0, -strength),
+                "up" => (0.0, strength),
+                "left" => (-strength, 0.0),
+                "right" => (strength, 0.0),
+                _ => (0.0, -strength),
+            };
+
+            // Update Velocity component
+            for (_, mut comp) in script_component_query.iter_mut() {
+                if comp.type_name == "Velocity" {
+                    if let Some(obj) = comp.data.as_object_mut() {
+                        let current_x = obj.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        let current_y = obj.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                        obj.insert("x".to_string(), serde_json::json!(current_x + gx as f64 * dt as f64));
+                        obj.insert("y".to_string(), serde_json::json!(current_y + gy as f64 * dt as f64));
+                    }
+                }
+            }
+        }
+
+        SystemBehavior::ApplyFriction => {
+            let factor = config
+                .as_ref()
+                .and_then(|c| c.get("factor"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.98) as f32;
+
+            // Friction factor per second - convert to per-frame
+            let frame_factor = factor.powf(dt);
+
+            for (_, mut comp) in script_component_query.iter_mut() {
+                if comp.type_name == "Velocity" {
+                    if let Some(obj) = comp.data.as_object_mut() {
+                        if let Some(x) = obj.get("x").and_then(|v| v.as_f64()) {
+                            obj.insert("x".to_string(), serde_json::json!(x * frame_factor as f64));
+                        }
+                        if let Some(y) = obj.get("y").and_then(|v| v.as_f64()) {
+                            obj.insert("y".to_string(), serde_json::json!(y * frame_factor as f64));
+                        }
+                        if let Some(z) = obj.get("z").and_then(|v| v.as_f64()) {
+                            obj.insert("z".to_string(), serde_json::json!(z * frame_factor as f64));
+                        }
+                    }
+                }
+            }
+        }
+
+        SystemBehavior::RegenerateOverTime => {
+            let field = config
+                .as_ref()
+                .and_then(|c| c.get("field"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("current");
+            let rate = config
+                .as_ref()
+                .and_then(|c| c.get("rate"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0);
+            let max_field = config
+                .as_ref()
+                .and_then(|c| c.get("max_field"))
+                .and_then(|v| v.as_str());
+
+            // Find and update the relevant component
+            for (_, mut comp) in script_component_query.iter_mut() {
+                if let Some(obj) = comp.data.as_object_mut() {
+                    if let Some(current) = obj.get(field).and_then(|v| v.as_f64()) {
+                        let new_value = current + rate * dt as f64;
+                        let clamped = if let Some(max_name) = max_field {
+                            if let Some(max_val) = obj.get(max_name).and_then(|v| v.as_f64()) {
+                                new_value.min(max_val)
+                            } else {
+                                new_value
+                            }
+                        } else {
+                            new_value
+                        };
+                        obj.insert(field.to_string(), serde_json::json!(clamped));
+                    }
+                }
+            }
+        }
+
+        SystemBehavior::DecayOverTime => {
+            let field = config
+                .as_ref()
+                .and_then(|c| c.get("field"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("current");
+            let rate = config
+                .as_ref()
+                .and_then(|c| c.get("rate"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(1.0);
+            let min_field = config
+                .as_ref()
+                .and_then(|c| c.get("min_field"))
+                .and_then(|v| v.as_str());
+
+            for (_, mut comp) in script_component_query.iter_mut() {
+                if let Some(obj) = comp.data.as_object_mut() {
+                    if let Some(current) = obj.get(field).and_then(|v| v.as_f64()) {
+                        let new_value = current - rate * dt as f64;
+                        let clamped = if let Some(min_name) = min_field {
+                            if let Some(min_val) = obj.get(min_name).and_then(|v| v.as_f64()) {
+                                new_value.max(min_val)
+                            } else {
+                                new_value.max(0.0)
+                            }
+                        } else {
+                            new_value.max(0.0)
+                        };
+                        obj.insert(field.to_string(), serde_json::json!(clamped));
+                    }
+                }
+            }
+        }
+
+        SystemBehavior::DespawnWhenZero => {
+            let field = config
+                .as_ref()
+                .and_then(|c| c.get("field"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("health");
+
+            for (_, comp) in script_component_query.iter() {
+                if let Some(obj) = comp.data.as_object() {
+                    if let Some(value) = obj.get(field).and_then(|v| v.as_f64()) {
+                        if value <= 0.0 {
+                            _commands.entity(entity).despawn();
+                            tracing::debug!("Despawned entity due to {} reaching zero", field);
+                        }
+                    }
+                }
+            }
+        }
+
+        // The following behaviors require more complex implementation
+        // and will be completed in a future iteration
+        SystemBehavior::FollowEntity => {
+            tracing::warn!("TODO: FollowEntity behavior not yet implemented");
+        }
+
+        SystemBehavior::OrbitAround => {
+            tracing::warn!("TODO: OrbitAround behavior not yet implemented");
+        }
+
+        SystemBehavior::BounceOnBounds => {
+            tracing::warn!("TODO: BounceOnBounds behavior not yet implemented");
+        }
+
+        SystemBehavior::AnimateSprite => {
+            tracing::warn!("TODO: AnimateSprite behavior not yet implemented");
+        }
+    }
+}
+
+/// Execute mathematical formulas on an entity
+///
+/// Formulas are parsed and evaluated using evalexpr.
+/// Available variables:
+/// - `dt` - Delta time (seconds since last frame)
+/// - `time` - Total elapsed time (seconds)
+/// - `ComponentName_field` - Component field values (dot replaced with underscore)
+///
+/// Formula format: "ComponentName.field = expression"
+fn execute_formulas(
+    formulas: &[String],
+    entity: Entity,
+    dt: f32,
+    total_time: f32,
+    transform_query: &mut Query<&mut Transform, With<ScriptEntity>>,
+    script_component_query: &mut Query<(Entity, &mut ScriptComponent)>,
+) {
+    use evalexpr::*;
+
+    // Build context with all available variables
+    let mut context = HashMapContext::new();
+
+    // Add time variables
+    if let Err(e) = context.set_value("dt".to_string(), Value::Float(dt as f64)) {
+        tracing::warn!("Failed to set dt: {:?}", e);
+    }
+    if let Err(e) = context.set_value("time".to_string(), Value::Float(total_time as f64)) {
+        tracing::warn!("Failed to set time: {:?}", e);
+    }
+
+    // Add Transform fields if entity has Transform
+    if let Ok(transform) = transform_query.get(entity) {
+        let _ = context.set_value("Transform_translation_x".to_string(), Value::Float(transform.translation.x as f64));
+        let _ = context.set_value("Transform_translation_y".to_string(), Value::Float(transform.translation.y as f64));
+        let _ = context.set_value("Transform_translation_z".to_string(), Value::Float(transform.translation.z as f64));
+        let _ = context.set_value("Transform_scale_x".to_string(), Value::Float(transform.scale.x as f64));
+        let _ = context.set_value("Transform_scale_y".to_string(), Value::Float(transform.scale.y as f64));
+        let _ = context.set_value("Transform_scale_z".to_string(), Value::Float(transform.scale.z as f64));
+    }
+
+    // Add script component fields
+    for (_, comp) in script_component_query.iter() {
+        if let Some(obj) = comp.data.as_object() {
+            for (field_name, value) in obj {
+                let var_name = format!("{}_{}", comp.type_name, field_name);
+                if let Some(num) = value.as_f64() {
+                    let _ = context.set_value(var_name, Value::Float(num));
+                } else if let Some(s) = value.as_str() {
+                    let _ = context.set_value(var_name, Value::String(s.to_string()));
+                } else if let Some(b) = value.as_bool() {
+                    let _ = context.set_value(var_name, Value::Boolean(b));
+                }
+            }
+        }
+    }
+
+    // Define math functions
+    let _ = context.set_function("sin".to_string(), Function::new(|arg: &Value| {
+        Ok(Value::Float(arg.as_float()?.sin()))
+    }));
+    let _ = context.set_function("cos".to_string(), Function::new(|arg: &Value| {
+        Ok(Value::Float(arg.as_float()?.cos()))
+    }));
+    let _ = context.set_function("tan".to_string(), Function::new(|arg: &Value| {
+        Ok(Value::Float(arg.as_float()?.tan()))
+    }));
+    let _ = context.set_function("abs".to_string(), Function::new(|arg: &Value| {
+        Ok(Value::Float(arg.as_float()?.abs()))
+    }));
+    let _ = context.set_function("sqrt".to_string(), Function::new(|arg: &Value| {
+        Ok(Value::Float(arg.as_float()?.sqrt()))
+    }));
+    let _ = context.set_function("pow".to_string(), Function::new(|arg: &Value| {
+        let tuple = arg.as_tuple()?;
+        if tuple.len() != 2 {
+            return Err(EvalexprError::WrongFunctionArgumentAmount { expected: 2..=2, actual: tuple.len() });
+        }
+        let base: f64 = tuple[0].as_float()?;
+        let exp: f64 = tuple[1].as_float()?;
+        Ok(Value::Float(base.powf(exp)))
+    }));
+    let _ = context.set_function("min".to_string(), Function::new(|arg: &Value| {
+        let tuple = arg.as_tuple()?;
+        if tuple.len() != 2 {
+            return Err(EvalexprError::WrongFunctionArgumentAmount { expected: 2..=2, actual: tuple.len() });
+        }
+        let a: f64 = tuple[0].as_float()?;
+        let b: f64 = tuple[1].as_float()?;
+        Ok(Value::Float(a.min(b)))
+    }));
+    let _ = context.set_function("max".to_string(), Function::new(|arg: &Value| {
+        let tuple = arg.as_tuple()?;
+        if tuple.len() != 2 {
+            return Err(EvalexprError::WrongFunctionArgumentAmount { expected: 2..=2, actual: tuple.len() });
+        }
+        let a: f64 = tuple[0].as_float()?;
+        let b: f64 = tuple[1].as_float()?;
+        Ok(Value::Float(a.max(b)))
+    }));
+    let _ = context.set_function("clamp".to_string(), Function::new(|arg: &Value| {
+        let tuple = arg.as_tuple()?;
+        if tuple.len() != 3 {
+            return Err(EvalexprError::WrongFunctionArgumentAmount { expected: 3..=3, actual: tuple.len() });
+        }
+        let val: f64 = tuple[0].as_float()?;
+        let min_val: f64 = tuple[1].as_float()?;
+        let max_val: f64 = tuple[2].as_float()?;
+        Ok(Value::Float(val.clamp(min_val, max_val)))
+    }));
+    let _ = context.set_function("lerp".to_string(), Function::new(|arg: &Value| {
+        let tuple = arg.as_tuple()?;
+        if tuple.len() != 3 {
+            return Err(EvalexprError::WrongFunctionArgumentAmount { expected: 3..=3, actual: tuple.len() });
+        }
+        let a: f64 = tuple[0].as_float()?;
+        let b: f64 = tuple[1].as_float()?;
+        let t: f64 = tuple[2].as_float()?;
+        Ok(Value::Float(a + (b - a) * t))
+    }));
+
+    // Store results to apply after evaluation
+    let mut results: Vec<(String, String, f64)> = Vec::new();
+
+    // Parse and evaluate each formula
+    for formula in formulas {
+        // Parse formula: "Component.field = expression"
+        let parts: Vec<&str> = formula.splitn(2, '=').collect();
+        if parts.len() != 2 {
+            tracing::warn!("Invalid formula syntax (missing '='): {}", formula);
+            continue;
+        }
+
+        let target = parts[0].trim();
+        let expression = parts[1].trim();
+
+        // Parse target: "Component.field"
+        let target_parts: Vec<&str> = target.split('.').collect();
+        if target_parts.len() != 2 {
+            tracing::warn!("Invalid target format (expected Component.field): {}", target);
+            continue;
+        }
+
+        let component_name = target_parts[0];
+        let field_name = target_parts[1];
+
+        // Convert expression to use underscore notation for variable names
+        // e.g., "Transform.translation.x" -> "Transform_translation_x"
+        let converted_expr = convert_dot_notation(expression);
+
+        // Evaluate the expression
+        match eval_with_context(&converted_expr, &context) {
+            Ok(result) => {
+                if let Ok(value) = result.as_float() {
+                    results.push((component_name.to_string(), field_name.to_string(), value));
+                } else {
+                    tracing::warn!("Formula result is not a number: {} = {:?}", formula, result);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Formula evaluation error: {} - {:?}", formula, e);
+            }
+        }
+    }
+
+    // Apply results to components
+    for (component_name, field_name, value) in results {
+        if component_name == "Transform" {
+            if let Ok(mut transform) = transform_query.get_mut(entity) {
+                match field_name.as_str() {
+                    "x" | "translation_x" => transform.translation.x = value as f32,
+                    "y" | "translation_y" => transform.translation.y = value as f32,
+                    "z" | "translation_z" => transform.translation.z = value as f32,
+                    "scale_x" => transform.scale.x = value as f32,
+                    "scale_y" => transform.scale.y = value as f32,
+                    "scale_z" => transform.scale.z = value as f32,
+                    "scale" => {
+                        transform.scale.x = value as f32;
+                        transform.scale.y = value as f32;
+                        transform.scale.z = value as f32;
+                    }
+                    _ => {
+                        tracing::warn!("Unknown Transform field: {}", field_name);
+                    }
+                }
+            }
+        } else {
+            // Update script component
+            for (_, mut comp) in script_component_query.iter_mut() {
+                if comp.type_name == component_name {
+                    if let Some(obj) = comp.data.as_object_mut() {
+                        obj.insert(field_name.clone(), serde_json::json!(value));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Convert dot notation to underscore notation for evalexpr
+/// e.g., "Transform.translation.x" -> "Transform_translation_x"
+/// e.g., "Oscillator.speed" -> "Oscillator_speed"
+fn convert_dot_notation(expr: &str) -> String {
+    let mut result = String::with_capacity(expr.len());
+    let mut chars = expr.chars().peekable();
+    let mut in_identifier = false;
+
+    while let Some(c) = chars.next() {
+        if c.is_alphanumeric() || c == '_' {
+            in_identifier = true;
+            result.push(c);
+        } else if c == '.' && in_identifier {
+            // Check if next char is alphanumeric (meaning this is a component.field access)
+            if chars.peek().map_or(false, |next| next.is_alphanumeric()) {
+                result.push('_');
+            } else {
+                result.push(c);
+            }
+        } else {
+            in_identifier = false;
+            result.push(c);
+        }
+    }
+
+    result
 }

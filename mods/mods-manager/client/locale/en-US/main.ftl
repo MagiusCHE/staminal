@@ -3,7 +3,8 @@
 # Mod loading messages
 mods-downloading-title = Download mods [{$done}/{$todo}]
 mods-installing-title = Install mods [{$done}/{$todo}]
-mods-ensuring-title = Verify mods
+mods-attaching-title = Setup mods [{$done}/{$todo}]
+mods-ensuring-title = Verify mods...
 mods-downloading-progress = {$bps} ({$received} / {$total})
 mods-installing-progress = Installing...
 mods-attaching-progress = Activating...

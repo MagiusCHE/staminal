@@ -178,6 +178,33 @@ pub trait RuntimeAdapter {
         // Default: no-op for runtimes that don't implement widget events
         Ok(())
     }
+
+    /// Dispatch a direct entity event callback (client-only)
+    ///
+    /// This is called when an ECS entity with a registered event callback is triggered.
+    /// Unlike global events, this uses a direct callback mechanism where the callback
+    /// function is stored in the runtime's registry and invoked directly by entity ID.
+    ///
+    /// This is language-agnostic: each runtime (JS, Lua, C#) maintains its own callback
+    /// registry and invokes callbacks in its native way.
+    ///
+    /// # Arguments
+    /// * `entity_id` - The entity ID that triggered the event
+    /// * `event_type` - The event type (e.g., "click", "hover", "enter", "leave")
+    /// * `event_data` - Event-specific data as JSON object
+    ///
+    /// # Returns
+    /// Ok(true) if a callback was found and invoked, Ok(false) if no callback registered,
+    /// Err if invocation failed
+    fn dispatch_entity_event_callback(
+        &self,
+        _entity_id: u64,
+        _event_type: &str,
+        _event_data: serde_json::Value,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        // Default: no callback registered
+        Ok(false)
+    }
 }
 
 /// Manager for all mod runtimes
@@ -449,6 +476,33 @@ impl RuntimeManager {
             runtime.dispatch_widget_event(widget_id, event_type, event_data.clone())?;
         }
         Ok(())
+    }
+
+    /// Dispatch a direct entity event callback
+    ///
+    /// This is called when an ECS entity with a registered event callback is triggered.
+    /// The callback is invoked directly without going through the global event system.
+    ///
+    /// # Arguments
+    /// * `entity_id` - The entity ID that triggered the event
+    /// * `event_type` - The event type (e.g., "click", "hover", "enter", "leave")
+    /// * `event_data` - Event-specific data as JSON object
+    ///
+    /// # Returns
+    /// Ok(true) if a callback was found and invoked by any runtime, Ok(false) if none
+    pub fn dispatch_entity_event_callback(
+        &self,
+        entity_id: u64,
+        event_type: &str,
+        event_data: serde_json::Value,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        // Dispatch to all runtimes - the one that registered the callback will handle it
+        for runtime in self.runtimes.values() {
+            if runtime.dispatch_entity_event_callback(entity_id, event_type, event_data.clone())? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 }
 

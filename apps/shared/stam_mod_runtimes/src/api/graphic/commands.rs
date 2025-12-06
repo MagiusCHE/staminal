@@ -2,8 +2,10 @@
 //!
 //! Commands sent from the GraphicProxy (worker thread) to the graphic engine (main thread).
 
+use super::ecs::{ComponentSchema, DeclaredSystem, QueryOptions, QueryResult};
 use super::{GraphicEngineInfo, PropertyValue, WidgetConfig, WidgetEventType, WidgetType, WindowConfig, WindowMode};
 use crate::api::resource::{ResourceInfo, ResourceType};
+use std::collections::HashMap;
 use tokio::sync::oneshot;
 
 /// Commands that can be sent to the graphic engine
@@ -304,6 +306,178 @@ pub enum GraphicCommand {
         /// Channel to send the result back (returns (width, height))
         response_tx: oneshot::Sender<Result<(u32, u32), String>>,
     },
+
+    // ========================================================================
+    // ECS Commands
+    // ========================================================================
+
+    /// Spawn a new entity
+    ///
+    /// Creates a new entity with optional initial components.
+    /// Returns the entity's script-facing ID.
+    SpawnEntity {
+        /// Initial components to add (component_name -> JSON data)
+        components: HashMap<String, serde_json::Value>,
+        /// The mod that owns this entity
+        owner_mod: String,
+        /// Optional parent entity ID (script ID). If None and this is a UI entity,
+        /// it will be parented to the main window's root.
+        parent: Option<u64>,
+        /// Channel to send the result back (returns entity ID)
+        response_tx: oneshot::Sender<Result<u64, String>>,
+    },
+
+    /// Despawn an entity
+    ///
+    /// Removes an entity and all its components from the world.
+    DespawnEntity {
+        /// Entity ID to despawn
+        entity_id: u64,
+        /// Channel to send the result back
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+
+    /// Insert a component on an entity
+    ///
+    /// Adds or replaces a component on an existing entity.
+    InsertComponent {
+        /// Entity ID
+        entity_id: u64,
+        /// Component type name
+        component_name: String,
+        /// Component data (JSON)
+        component_data: serde_json::Value,
+        /// Channel to send the result back
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+
+    /// Update specific fields of a component on an entity (merge with existing)
+    ///
+    /// Unlike InsertComponent which replaces the entire component,
+    /// UpdateComponent merges the provided fields with existing values.
+    UpdateComponent {
+        /// Entity ID
+        entity_id: u64,
+        /// Component type name
+        component_name: String,
+        /// Partial component data to merge (JSON)
+        component_data: serde_json::Value,
+        /// Channel to send the result back
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+
+    /// Remove a component from an entity
+    RemoveComponent {
+        /// Entity ID
+        entity_id: u64,
+        /// Component type name to remove
+        component_name: String,
+        /// Channel to send the result back
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+
+    /// Get a component's data from an entity
+    GetComponent {
+        /// Entity ID
+        entity_id: u64,
+        /// Component type name
+        component_name: String,
+        /// Channel to send the result back (returns component data or None)
+        response_tx: oneshot::Sender<Result<Option<serde_json::Value>, String>>,
+    },
+
+    /// Check if an entity has a component
+    HasComponent {
+        /// Entity ID
+        entity_id: u64,
+        /// Component type name
+        component_name: String,
+        /// Channel to send the result back
+        response_tx: oneshot::Sender<Result<bool, String>>,
+    },
+
+    /// Query entities matching criteria
+    ///
+    /// Returns all entities that have the required components
+    /// and don't have the excluded components.
+    QueryEntities {
+        /// Query options (with/without components, limit)
+        options: QueryOptions,
+        /// Channel to send the results back
+        response_tx: oneshot::Sender<Result<Vec<QueryResult>, String>>,
+    },
+
+    /// Register a custom component type
+    ///
+    /// Components must be registered with a schema before they can be used.
+    RegisterComponent {
+        /// Component schema (name and field definitions)
+        schema: ComponentSchema,
+        /// Channel to send the result back
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+
+    /// Declare a system to be executed by the engine
+    ///
+    /// Systems can use predefined behaviors or mathematical formulas.
+    DeclareSystem {
+        /// System configuration
+        system: DeclaredSystem,
+        /// Channel to send the result back
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+
+    /// Enable or disable a declared system
+    SetSystemEnabled {
+        /// System name
+        name: String,
+        /// Whether the system should be enabled
+        enabled: bool,
+        /// Channel to send the result back
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+
+    /// Remove a declared system
+    RemoveSystem {
+        /// System name
+        name: String,
+        /// Channel to send the result back
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+
+    // ========================================================================
+    // Entity Event Callback Commands
+    // ========================================================================
+
+    /// Register an event callback for an entity
+    ///
+    /// When the entity with this ID receives the specified event type,
+    /// the engine will send an EntityEventCallback event to the runtime,
+    /// which will invoke the registered callback directly.
+    ///
+    /// Supported event types:
+    /// - "click": Triggered when Button interaction becomes "pressed"
+    /// - "hover": Triggered on hover state change (future)
+    /// - "enter": Triggered when cursor enters the entity (future)
+    /// - "leave": Triggered when cursor leaves the entity (future)
+    RegisterEntityEventCallback {
+        /// Entity ID to register callback for
+        entity_id: u64,
+        /// Event type (e.g., "click", "hover", "enter", "leave")
+        event_type: String,
+        /// Channel to send the result back
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
+
+    /// Unregister an event callback for an entity
+    UnregisterEntityEventCallback {
+        /// Entity ID to unregister callback for
+        entity_id: u64,
+        /// Event type to unregister
+        event_type: String,
+        /// Channel to send the result back
+        response_tx: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 impl std::fmt::Debug for GraphicCommand {
@@ -450,6 +624,102 @@ impl std::fmt::Debug for GraphicCommand {
             Self::GetScreenResolution { screen_id, .. } => f
                 .debug_struct("GetScreenResolution")
                 .field("screen_id", screen_id)
+                .finish(),
+            // ECS commands
+            Self::SpawnEntity {
+                components,
+                owner_mod,
+                parent,
+                ..
+            } => f
+                .debug_struct("SpawnEntity")
+                .field("components", &components.keys().collect::<Vec<_>>())
+                .field("owner_mod", owner_mod)
+                .field("parent", parent)
+                .finish(),
+            Self::DespawnEntity { entity_id, .. } => f
+                .debug_struct("DespawnEntity")
+                .field("entity_id", entity_id)
+                .finish(),
+            Self::InsertComponent {
+                entity_id,
+                component_name,
+                ..
+            } => f
+                .debug_struct("InsertComponent")
+                .field("entity_id", entity_id)
+                .field("component_name", component_name)
+                .finish(),
+            Self::UpdateComponent {
+                entity_id,
+                component_name,
+                ..
+            } => f
+                .debug_struct("UpdateComponent")
+                .field("entity_id", entity_id)
+                .field("component_name", component_name)
+                .finish(),
+            Self::RemoveComponent {
+                entity_id,
+                component_name,
+                ..
+            } => f
+                .debug_struct("RemoveComponent")
+                .field("entity_id", entity_id)
+                .field("component_name", component_name)
+                .finish(),
+            Self::GetComponent {
+                entity_id,
+                component_name,
+                ..
+            } => f
+                .debug_struct("GetComponent")
+                .field("entity_id", entity_id)
+                .field("component_name", component_name)
+                .finish(),
+            Self::HasComponent {
+                entity_id,
+                component_name,
+                ..
+            } => f
+                .debug_struct("HasComponent")
+                .field("entity_id", entity_id)
+                .field("component_name", component_name)
+                .finish(),
+            Self::QueryEntities { options, .. } => f
+                .debug_struct("QueryEntities")
+                .field("with", &options.with_components)
+                .field("without", &options.without_components)
+                .field("limit", &options.limit)
+                .finish(),
+            Self::RegisterComponent { schema, .. } => f
+                .debug_struct("RegisterComponent")
+                .field("name", &schema.name)
+                .finish(),
+            Self::DeclareSystem { system, .. } => f
+                .debug_struct("DeclareSystem")
+                .field("name", &system.name)
+                .field("behavior", &system.behavior)
+                .finish(),
+            Self::SetSystemEnabled { name, enabled, .. } => f
+                .debug_struct("SetSystemEnabled")
+                .field("name", name)
+                .field("enabled", enabled)
+                .finish(),
+            Self::RemoveSystem { name, .. } => f
+                .debug_struct("RemoveSystem")
+                .field("name", name)
+                .finish(),
+            // Entity event callback commands
+            Self::RegisterEntityEventCallback { entity_id, event_type, .. } => f
+                .debug_struct("RegisterEntityEventCallback")
+                .field("entity_id", entity_id)
+                .field("event_type", event_type)
+                .finish(),
+            Self::UnregisterEntityEventCallback { entity_id, event_type, .. } => f
+                .debug_struct("UnregisterEntityEventCallback")
+                .field("entity_id", entity_id)
+                .field("event_type", event_type)
                 .finish(),
         }
     }

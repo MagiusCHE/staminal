@@ -136,15 +136,17 @@ All global objects exposed to JavaScript mods MUST follow the **PascalCase** nam
 |---------------|-------------|
 | `System` | System API (mods, events, game info, paths) |
 | `Graphic` | Graphic engine API (windows, widgets, fonts) |
+| `World` | ECS API (entities, components, queries, systems) |
 | `Network` | Network API (downloads) |
 | `Locale` | Localization API (translations) |
 | `Process` | Process API (app paths, environment) |
 | `File` | File API (secure file read/write operations) |
 | `Text` | Text utilities |
+| `Resource` | Resource loading API (images, fonts, etc.) |
 
 **Exception:** `console` remains lowercase as it follows the standard JavaScript API convention (browser/Node.js).
 
-**Enum constants** are also PascalCase: `SystemEvents`, `GraphicEngines`, `WidgetTypes`, `WindowPositionModes`, `FlexDirection`, `JustifyContent`, `AlignItems`, `ModSides`.
+**Enum constants** are also PascalCase: `SystemEvents`, `GraphicEngines`, `WidgetTypes`, `WindowPositionModes`, `FlexDirection`, `JustifyContent`, `AlignItems`, `ModSides`, `SystemBehaviors`, `FieldTypes`.
 
 **Example usage in mods:**
 ```javascript

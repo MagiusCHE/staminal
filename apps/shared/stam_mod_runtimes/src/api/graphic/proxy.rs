@@ -9,6 +9,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
+use super::ecs::{ComponentSchema, DeclaredSystem, QueryOptions, QueryResult};
 use super::{
     FontInfo, GraphicCommand, GraphicEngineInfo, GraphicEngines, GraphicEvent,
     InitialWindowConfig, PropertyValue, WidgetConfig, WidgetEventType, WidgetInfo,
@@ -1486,6 +1487,482 @@ impl GraphicProxy {
 
         tx.send(GraphicCommand::GetScreenResolution {
             screen_id,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    // ========================================================================
+    // ECS Operations
+    // ========================================================================
+
+    /// Spawn a new entity
+    ///
+    /// Creates a new entity with optional initial components.
+    /// Returns the entity's script-facing ID.
+    ///
+    /// # Arguments
+    /// * `components` - Initial components to add (component_name -> JSON data)
+    /// * `owner_mod` - The mod that owns this entity
+    /// * `parent` - Optional parent entity ID. If None and this is a UI entity,
+    ///              it will be parented to the main window's root.
+    ///
+    /// # Returns
+    /// * `Ok(entity_id)` - The ID of the spawned entity
+    pub async fn spawn_entity(
+        &self,
+        components: HashMap<String, serde_json::Value>,
+        owner_mod: String,
+        parent: Option<u64>,
+    ) -> Result<u64, String> {
+        if !self.available {
+            return Err(
+                "World.spawn() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx
+            .as_ref()
+            .ok_or("No graphic engine enabled. Call Graphic.enableEngine() first.")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::SpawnEntity {
+            components,
+            owner_mod,
+            parent,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Despawn an entity
+    ///
+    /// Removes an entity and all its components from the world.
+    ///
+    /// # Arguments
+    /// * `entity_id` - The entity to despawn
+    pub async fn despawn_entity(&self, entity_id: u64) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "World.despawn() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::DespawnEntity {
+            entity_id,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Insert a component on an entity
+    ///
+    /// Adds or replaces a component on an existing entity.
+    ///
+    /// # Arguments
+    /// * `entity_id` - The entity to modify
+    /// * `component_name` - The component type name
+    /// * `component_data` - The component data as JSON
+    pub async fn insert_component(
+        &self,
+        entity_id: u64,
+        component_name: String,
+        component_data: serde_json::Value,
+    ) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "entity.insert() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::InsertComponent {
+            entity_id,
+            component_name,
+            component_data,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Update specific fields of a component on an entity (merge with existing)
+    ///
+    /// Unlike `insert_component` which replaces the entire component,
+    /// this method merges the provided fields with existing component data.
+    ///
+    /// # Arguments
+    /// * `entity_id` - The entity to modify
+    /// * `component_name` - The component type name
+    /// * `component_data` - Partial component data to merge
+    pub async fn update_component(
+        &self,
+        entity_id: u64,
+        component_name: String,
+        component_data: serde_json::Value,
+    ) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "entity.update() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::UpdateComponent {
+            entity_id,
+            component_name,
+            component_data,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Remove a component from an entity
+    ///
+    /// # Arguments
+    /// * `entity_id` - The entity to modify
+    /// * `component_name` - The component type name to remove
+    pub async fn remove_component(
+        &self,
+        entity_id: u64,
+        component_name: String,
+    ) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "entity.remove() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::RemoveComponent {
+            entity_id,
+            component_name,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Get a component's data from an entity
+    ///
+    /// # Arguments
+    /// * `entity_id` - The entity to query
+    /// * `component_name` - The component type name
+    ///
+    /// # Returns
+    /// * `Ok(Some(data))` - The component data
+    /// * `Ok(None)` - The entity doesn't have this component
+    pub async fn get_component(
+        &self,
+        entity_id: u64,
+        component_name: String,
+    ) -> Result<Option<serde_json::Value>, String> {
+        if !self.available {
+            return Err(
+                "entity.get() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::GetComponent {
+            entity_id,
+            component_name,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Check if an entity has a component
+    ///
+    /// # Arguments
+    /// * `entity_id` - The entity to query
+    /// * `component_name` - The component type name
+    pub async fn has_component(
+        &self,
+        entity_id: u64,
+        component_name: String,
+    ) -> Result<bool, String> {
+        if !self.available {
+            return Err(
+                "entity.has() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::HasComponent {
+            entity_id,
+            component_name,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Query entities matching criteria
+    ///
+    /// Returns all entities that have the required components
+    /// and don't have the excluded components.
+    ///
+    /// # Arguments
+    /// * `options` - Query options (with/without components, limit)
+    pub async fn query_entities(&self, options: QueryOptions) -> Result<Vec<QueryResult>, String> {
+        if !self.available {
+            return Err(
+                "World.query() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::QueryEntities {
+            options,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Register a custom component type
+    ///
+    /// Components must be registered with a schema before they can be used.
+    ///
+    /// # Arguments
+    /// * `schema` - The component schema (name and field definitions)
+    pub async fn register_component(&self, schema: ComponentSchema) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "World.registerComponent() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::RegisterComponent { schema, response_tx })
+            .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Declare a system to be executed by the engine
+    ///
+    /// Systems can use predefined behaviors or mathematical formulas.
+    ///
+    /// # Arguments
+    /// * `system` - The system configuration
+    pub async fn declare_system(&self, system: DeclaredSystem) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "World.declareSystem() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::DeclareSystem { system, response_tx })
+            .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Enable or disable a declared system
+    ///
+    /// # Arguments
+    /// * `name` - The system name
+    /// * `enabled` - Whether the system should be enabled
+    pub async fn set_system_enabled(&self, name: String, enabled: bool) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "World.setSystemEnabled() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::SetSystemEnabled {
+            name,
+            enabled,
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Remove a declared system
+    ///
+    /// # Arguments
+    /// * `name` - The system name to remove
+    pub async fn remove_system(&self, name: String) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "World.removeSystem() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::RemoveSystem { name, response_tx })
+            .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    // ========================================================================
+    // Entity Event Callback Registration
+    // ========================================================================
+
+    /// Register an event callback for an entity
+    ///
+    /// When registered, the engine will send EntityEventCallback events for this
+    /// entity instead of generic EntityInteractionChanged events.
+    /// This enables direct callback dispatch without global event broadcasting.
+    ///
+    /// # Arguments
+    /// * `entity_id` - The entity to register a callback for
+    /// * `event_type` - The event type (e.g., "click", "hover", "enter", "leave")
+    pub async fn register_entity_event_callback(&self, entity_id: u64, event_type: &str) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "World.registerEntityEventCallback() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::RegisterEntityEventCallback {
+            entity_id,
+            event_type: event_type.to_string(),
+            response_tx,
+        })
+        .map_err(|_| "Failed to send command to graphic engine")?;
+
+        response_rx
+            .await
+            .map_err(|_| "Graphic engine did not respond")?
+    }
+
+    /// Unregister an event callback for an entity
+    ///
+    /// After unregistering, the engine will revert to sending generic
+    /// EntityInteractionChanged events for this entity.
+    ///
+    /// # Arguments
+    /// * `entity_id` - The entity to unregister
+    /// * `event_type` - The event type to unregister
+    pub async fn unregister_entity_event_callback(&self, entity_id: u64, event_type: &str) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "World.unregisterEntityEventCallback() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        let tx = self.command_tx.read().unwrap();
+        let tx = tx.as_ref().ok_or("No graphic engine enabled")?;
+
+        let (response_tx, response_rx) = oneshot::channel();
+
+        tx.send(GraphicCommand::UnregisterEntityEventCallback {
+            entity_id,
+            event_type: event_type.to_string(),
             response_tx,
         })
         .map_err(|_| "Failed to send command to graphic engine")?;

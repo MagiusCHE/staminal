@@ -21,6 +21,7 @@
 //! descriptive errors for all operations.
 
 mod commands;
+pub mod ecs;
 mod engines;
 mod events;
 mod proxy;
