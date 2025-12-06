@@ -153,6 +153,7 @@ impl GraphicEngine for BevyEngine {
                 handle_mouse_input,
                 handle_window_events,
                 handle_widget_interactions,
+                update_cover_contain_images,
             ).in_set(BevySystemSet::AfterCommands),
         );
 
@@ -370,6 +371,22 @@ struct ButtonColors {
 /// Marker component for disabled buttons
 #[derive(Component)]
 struct ButtonDisabled;
+
+/// Marker component for images that need Cover/Contain scaling
+///
+/// This component is added to Image widgets that use Cover or Contain scale modes.
+/// A system runs each frame to update the widget's size based on:
+/// - The actual image dimensions (once loaded)
+/// - The parent container's size
+#[derive(Component, Clone, Debug)]
+struct CoverContainImage {
+    /// The scale mode (Cover or Contain)
+    scale_mode: ImageScaleMode,
+    /// The image handle to get dimensions from
+    image_handle: Handle<Image>,
+    /// Whether the image dimensions have been applied
+    applied: bool,
+}
 
 impl Default for ButtonColors {
     fn default() -> Self {
@@ -1701,9 +1718,16 @@ fn create_widget_entity(
                 }
             });
 
+            // Get the scale mode for later use
+            let scale_mode = image_config
+                .map(|cfg| cfg.scale_mode.clone())
+                .unwrap_or_default();
+
+            // Check if this is a Cover or Contain mode
+            let is_cover_contain = matches!(scale_mode, ImageScaleMode::Cover | ImageScaleMode::Contain);
+
             // Convert ImageScaleMode to Bevy's NodeImageMode
-            let image_mode = image_config
-                .map(|cfg| match &cfg.scale_mode {
+            let image_mode = match &scale_mode {
                     ImageScaleMode::Auto => bevy::ui::widget::NodeImageMode::Auto,
                     ImageScaleMode::Stretch => bevy::ui::widget::NodeImageMode::Stretch,
                     ImageScaleMode::Tiled { tile_x, tile_y, stretch_value } => {
@@ -1730,21 +1754,15 @@ fn create_widget_entity(
                             max_corner_scale: 1.0,
                         })
                     }
-                    // Contain and Cover are implemented by stretching to fill and
-                    // relying on the widget's node dimensions + overflow clipping.
-                    // For a proper implementation, we'd need to calculate aspect ratio
-                    // and set appropriate width/height constraints.
-                    // For now, map to Stretch as a placeholder.
-                    ImageScaleMode::Contain | ImageScaleMode::Cover => {
-                        // TODO: Implement proper Contain/Cover via custom sizing logic
-                        tracing::warn!(
-                            "ImageScaleMode::{:?} not yet fully implemented, using Stretch",
-                            &cfg.scale_mode
-                        );
-                        bevy::ui::widget::NodeImageMode::Stretch
-                    }
-                })
-                .unwrap_or(bevy::ui::widget::NodeImageMode::Auto);
+                // Cover and Contain use Stretch mode to fill the node.
+                // The node dimensions are calculated by update_cover_contain_images system
+                // to achieve the Cover/Contain effect while maintaining aspect ratio.
+                // - Cover: node is sized to cover container (may overflow, uses overflow: clip)
+                // - Contain: node is sized to fit within container (may letterbox)
+                ImageScaleMode::Contain | ImageScaleMode::Cover => {
+                    bevy::ui::widget::NodeImageMode::Stretch
+                }
+            };
 
             // Build the entity
             tracing::debug!("Image widget: handle present = {:?}, node.width={:?}, node.height={:?}",
@@ -1766,29 +1784,88 @@ fn create_widget_entity(
                     }
                 }
 
-                let mut entity_cmd = commands.spawn((
-                    node,
-                    image_node,
-                    StamWidget {
-                        id: widget_id,
-                        window_id,
-                        widget_type,
-                    },
-                    WidgetEventSubscriptions::default(),
-                    ChildOf(parent_entity),
-                ));
+                if is_cover_contain {
+                    // For Cover/Contain modes, we create a two-node structure:
+                    // 1. Outer container: has the requested dimensions, overflow: clip
+                    // 2. Inner image: positioned absolutely, centered, sized for Cover/Contain
+                    //
+                    // This emulates CSS object-fit: cover/contain behavior
 
-                // Apply border radius if specified
-                if let Some(radius) = config.border_radius {
-                    entity_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
+                    // Create outer container with requested dimensions and overflow clipping
+                    let mut container_node = node.clone();
+                    container_node.overflow = bevy::ui::Overflow::clip();
+
+                    // Create inner image node with absolute positioning for centering
+                    let mut inner_image_node = Node::default();
+                    inner_image_node.position_type = bevy::ui::PositionType::Absolute;
+                    // Position at center of container
+                    inner_image_node.left = Val::Percent(50.0);
+                    inner_image_node.top = Val::Percent(50.0);
+                    // Start with 100% dimensions, will be adjusted by update system
+                    inner_image_node.width = Val::Percent(100.0);
+                    inner_image_node.height = Val::Percent(100.0);
+
+                    // Spawn outer container
+                    let container_entity = commands.spawn((
+                        container_node,
+                        StamWidget {
+                            id: widget_id,
+                            window_id,
+                            widget_type,
+                        },
+                        WidgetEventSubscriptions::default(),
+                        ChildOf(parent_entity),
+                    )).id();
+
+                    // Spawn inner image as child of container
+                    let mut image_cmd = commands.spawn((
+                        inner_image_node,
+                        image_node,
+                        CoverContainImage {
+                            scale_mode: scale_mode.clone(),
+                            image_handle: handle.clone(),
+                            applied: false,
+                        },
+                        ChildOf(container_entity),
+                    ));
+
+                    // Apply border radius to container if specified
+                    if let Some(radius) = config.border_radius {
+                        commands.entity(container_entity).insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
+                    }
+
+                    // Apply background color to container if specified
+                    if let Some(ref bg_color) = config.background_color {
+                        commands.entity(container_entity).insert(BackgroundColor(color_value_to_bevy(bg_color)));
+                    }
+
+                    container_entity
+                } else {
+                    // Normal image mode - single node with image
+                    let mut entity_cmd = commands.spawn((
+                        node,
+                        image_node,
+                        StamWidget {
+                            id: widget_id,
+                            window_id,
+                            widget_type,
+                        },
+                        WidgetEventSubscriptions::default(),
+                        ChildOf(parent_entity),
+                    ));
+
+                    // Apply border radius if specified
+                    if let Some(radius) = config.border_radius {
+                        entity_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
+                    }
+
+                    // Apply background color if specified (visible around image if it doesn't fill)
+                    if let Some(ref bg_color) = config.background_color {
+                        entity_cmd.insert(BackgroundColor(color_value_to_bevy(bg_color)));
+                    }
+
+                    entity_cmd.id()
                 }
-
-                // Apply background color if specified (visible around image if it doesn't fill)
-                if let Some(ref bg_color) = config.background_color {
-                    entity_cmd.insert(BackgroundColor(color_value_to_bevy(bg_color)));
-                }
-
-                entity_cmd.id()
             } else {
                 // No image - create placeholder with background color
                 let bg_color = config
@@ -2331,5 +2408,138 @@ fn handle_widget_interactions(
                 }
             }
         }
+    }
+}
+
+/// System to update Cover/Contain images based on actual image dimensions
+///
+/// This system runs each frame and checks for images with CoverContainImage component
+/// that haven't been sized yet. Once the image asset is loaded, it calculates the
+/// appropriate dimensions to achieve the Cover or Contain effect.
+///
+/// For Cover: Image fills container while maintaining aspect ratio (may be cropped)
+/// For Contain: Image fits inside container while maintaining aspect ratio (may letterbox)
+fn update_cover_contain_images(
+    mut query: Query<(Entity, &mut Node, &mut CoverContainImage, &ChildOf)>,
+    parent_query: Query<&ComputedNode>,
+    images: Res<Assets<Image>>,
+) {
+    for (entity, mut node, mut cover_contain, child_of) in query.iter_mut() {
+        // Skip if already applied
+        if cover_contain.applied {
+            continue;
+        }
+
+        // Get the image to find its dimensions
+        let Some(image) = images.get(&cover_contain.image_handle) else {
+            // Image not loaded yet, try again next frame
+            continue;
+        };
+
+        // Get image dimensions
+        let image_width = image.width() as f32;
+        let image_height = image.height() as f32;
+        let image_ratio = image_width / image_height;
+
+        // Get parent container dimensions (this is the wrapper container we created)
+        let parent_size = parent_query
+            .get(child_of.parent())
+            .map(|cn| cn.size())
+            .unwrap_or(Vec2::ZERO);
+
+        let container_width = parent_size.x;
+        let container_height = parent_size.y;
+
+        // Skip if container has zero dimensions (not yet laid out)
+        if container_width <= 0.0 || container_height <= 0.0 {
+            continue;
+        }
+
+        let container_ratio = container_width / container_height;
+
+        tracing::debug!(
+            "Cover/Contain sizing for entity {:?}: image={}x{} (ratio={:.3}), container={}x{} (ratio={:.3}), mode={:?}",
+            entity, image_width, image_height, image_ratio,
+            container_width, container_height, container_ratio,
+            cover_contain.scale_mode
+        );
+
+        match cover_contain.scale_mode {
+            ImageScaleMode::Cover => {
+                // For Cover: the node must fill the container completely while maintaining aspect ratio.
+                // The image uses Stretch mode, so the node dimensions determine the final appearance.
+                // We calculate node dimensions such that:
+                // - At least one dimension fills the container exactly
+                // - The other dimension overflows (and is clipped by the parent)
+                // - The aspect ratio of the node matches the image aspect ratio
+                // - The node is centered using negative margins
+
+                let (node_width, node_height) = if image_ratio > container_ratio {
+                    // Image is relatively wider than container
+                    // Height must fill container, width calculated from aspect ratio
+                    let height = container_height;
+                    let width = height * image_ratio;
+                    (width, height)
+                } else {
+                    // Image is relatively taller than container
+                    // Width must fill container, height calculated from aspect ratio
+                    let width = container_width;
+                    let height = width / image_ratio;
+                    (width, height)
+                };
+
+                node.width = Val::Px(node_width);
+                node.height = Val::Px(node_height);
+
+                // Center the image by using negative margins (half of width/height)
+                // This works with position: absolute, left: 50%, top: 50%
+                node.margin.left = Val::Px(-node_width / 2.0);
+                node.margin.top = Val::Px(-node_height / 2.0);
+
+                tracing::debug!(
+                    "Cover applied: width={:.1}px, height={:.1}px, margin=({:.1}, {:.1}) (container: {:.1}x{:.1})",
+                    node_width, node_height, -node_width / 2.0, -node_height / 2.0, container_width, container_height
+                );
+            }
+            ImageScaleMode::Contain => {
+                // For Contain: the node must fit entirely within the container while maintaining aspect ratio.
+                // We calculate node dimensions such that:
+                // - At least one dimension fills the container exactly
+                // - The other dimension is smaller (letterboxing)
+                // - The aspect ratio of the node matches the image aspect ratio
+                // - The node is centered using negative margins
+
+                let (node_width, node_height) = if image_ratio > container_ratio {
+                    // Image is relatively wider than container
+                    // Width must fit container, height calculated from aspect ratio
+                    let width = container_width;
+                    let height = width / image_ratio;
+                    (width, height)
+                } else {
+                    // Image is relatively taller than container
+                    // Height must fit container, width calculated from aspect ratio
+                    let height = container_height;
+                    let width = height * image_ratio;
+                    (width, height)
+                };
+
+                node.width = Val::Px(node_width);
+                node.height = Val::Px(node_height);
+
+                // Center the image by using negative margins (half of width/height)
+                node.margin.left = Val::Px(-node_width / 2.0);
+                node.margin.top = Val::Px(-node_height / 2.0);
+
+                tracing::debug!(
+                    "Contain applied: width={:.1}px, height={:.1}px, margin=({:.1}, {:.1}) (container: {:.1}x{:.1})",
+                    node_width, node_height, -node_width / 2.0, -node_height / 2.0, container_width, container_height
+                );
+            }
+            _ => {
+                // Other modes shouldn't have this component, but just mark as applied
+            }
+        }
+
+        cover_contain.applied = true;
     }
 }

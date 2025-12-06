@@ -94,7 +94,8 @@ export class Game {
                     resourceId: "title-screen-background",
                     width: "100%",
                     height: "100%",
-                    scaleMode: ImageScaleModes.Cover
+                    scaleMode: ImageScaleModes.Contain,
+                    backgroundColor: "#00000000",
                 });
             } else {
                 await win.close();
