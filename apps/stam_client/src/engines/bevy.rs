@@ -399,8 +399,8 @@ struct CoverContainImage {
     scale_mode: ImageScaleMode,
     /// The image handle to get dimensions from
     image_handle: Handle<Image>,
-    /// Whether the image dimensions have been applied
-    applied: bool,
+    /// Last known container size - used to detect when recalculation is needed
+    last_container_size: Vec2,
 }
 
 impl Default for ButtonColors {
@@ -1878,7 +1878,7 @@ fn create_widget_entity(
                         CoverContainImage {
                             scale_mode: scale_mode.clone(),
                             image_handle: handle.clone(),
-                            applied: false,
+                            last_container_size: Vec2::ZERO,
                         },
                         ChildOf(container_entity),
                     ));
@@ -2457,9 +2457,9 @@ fn handle_widget_interactions(
 
 /// System to update Cover/Contain images based on actual image dimensions
 ///
-/// This system runs each frame and checks for images with CoverContainImage component
-/// that haven't been sized yet. Once the image asset is loaded, it calculates the
-/// appropriate dimensions to achieve the Cover or Contain effect.
+/// This system runs each frame and checks for images with CoverContainImage component.
+/// It calculates the appropriate dimensions to achieve the Cover or Contain effect,
+/// and recalculates when the container size changes (e.g., window resize).
 ///
 /// For Cover: Image fills container while maintaining aspect ratio (may be cropped)
 /// For Contain: Image fits inside container while maintaining aspect ratio (may letterbox)
@@ -2469,21 +2469,11 @@ fn update_cover_contain_images(
     images: Res<Assets<Image>>,
 ) {
     for (entity, mut node, mut cover_contain, child_of) in query.iter_mut() {
-        // Skip if already applied
-        if cover_contain.applied {
-            continue;
-        }
-
         // Get the image to find its dimensions
         let Some(image) = images.get(&cover_contain.image_handle) else {
             // Image not loaded yet, try again next frame
             continue;
         };
-
-        // Get image dimensions
-        let image_width = image.width() as f32;
-        let image_height = image.height() as f32;
-        let image_ratio = image_width / image_height;
 
         // Get parent container dimensions (this is the wrapper container we created)
         let parent_size = parent_query
@@ -2491,14 +2481,23 @@ fn update_cover_contain_images(
             .map(|cn| cn.size())
             .unwrap_or(Vec2::ZERO);
 
-        let container_width = parent_size.x;
-        let container_height = parent_size.y;
-
         // Skip if container has zero dimensions (not yet laid out)
-        if container_width <= 0.0 || container_height <= 0.0 {
+        if parent_size.x <= 0.0 || parent_size.y <= 0.0 {
             continue;
         }
 
+        // Skip if container size hasn't changed (optimization to avoid recalculating every frame)
+        if cover_contain.last_container_size == parent_size {
+            continue;
+        }
+
+        // Get image dimensions
+        let image_width = image.width() as f32;
+        let image_height = image.height() as f32;
+        let image_ratio = image_width / image_height;
+
+        let container_width = parent_size.x;
+        let container_height = parent_size.y;
         let container_ratio = container_width / container_height;
 
         tracing::debug!(
@@ -2580,10 +2579,11 @@ fn update_cover_contain_images(
                 );
             }
             _ => {
-                // Other modes shouldn't have this component, but just mark as applied
+                // Other modes shouldn't have this component
             }
         }
 
-        cover_contain.applied = true;
+        // Remember the container size to detect changes
+        cover_contain.last_container_size = parent_size;
     }
 }
