@@ -92,6 +92,11 @@ pub struct GraphicProxy {
 
     /// Root directory for loading assets (e.g., data_dir containing mods)
     asset_root: Option<std::path::PathBuf>,
+
+    /// ID of the main window (used by getEngineInfo().mainWindow)
+    /// Initially set to 1 (the primary window created at engine startup)
+    /// Can be changed via setMainWindow() to promote a different window
+    main_window_id: AtomicU64,
 }
 
 impl GraphicProxy {
@@ -117,6 +122,7 @@ impl GraphicProxy {
             loaded_fonts: Arc::new(RwLock::new(HashMap::new())),
             available: true,
             asset_root,
+            main_window_id: AtomicU64::new(1), // Primary window created at engine startup
         }
     }
 
@@ -137,6 +143,7 @@ impl GraphicProxy {
             loaded_fonts: Arc::new(RwLock::new(HashMap::new())),
             available: false,
             asset_root: None,
+            main_window_id: AtomicU64::new(1),
         }
     }
 
@@ -155,6 +162,44 @@ impl GraphicProxy {
     /// Get the currently active engine type
     pub fn get_active_engine(&self) -> Option<GraphicEngines> {
         *self.active_engine.read().unwrap()
+    }
+
+    /// Get the current main window ID
+    ///
+    /// Returns the ID of the window that is considered the "main" window.
+    /// This is used by `getEngineInfo().mainWindow` in JavaScript.
+    pub fn get_main_window_id(&self) -> u64 {
+        self.main_window_id.load(Ordering::SeqCst)
+    }
+
+    /// Set the main window
+    ///
+    /// Promotes a window to be the "main" window. This affects:
+    /// - `getEngineInfo().mainWindow` will return this window
+    /// - The `GraphicEngineWindowClosed` event will report this as the main window
+    ///
+    /// # Arguments
+    /// * `window_id` - The ID of the window to promote as main window
+    ///
+    /// # Returns
+    /// Ok(()) if the window exists, Err if not found or not available
+    pub fn set_main_window(&self, window_id: u64) -> Result<(), String> {
+        if !self.available {
+            return Err(
+                "Graphic.setMainWindow() is not available on the server. This method is client-only."
+                    .to_string(),
+            );
+        }
+
+        // Verify the window exists
+        let windows = self.windows.read().unwrap();
+        if !windows.contains_key(&window_id) {
+            return Err(format!("Window {} not found", window_id));
+        }
+
+        self.main_window_id.store(window_id, Ordering::SeqCst);
+        tracing::debug!("Main window set to {}", window_id);
+        Ok(())
     }
 
     /// Get information about the active graphic engine
@@ -465,6 +510,7 @@ impl GraphicProxy {
 
         // Update tracking
         if let Some(info) = self.windows.write().unwrap().get_mut(&window_id) {
+            info.config.mode = mode;
             info.config.fullscreen = mode == WindowMode::Fullscreen || mode == WindowMode::BorderlessFullscreen;
         }
 

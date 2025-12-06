@@ -275,6 +275,44 @@ const debugWindow = await Graphic.createWindow({
 
 ---
 
+### `Graphic.setMainWindow(window)`
+
+Promotes a window to be the "main" window.
+
+After this call:
+- `Graphic.getEngineInfo().mainWindow` will return this window
+- Window close events will reflect the new main window
+
+This is useful when you create a new window to replace the initial loading/splash window and want to promote it as the main game window.
+
+**Parameters:**
+- `window`: `Window` - The window object to set as the main window
+
+**Throws:** Error if called on server or if the window is invalid
+
+**Example:**
+```javascript
+// Create a new game window
+const gameWindow = await Graphic.createWindow({
+    title: "My Game",
+    width: 1920,
+    height: 1080,
+    resizable: true
+});
+
+// Promote it as the main window
+Graphic.setMainWindow(gameWindow);
+
+// Now getEngineInfo().mainWindow returns gameWindow
+const info = await Graphic.getEngineInfo();
+console.log(info.mainWindow.id === gameWindow.id); // true
+
+// Close the old splash/loading window
+await oldWindow.close();
+```
+
+---
+
 ### `Graphic.loadFont(alias, path)`
 
 Loads a custom font from a file.
@@ -411,6 +449,53 @@ Sets the default font for all widgets in this window.
 ```javascript
 await Graphic.loadFont("game-font", System.getAssetsPath("fonts/Game.ttf"));
 await window.setFont("game-font", 16);
+```
+
+---
+
+### `window.getTitle()`
+
+Gets the current window title.
+
+**Returns:** `string` - The window title
+
+```javascript
+const title = window.getTitle();
+console.log(`Current title: ${title}`);
+```
+
+---
+
+### `window.getSize()`
+
+Gets the current window size.
+
+**Returns:** `object`
+- `width`: `number` - Width in pixels
+- `height`: `number` - Height in pixels
+
+```javascript
+const size = window.getSize();
+console.log(`Window size: ${size.width}x${size.height}`);
+```
+
+---
+
+### `window.getMode()`
+
+Gets the current window display mode.
+
+**Returns:** `number` - `WindowModes` value (0=Windowed, 1=Fullscreen, 2=BorderlessFullscreen)
+
+```javascript
+const mode = window.getMode();
+if (mode === WindowModes.Fullscreen) {
+    console.log("Window is in fullscreen mode");
+} else if (mode === WindowModes.BorderlessFullscreen) {
+    console.log("Window is in borderless fullscreen mode");
+} else {
+    console.log("Window is in windowed mode");
+}
 ```
 
 ---

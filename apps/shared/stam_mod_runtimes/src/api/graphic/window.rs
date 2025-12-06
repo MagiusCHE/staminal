@@ -88,7 +88,7 @@ pub struct WindowConfig {
     pub width: u32,
     /// Initial height in pixels
     pub height: u32,
-    /// Start in fullscreen mode
+    /// Start in fullscreen mode (legacy field, kept for backward compatibility)
     pub fullscreen: bool,
     /// Allow window resizing
     pub resizable: bool,
@@ -96,6 +96,9 @@ pub struct WindowConfig {
     pub visible: bool,
     /// Window position mode (applied at creation time)
     pub position_mode: WindowPositionMode,
+    /// Current window mode (Windowed, Fullscreen, BorderlessFullscreen)
+    /// This field tracks the actual mode for getMode() queries
+    pub mode: WindowMode,
 }
 
 impl Default for WindowConfig {
@@ -108,6 +111,7 @@ impl Default for WindowConfig {
             resizable: true,
             visible: true,
             position_mode: WindowPositionMode::Centered,
+            mode: WindowMode::Windowed,
         }
     }
 }
@@ -185,6 +189,12 @@ impl Default for InitialWindowConfig {
 
 impl From<InitialWindowConfig> for WindowConfig {
     fn from(initial: InitialWindowConfig) -> Self {
+        // Derive WindowMode from fullscreen flag
+        let mode = if initial.fullscreen {
+            WindowMode::Fullscreen
+        } else {
+            WindowMode::Windowed
+        };
         Self {
             title: initial.title,
             width: initial.width,
@@ -193,6 +203,7 @@ impl From<InitialWindowConfig> for WindowConfig {
             resizable: initial.resizable,
             visible: true, // Main window is always visible after creation
             position_mode: initial.position_mode,
+            mode,
         }
     }
 }

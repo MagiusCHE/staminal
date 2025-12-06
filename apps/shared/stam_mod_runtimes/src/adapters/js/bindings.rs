@@ -1746,6 +1746,35 @@ impl GraphicJS {
         self.graphic_proxy.get_active_engine().map(|e| e.to_u32())
     }
 
+    /// Set the main window
+    ///
+    /// Promotes a window to be the "main" window. After this call:
+    /// - `Graphic.getEngineInfo().mainWindow` will return this window
+    /// - Window close events will reflect the new main window
+    ///
+    /// This is useful when you create a new window to replace the initial
+    /// loading/splash window and want to promote it as the main game window.
+    ///
+    /// # Arguments
+    /// * `window` - The Window object to set as the main window
+    ///
+    /// # Throws
+    /// Error if called on server or if the window is invalid
+    ///
+    /// # Example
+    /// ```javascript
+    /// const gameWindow = await Graphic.createWindow({ title: "Game", ... });
+    /// Graphic.setMainWindow(gameWindow);
+    /// // Now getEngineInfo().mainWindow returns gameWindow
+    /// ```
+    #[qjs(rename = "setMainWindow")]
+    pub fn set_main_window(&self, ctx: Ctx<'_>, window: rquickjs::Class<'_, WindowJS>) -> rquickjs::Result<()> {
+        let window_id = window.borrow().id;
+        self.graphic_proxy
+            .set_main_window(window_id)
+            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+
     /// Get detailed information about the active graphic engine
     ///
     /// # Returns
@@ -1795,13 +1824,13 @@ impl GraphicJS {
         obj.set("supportsUi", info.supports_ui)?;
         obj.set("supportsAudio", info.supports_audio)?;
 
-        // Create mainWindow object wrapping the primary window (ID 1)
-        // The primary window is the hidden window created at engine startup
-        // which can be modified by the mod to become the main game window
+        // Create mainWindow object wrapping the current main window
+        // The main window ID can be changed via Graphic.setMainWindow()
+        let main_window_id = self.graphic_proxy.get_main_window_id();
         let main_window = rquickjs::Class::<WindowJS>::instance(
             ctx.clone(),
             WindowJS {
-                id: 1, // Primary window ID
+                id: main_window_id,
                 graphic_proxy: self.graphic_proxy.clone(),
             },
         )?;
@@ -1870,18 +1899,20 @@ impl GraphicJS {
         tracing::debug!("GraphicJS::create_window called");
 
         let window_config = if let Some(cfg) = config.0 {
+            let fullscreen = cfg.get::<_, bool>("fullscreen").unwrap_or(false);
             WindowConfig {
                 title: cfg
                     .get::<_, String>("title")
                     .unwrap_or_else(|_| "Staminal".to_string()),
                 width: cfg.get::<_, u32>("width").unwrap_or(1280),
                 height: cfg.get::<_, u32>("height").unwrap_or(720),
-                fullscreen: cfg.get::<_, bool>("fullscreen").unwrap_or(false),
+                fullscreen,
                 resizable: cfg.get::<_, bool>("resizable").unwrap_or(true),
                 visible: cfg.get::<_, bool>("visible").unwrap_or(true),
                 position_mode: WindowPositionMode::from_u32(
                     cfg.get::<_, u32>("positionMode").unwrap_or(1), // 1 = Centered
                 ),
+                mode: if fullscreen { WindowMode::Fullscreen } else { WindowMode::Windowed },
             }
         } else {
             WindowConfig::default()
@@ -2194,6 +2225,72 @@ impl WindowJS {
             .set_window_font(self.id, family, size)
             .await
             .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
+    }
+
+    /// Get the window title
+    ///
+    /// # Returns
+    /// The current window title string
+    ///
+    /// # Example
+    /// ```javascript
+    /// const title = window.getTitle();
+    /// console.log("Window title:", title);
+    /// ```
+    #[qjs(rename = "getTitle")]
+    pub fn get_title(&self, ctx: Ctx<'_>) -> rquickjs::Result<String> {
+        self.graphic_proxy
+            .get_window_info(self.id)
+            .map(|info| info.config.title)
+            .ok_or_else(|| {
+                let msg = format!("Window {} not found", self.id);
+                ctx.throw(rquickjs::String::from_str(ctx.clone(), &msg).unwrap().into())
+            })
+    }
+
+    /// Get the window size
+    ///
+    /// # Returns
+    /// Object with `width` and `height` properties (in pixels)
+    ///
+    /// # Example
+    /// ```javascript
+    /// const size = window.getSize();
+    /// console.log(`Window size: ${size.width}x${size.height}`);
+    /// ```
+    #[qjs(rename = "getSize")]
+    pub fn get_size<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+        let info = self.graphic_proxy.get_window_info(self.id).ok_or_else(|| {
+            let msg = format!("Window {} not found", self.id);
+            ctx.throw(rquickjs::String::from_str(ctx.clone(), &msg).unwrap().into())
+        })?;
+
+        let size = Object::new(ctx.clone())?;
+        size.set("width", info.config.width)?;
+        size.set("height", info.config.height)?;
+        Ok(size)
+    }
+
+    /// Get the window mode
+    ///
+    /// # Returns
+    /// WindowModes enum value (0=Windowed, 1=Fullscreen, 2=BorderlessFullscreen)
+    ///
+    /// # Example
+    /// ```javascript
+    /// const mode = window.getMode();
+    /// if (mode === WindowModes.Fullscreen) {
+    ///     console.log("Window is in fullscreen mode");
+    /// }
+    /// ```
+    #[qjs(rename = "getMode")]
+    pub fn get_mode(&self, ctx: Ctx<'_>) -> rquickjs::Result<u32> {
+        let info = self.graphic_proxy.get_window_info(self.id).ok_or_else(|| {
+            let msg = format!("Window {} not found", self.id);
+            ctx.throw(rquickjs::String::from_str(ctx.clone(), &msg).unwrap().into())
+        })?;
+
+        Ok(info.config.mode.to_u32())
     }
 }
 

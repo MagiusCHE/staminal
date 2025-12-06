@@ -23,9 +23,10 @@ export class Game {
             this.#config = {
                 graphic: {
                     screen: screen,
-                    resolution: await Graphic.getScreenResolution(screen),
-                    // WindowMode.BorderlessFullscreen | WindowMode.Fullscreen | WindowMode.Windowed
-                    mode: "borderless_fullscreen"  // TODO: use WindowMode enum when available
+                    //resolution: await Graphic.getScreenResolution(screen),
+                    resolution: { width: 1280, height: 720 },
+                    mode: WindowModes.Windowed,
+                    resizable: true,
                 }
             }
         }
@@ -54,53 +55,54 @@ export class Game {
     }
     async initializeWindow() {
         const windows = await Graphic.getWindows();
-        const engine = await Graphic.getEngineInfo();
         //let first = true;
         //console.log("Found", windows.length, "windows...");
         //console.log("Main window:", engine.mainWindow.id);
+        
+
+        // All windows are destroyed, create our main window
+        //console.log(" - Win:", win.id);
+
+        const mainWin = await Graphic.createWindow({
+            title: (await Graphic.getEngineInfo()).mainWindow.getTitle() || "Staminal",
+            width: this.#config.graphic.resolution.width,
+            height: this.#config.graphic.resolution.height,
+            resizable: this.#config.graphic.resizable,
+            mode: this.#config.graphic.mode,
+            positionMode: WindowPositionModes.Centered,
+        });        
+        
+        Graphic.setMainWindow(mainWin);
+
         for (const win of windows) {
-            //console.log(" - Win:", win.id);
-            if (win.id == engine.mainWindow.id) {
-                await win.clearWidgets();
-                if (this.#config.graphic.mode == "borderless_fullscreen") {
-                    await win.setMode(WindowModes.BorderlessFullscreen);
-                } else if (this.#config.graphic.mode == "fullscreen") {
-                    await win.setMode(WindowModes.Fullscreen);
-                } else {
-                    await win.setMode(WindowModes.Windowed);
-                    await win.setSize(this.#config.graphic.resolution.width, this.#config.graphic.resolution.height);
-                    // FIXME: Should center the window
-                    console.warn("FIXME: Center the window on screen");
-                }
-
-                const cont = await win.createWidget(WidgetTypes.Container, {
-                    width: "100%",
-                    height: "100%",
-                    direction: FlexDirection.Column,
-                    justifyContent: JustifyContent.Center,
-                    alignItems: AlignItems.Center,
-                    backgroundColor: "#1a1a2e",
-                });
-
-                // console.log("Waiting 5 seconds to ensure resources are loaded...");
-                // await wait(5000);
-                // console.log("After wait, checking resource...");
-
-                if (!Resource.isLoaded("title-screen-background")) {
-                    throw new Error("Title screen background resource not loaded: title-screen-background");
-                }
-
-                const bkg = await cont.createChild(WidgetTypes.Image, {
-                    resourceId: "title-screen-background",
-                    width: "100%",
-                    height: "100%",
-                    scaleMode: ImageScaleModes.Contain,
-                    backgroundColor: "#00000000",
-                });
-            } else {
-                await win.close();
-            }
+            await win.close();
         }
+
+        const cont = await mainWin.createWidget(WidgetTypes.Container, {
+            width: "100%",
+            height: "100%",
+            direction: FlexDirection.Column,
+            justifyContent: JustifyContent.Center,
+            alignItems: AlignItems.Center,
+            backgroundColor: "#1a1a2e",
+        });
+
+        // console.log("Waiting 5 seconds to ensure resources are loaded...");
+        // await wait(5000);
+        // console.log("After wait, checking resource...");
+
+        if (!Resource.isLoaded("title-screen-background")) {
+            throw new Error("Title screen background resource not loaded: title-screen-background");
+        }
+
+        const bkg = await cont.createChild(WidgetTypes.Image, {
+            resourceId: "title-screen-background",
+            width: "100%",
+            height: "100%",
+            scaleMode: ImageScaleModes.Contain,
+            //backgroundColor: "#00000000", // no need
+        });
+
     }
     async startGame() {
         console.warn("TODO: Starting the game...");

@@ -51,8 +51,9 @@ export class Manager {
     }
 
     async onGraphicEngineWindowClosed(req, res) {
+        const engine = await Graphic.getEngineInfo();
         //console.log("Graphic engine window closed", req);
-        if (req.windowId === this.#window.id) {
+        if (req.windowId === engine.mainWindow.id) {
             //console.log("Main window closed, exiting...");
             System.exit(0);
             res.handled = true;
