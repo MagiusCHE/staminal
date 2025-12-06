@@ -33,7 +33,7 @@ pub use events::{GraphicEvent, KeyModifiers, MouseButton};
 pub use proxy::{EnableEngineRequest, GraphicProxy};
 pub use widget::{
     AlignItems, BlendMode, ColorParseError, ColorValue, EdgeInsets, FlexDirection, FontConfig,
-    FontInfo, FontStyle, FontWeight, ImageConfig, ImageScaleMode, JustifyContent, LayoutType,
+    FontInfo, FontStyle, FontWeight, ImageConfig, ImageScaleMode, ImageSource, JustifyContent, LayoutType,
     PropertyValue, RectValue, ShadowConfig, SizeValue, TextAlign, WidgetConfig, WidgetEventType,
     WidgetFilter, WidgetInfo, WidgetSubscriptions, WidgetType,
 };

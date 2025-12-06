@@ -1,3 +1,4 @@
+import { wait } from "@js-helper";
 export class Game {
     #config
     constructor() {
@@ -39,7 +40,8 @@ export class Game {
     }
     async waitForResources() {
         console.log("Waiting for resources to load...", Resource.getLoadingProgress());
-        
+
+        // We can use await Resource.whenLoadedAll(); but i want to show progress bar
         while (!Resource.isLoadingCompleted()) {
             await wait(100);
         }
@@ -80,11 +82,19 @@ export class Game {
                     backgroundColor: "#1a1a2e",
                 });
 
+                // console.log("Waiting 5 seconds to ensure resources are loaded...");
+                // await wait(5000);
+                // console.log("After wait, checking resource...");
+
+                if (!Resource.isLoaded("title-screen-background")) {
+                    throw new Error("Title screen background resource not loaded: title-screen-background");
+                }
+
                 const bkg = await cont.createChild(WidgetTypes.Image, {
                     resourceId: "title-screen-background",
                     width: "100%",
                     height: "100%",
-                    stretchMode: "cover"
+                    scaleMode: ImageScaleModes.Cover
                 });
             } else {
                 await win.close();

@@ -16,6 +16,14 @@
 //! 2. Relative paths are resolved against `data_dir`
 //! 3. Absolute paths must be within permitted directories
 //! 4. Symlinks are followed and the real path is checked
+//!
+//! # @mod-id Path Resolution
+//!
+//! Paths starting with `@mod-id/` are resolved to the mod's root directory:
+//! - `@other-mod/assets/image.png` → `mods/other-mod/assets/image.png`
+//! - Regular paths are resolved relative to the current mod or data_dir
+//!
+//! Use `resolve_mod_path()` for path resolution with @mod-id support.
 
 use std::path::{Path, PathBuf};
 
@@ -301,6 +309,308 @@ fn normalize_path_components(path: &Path) -> PathBuf {
     }
 
     normalized
+}
+
+// ============================================================================
+// @mod-id Path Resolution
+// ============================================================================
+
+/// Result of parsing a path with @mod-id syntax
+#[derive(Debug, Clone, PartialEq)]
+pub enum ParsedModPath {
+    /// Path references another mod: @mod-id/path/to/file
+    ModReference {
+        /// The mod ID (without @)
+        mod_id: String,
+        /// The remaining path after mod-id/
+        path: String,
+    },
+    /// Regular path (no @mod-id prefix)
+    Regular(String),
+}
+
+/// Parse a path that may contain @mod-id syntax
+///
+/// # Arguments
+/// * `path` - The path to parse
+///
+/// # Returns
+/// * `ParsedModPath::ModReference` if path starts with @mod-id/
+/// * `ParsedModPath::Regular` for all other paths
+///
+/// # Examples
+/// ```ignore
+/// parse_mod_path("@other-mod/assets/image.png") // ModReference { mod_id: "other-mod", path: "assets/image.png" }
+/// parse_mod_path("assets/image.png")             // Regular("assets/image.png")
+/// parse_mod_path("@invalid")                     // Regular("@invalid") - no slash, treated as regular
+/// ```
+pub fn parse_mod_path(path: &str) -> ParsedModPath {
+    if !path.starts_with('@') {
+        return ParsedModPath::Regular(path.to_string());
+    }
+
+    // Remove @ prefix
+    let without_at = &path[1..];
+
+    // Split on first /
+    if let Some(slash_pos) = without_at.find('/') {
+        let mod_id = &without_at[..slash_pos];
+        let remaining = &without_at[slash_pos + 1..];
+
+        // mod_id must not be empty
+        if mod_id.is_empty() {
+            return ParsedModPath::Regular(path.to_string());
+        }
+
+        ParsedModPath::ModReference {
+            mod_id: mod_id.to_string(),
+            path: remaining.to_string(),
+        }
+    } else {
+        // No slash after @mod-id, treat as regular path
+        ParsedModPath::Regular(path.to_string())
+    }
+}
+
+/// Configuration for mod path resolution
+pub struct ModPathConfig {
+    /// The home/data directory (contains mods/ subdirectory)
+    pub home_dir: PathBuf,
+    /// The current mod ID (for resolving relative paths)
+    pub current_mod_id: Option<String>,
+    /// Optional config directory (for config files)
+    pub config_dir: Option<PathBuf>,
+    /// Callback to check if a mod exists (mod_id -> bool)
+    /// If None, mod existence is not checked
+    mod_exists_fn: Option<Box<dyn Fn(&str) -> bool + Send + Sync>>,
+}
+
+impl std::fmt::Debug for ModPathConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ModPathConfig")
+            .field("home_dir", &self.home_dir)
+            .field("current_mod_id", &self.current_mod_id)
+            .field("config_dir", &self.config_dir)
+            .field("mod_exists_fn", &self.mod_exists_fn.as_ref().map(|_| "<fn>"))
+            .finish()
+    }
+}
+
+impl ModPathConfig {
+    /// Create a new ModPathConfig with just the home directory
+    pub fn new(home_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            home_dir: home_dir.into(),
+            current_mod_id: None,
+            config_dir: None,
+            mod_exists_fn: None,
+        }
+    }
+
+    /// Set the current mod ID
+    pub fn with_current_mod(mut self, mod_id: impl Into<String>) -> Self {
+        self.current_mod_id = Some(mod_id.into());
+        self
+    }
+
+    /// Set the config directory
+    pub fn with_config_dir(mut self, config_dir: impl Into<PathBuf>) -> Self {
+        self.config_dir = Some(config_dir.into());
+        self
+    }
+
+    /// Set a function to check if a mod exists
+    pub fn with_mod_exists_fn<F>(mut self, f: F) -> Self
+    where
+        F: Fn(&str) -> bool + Send + Sync + 'static,
+    {
+        self.mod_exists_fn = Some(Box::new(f));
+        self
+    }
+
+    /// Check if a mod exists (returns true if no check function is set)
+    pub fn mod_exists(&self, mod_id: &str) -> bool {
+        match &self.mod_exists_fn {
+            Some(f) => f(mod_id),
+            None => true, // No check function, assume exists
+        }
+    }
+}
+
+/// Result of resolving a mod path
+#[derive(Debug)]
+pub struct ResolvedModPath {
+    /// The resolved absolute path
+    pub absolute_path: PathBuf,
+    /// The path relative to home_dir (for use with AssetServer etc.)
+    pub relative_path: String,
+    /// Whether a mod reference was resolved
+    pub mod_id: Option<String>,
+}
+
+/// Resolve a path with @mod-id support
+///
+/// This function resolves paths that may contain @mod-id syntax and validates
+/// that the resulting path is within permitted directories.
+///
+/// # Path Resolution Rules
+///
+/// 1. `@other-mod/path` → `mods/other-mod/path` (references another mod)
+/// 2. `path/to/file` (with current_mod set) → `mods/current-mod/path/to/file`
+/// 3. `path/to/file` (no current_mod) → `path/to/file` (relative to home_dir)
+///
+/// # Security
+///
+/// - The resolved path is validated to be within home_dir or config_dir
+/// - Path traversal attempts (../) are blocked
+/// - If a mod reference is used, the mod's existence is verified (if check function is set)
+///
+/// # Arguments
+/// * `path` - The path to resolve (may contain @mod-id prefix)
+/// * `config` - Configuration for path resolution
+///
+/// # Returns
+/// * `Ok(ResolvedModPath)` with absolute and relative paths
+/// * `Err(String)` if path is invalid or outside permitted directories
+pub fn resolve_mod_path(path: &str, config: &ModPathConfig) -> Result<ResolvedModPath, String> {
+    let parsed = parse_mod_path(path);
+
+    let (mod_id, relative_to_mod) = match parsed {
+        ParsedModPath::ModReference { mod_id, path: sub_path } => {
+            // Check if mod exists
+            if !config.mod_exists(&mod_id) {
+                return Err(format!(
+                    "Mod '{}' not found. Cannot resolve path '{}'",
+                    mod_id, path
+                ));
+            }
+            (Some(mod_id), sub_path)
+        }
+        ParsedModPath::Regular(regular_path) => {
+            // Use current mod if set, otherwise treat as relative to home_dir
+            if let Some(ref current) = config.current_mod_id {
+                (Some(current.clone()), regular_path)
+            } else {
+                (None, regular_path)
+            }
+        }
+    };
+
+    // Build the relative path
+    let relative_path = if let Some(ref mid) = mod_id {
+        format!("mods/{}/{}", mid, relative_to_mod)
+    } else {
+        relative_to_mod
+    };
+
+    // Canonicalize home_dir first to get absolute path
+    let canonical_home = config.home_dir.canonicalize().map_err(|e| {
+        format!(
+            "Failed to canonicalize home directory '{}': {}",
+            config.home_dir.display(),
+            e
+        )
+    })?;
+
+    // Build the absolute path from canonicalized home_dir
+    let absolute_path = canonical_home.join(&relative_path);
+
+    // Normalize to resolve any .. or . components
+    let normalized = normalize_path_components(&absolute_path);
+
+    // Check if normalized path is within home_dir (security check for path traversal)
+    if !normalized.starts_with(&canonical_home) {
+        // Check config_dir if available
+        if let Some(ref cfg_dir) = config.config_dir {
+            if let Ok(canonical_cfg) = cfg_dir.canonicalize() {
+                if normalized.starts_with(&canonical_cfg) {
+                    return Ok(ResolvedModPath {
+                        absolute_path: normalized,
+                        relative_path,
+                        mod_id,
+                    });
+                }
+            }
+        }
+
+        return Err(format!(
+            "Access denied: path '{}' resolves to '{}' which is outside permitted directories. \
+             Path traversal is not allowed.",
+            path,
+            normalized.display()
+        ));
+    }
+
+    Ok(ResolvedModPath {
+        absolute_path: normalized,
+        relative_path,
+        mod_id,
+    })
+}
+
+/// Resolve a mod path and validate that the file exists
+///
+/// This is like `resolve_mod_path` but also checks that the file exists
+/// and canonicalizes the result.
+///
+/// # Arguments
+/// * `path` - The path to resolve
+/// * `config` - Configuration for path resolution
+///
+/// # Returns
+/// * `Ok(ResolvedModPath)` with canonical absolute path
+/// * `Err(String)` if path doesn't exist or is outside permitted directories
+pub fn resolve_and_validate_mod_path(
+    path: &str,
+    config: &ModPathConfig,
+) -> Result<ResolvedModPath, String> {
+    let resolved = resolve_mod_path(path, config)?;
+
+    // Now canonicalize to get the real path and verify existence
+    let canonical = resolved.absolute_path.canonicalize().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            format!("Path does not exist: {}", resolved.absolute_path.display())
+        } else {
+            format!(
+                "Failed to resolve path '{}': {}",
+                resolved.absolute_path.display(),
+                e
+            )
+        }
+    })?;
+
+    // Re-validate canonical path is within permitted directories
+    let canonical_home = config.home_dir.canonicalize().map_err(|e| {
+        format!(
+            "Failed to canonicalize home directory: {}",
+            e
+        )
+    })?;
+
+    if !canonical.starts_with(&canonical_home) {
+        if let Some(ref cfg_dir) = config.config_dir {
+            if let Ok(canonical_cfg) = cfg_dir.canonicalize() {
+                if canonical.starts_with(&canonical_cfg) {
+                    return Ok(ResolvedModPath {
+                        absolute_path: canonical,
+                        relative_path: resolved.relative_path,
+                        mod_id: resolved.mod_id,
+                    });
+                }
+            }
+        }
+
+        return Err(format!(
+            "Access denied: resolved path '{}' is outside permitted directories (symlink escape attempt?)",
+            canonical.display()
+        ));
+    }
+
+    Ok(ResolvedModPath {
+        absolute_path: canonical,
+        relative_path: resolved.relative_path,
+        mod_id: resolved.mod_id,
+    })
 }
 
 #[cfg(test)]

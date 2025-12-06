@@ -452,32 +452,90 @@ pub enum BlendMode {
 // Image Types
 // ============================================================================
 
-/// Image scale mode
+/// Image scale mode for Image widgets
+///
+/// Maps to Bevy's `NodeImageMode` variants plus additional CSS-like modes.
+/// The variants correspond to how the image is scaled within its container.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ImageScaleMode {
-    /// Scale to fill while maintaining aspect ratio (may crop)
-    Fill,
-    /// Scale to fit while maintaining aspect ratio (may letterbox)
-    Fit,
-    /// Stretch to fill (ignores aspect ratio)
+    /// Automatic sizing based on image's natural dimensions (Bevy default)
+    /// The image keeps its natural size and aspect ratio.
+    Auto,
+    /// Stretch to fill the container (ignores aspect ratio)
+    /// Maps to Bevy's `NodeImageMode::Stretch`.
     Stretch,
-    /// No scaling, original size
-    None,
-    /// Repeat as pattern (tile)
-    Tile,
-    /// 9-slice scaling for UI elements (preserves corners)
-    NineSlice {
-        top: f32,
-        right: f32,
-        bottom: f32,
-        left: f32,
+    /// Repeat the image as a pattern (tile)
+    /// Maps to Bevy's `NodeImageMode::Tiled`.
+    Tiled {
+        /// Whether to tile horizontally
+        #[serde(default = "default_true")]
+        tile_x: bool,
+        /// Whether to tile vertically
+        #[serde(default = "default_true")]
+        tile_y: bool,
+        /// Stretch factor for tiles (1.0 = no stretch)
+        #[serde(default = "default_one")]
+        stretch_value: f32,
     },
+    /// 9-slice scaling for UI elements (preserves corners)
+    /// Maps to Bevy's `NodeImageMode::Sliced`.
+    Sliced {
+        /// Border size from the top edge (in pixels)
+        top: f32,
+        /// Border size from the right edge (in pixels)
+        right: f32,
+        /// Border size from the bottom edge (in pixels)
+        bottom: f32,
+        /// Border size from the left edge (in pixels)
+        left: f32,
+        /// Whether the center portion should be drawn
+        #[serde(default = "default_true")]
+        center: bool,
+    },
+    /// Scale to fit within bounds while maintaining aspect ratio (may show background/letterbox)
+    /// The entire image is visible, but the container may have empty space.
+    /// This is NOT a native Bevy mode - implemented via custom sizing.
+    Contain,
+    /// Scale to cover the entire container while maintaining aspect ratio (may crop)
+    /// The container is fully covered, but parts of the image may be clipped.
+    /// This is NOT a native Bevy mode - implemented via custom sizing.
+    Cover,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_one() -> f32 {
+    1.0
 }
 
 impl Default for ImageScaleMode {
     fn default() -> Self {
-        ImageScaleMode::Fit
+        ImageScaleMode::Auto
+    }
+}
+
+impl ImageScaleMode {
+    /// Convert ImageScaleMode variant to a u32 identifier
+    ///
+    /// Used for JS bindings. The mapping is:
+    /// - Auto = 0
+    /// - Stretch = 1
+    /// - Tiled = 2
+    /// - Sliced = 3
+    /// - Contain = 4
+    /// - Cover = 5
+    pub fn variant_to_u32(&self) -> u32 {
+        match self {
+            ImageScaleMode::Auto => 0,
+            ImageScaleMode::Stretch => 1,
+            ImageScaleMode::Tiled { .. } => 2,
+            ImageScaleMode::Sliced { .. } => 3,
+            ImageScaleMode::Contain => 4,
+            ImageScaleMode::Cover => 5,
+        }
     }
 }
 
@@ -491,10 +549,23 @@ pub struct RectValue {
 }
 
 /// Image configuration (for background or Image widget)
+///
+/// Images can be specified in two ways:
+/// 1. **Direct path**: Set `path` to load the image directly (loaded on demand)
+/// 2. **Resource ID**: Set `resource_id` to use a pre-loaded resource (via `Resource.load()`)
+///
+/// If both `path` and `resource_id` are provided, `resource_id` takes precedence.
+/// Using `resource_id` is recommended for better performance as resources are pre-cached.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ImageConfig {
     /// Asset path (relative to mod or asset folder)
-    pub path: String,
+    /// Optional if `resource_id` is provided
+    #[serde(default)]
+    pub path: Option<String>,
+    /// Resource ID (alias from Resource.load())
+    /// Takes precedence over `path` if both are provided
+    #[serde(default)]
+    pub resource_id: Option<String>,
     /// Scale mode
     #[serde(default)]
     pub scale_mode: ImageScaleMode,
@@ -510,6 +581,61 @@ pub struct ImageConfig {
     pub flip_y: bool,
     /// Source rectangle for sprite sheets
     pub source_rect: Option<RectValue>,
+}
+
+impl ImageConfig {
+    /// Create ImageConfig from a direct path
+    pub fn from_path(path: impl Into<String>) -> Self {
+        Self {
+            path: Some(path.into()),
+            resource_id: None,
+            scale_mode: ImageScaleMode::default(),
+            tint: None,
+            opacity: None,
+            flip_x: false,
+            flip_y: false,
+            source_rect: None,
+        }
+    }
+
+    /// Create ImageConfig from a resource ID
+    pub fn from_resource(resource_id: impl Into<String>) -> Self {
+        Self {
+            path: None,
+            resource_id: Some(resource_id.into()),
+            scale_mode: ImageScaleMode::default(),
+            tint: None,
+            opacity: None,
+            flip_x: false,
+            flip_y: false,
+            source_rect: None,
+        }
+    }
+
+    /// Check if this config has a valid image source (either path or resource_id)
+    pub fn has_source(&self) -> bool {
+        self.path.is_some() || self.resource_id.is_some()
+    }
+
+    /// Get the effective source: resource_id takes precedence over path
+    pub fn effective_source(&self) -> Option<ImageSource> {
+        if let Some(ref resource_id) = self.resource_id {
+            Some(ImageSource::ResourceId(resource_id.clone()))
+        } else if let Some(ref path) = self.path {
+            Some(ImageSource::Path(path.clone()))
+        } else {
+            None
+        }
+    }
+}
+
+/// Represents the source of an image
+#[derive(Clone, Debug)]
+pub enum ImageSource {
+    /// Direct file path
+    Path(String),
+    /// Resource ID (pre-loaded via Resource.load())
+    ResourceId(String),
 }
 
 // ============================================================================

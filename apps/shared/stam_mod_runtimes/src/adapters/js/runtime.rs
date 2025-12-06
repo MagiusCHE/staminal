@@ -397,6 +397,8 @@ pub struct JsRuntimeAdapter {
     network_api: Option<NetworkApi>,
     /// Graphic proxy for graphic engine operations (optional, client-side only)
     graphic_proxy: Option<Arc<crate::api::GraphicProxy>>,
+    /// Resource proxy for resource loading and caching (optional, client-side only)
+    resource_proxy: Option<Arc<crate::api::ResourceProxy>>,
     /// Temp file manager for downloaded content (tracks and cleans up temp files)
     temp_file_manager: TempFileManager,
 }
@@ -463,6 +465,7 @@ impl JsRuntimeAdapter {
             locale_api: None,
             network_api: None,
             graphic_proxy: None,
+            resource_proxy: None,
             temp_file_manager: TempFileManager::new(),
         };
 
@@ -494,6 +497,15 @@ impl JsRuntimeAdapter {
     /// Only used on the client side.
     pub fn set_graphic_proxy(&mut self, graphic_proxy: Arc<crate::api::GraphicProxy>) {
         self.graphic_proxy = Some(graphic_proxy);
+    }
+
+    /// Set the resource proxy for resource loading and caching
+    ///
+    /// This should be called before loading any mods to ensure
+    /// the `Resource` global object is available in all mod contexts.
+    /// Only used on the client side.
+    pub fn set_resource_proxy(&mut self, resource_proxy: Arc<crate::api::ResourceProxy>) {
+        self.resource_proxy = Some(resource_proxy);
     }
 
     /// Get a clone of the async runtime for the event loop
@@ -532,6 +544,7 @@ impl JsRuntimeAdapter {
         let locale_api = self.locale_api.clone();
         let network_api = self.network_api.clone();
         let graphic_proxy = self.graphic_proxy.clone();
+        let resource_proxy = self.resource_proxy.clone();
         let temp_file_manager = self.temp_file_manager.clone();
 
         // Configure temp directory for downloads (game_data_dir/tmp)
@@ -567,6 +580,8 @@ impl JsRuntimeAdapter {
                 } else {
                     Some(game_config_dir)
                 };
+                // Clone system_api before moving it - we need it later for Resource API
+                let system_api_for_resource = system_api.clone();
                 bindings::setup_system_api(ctx.clone(), system_api, config_dir_for_system)?;
 
                 // Register locale API (locale.get(), locale.get_with_args())
@@ -580,8 +595,14 @@ impl JsRuntimeAdapter {
                 }
 
                 // Register graphic API (graphic.enableEngine(), etc.) - client-side only
-                if let Some(proxy) = graphic_proxy {
+                if let Some(proxy) = graphic_proxy.clone() {
                     bindings::setup_graphic_api(ctx.clone(), proxy)?;
+                }
+
+                // Register resource API (Resource.load(), Resource.unload(), etc.) - client-side only
+                // Requires both resource_proxy and graphic_proxy to be set
+                if let (Some(res_proxy), Some(gfx_proxy)) = (resource_proxy, graphic_proxy) {
+                    bindings::setup_resource_api(ctx.clone(), res_proxy, gfx_proxy, system_api_for_resource)?;
                 }
 
                 // Register text API (Text.DecodeUTF8())

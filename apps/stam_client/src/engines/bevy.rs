@@ -15,8 +15,18 @@ use stam_mod_runtimes::api::{
     ColorValue, EdgeInsets, FlexDirection, GraphicCommand, GraphicEngine, GraphicEngineInfo,
     GraphicEngines, GraphicEvent, InitialWindowConfig, JustifyContent, KeyModifiers, MouseButton,
     PropertyValue, SizeValue, WidgetConfig, WidgetEventType, WidgetType, WindowPositionMode,
-    AlignItems, WindowMode as StamWindowMode,
+    AlignItems, WindowMode as StamWindowMode, ResourceType, ResourceState, ResourceInfo,
+    ImageScaleMode, ImageSource,
 };
+
+/// System sets for ordering Bevy systems
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+enum BevySystemSet {
+    /// Process commands from the worker thread (first)
+    ProcessCommands,
+    /// Systems that run after commands are processed
+    AfterCommands,
+}
 
 /// Bevy engine implementation
 ///
@@ -105,6 +115,8 @@ impl GraphicEngine for BevyEngine {
         app.insert_resource(WindowRegistry::default());
         app.insert_resource(WidgetRegistry::default());
         app.insert_resource(FontRegistry::default());
+        app.insert_resource(ResourceRegistry::default());
+        app.insert_resource(PendingAssetRegistry::default());
         app.insert_resource(EngineReadySent::default());
 
         // Force continuous updates even without windows or when unfocused
@@ -117,20 +129,38 @@ impl GraphicEngine for BevyEngine {
         // Add startup system to register the primary window in our registry
         app.add_systems(Startup, register_primary_window);
 
-        // Add our systems - send_engine_ready_event runs AFTER process_commands
+        // Configure system set ordering
+        app.configure_sets(
+            Update,
+            BevySystemSet::AfterCommands.after(BevySystemSet::ProcessCommands),
+        );
+
+        // Add our systems with explicit ordering via SystemSets
+        // send_engine_ready_event and check_pending_assets run AFTER process_commands
         // to ensure the command channel is being processed before JS handlers
         // try to call createWindow() in response to EngineReady
+        //
+        // Note: process_commands has too many parameters to use .in_set() directly.
+        // We use a separate add_systems call and configure the set to run first.
+        app.add_systems(Update, process_commands);
         app.add_systems(
             Update,
             (
-                process_commands,
-                send_engine_ready_event.after(process_commands),
+                send_engine_ready_event,
+                check_pending_assets,
                 send_frame_events,
                 handle_keyboard_input,
                 handle_mouse_input,
                 handle_window_events,
                 handle_widget_interactions,
-            ),
+            ).in_set(BevySystemSet::AfterCommands),
+        );
+
+        // Ensure AfterCommands runs after the default ordering (process_commands)
+        // by adding an explicit First/Last ordering
+        app.configure_sets(
+            Update,
+            BevySystemSet::ProcessCommands.before(BevySystemSet::AfterCommands),
         );
 
         tracing::info!("Bevy engine starting main loop");
@@ -409,6 +439,145 @@ impl FontRegistry {
     }
 }
 
+// ============================================================================
+// Resource Registry
+// ============================================================================
+
+/// Entry in the resource registry
+struct ResourceRegistryEntry {
+    /// Unique asset ID (matches ResourceProxy's EngineHandle)
+    asset_id: u64,
+    /// Resource alias
+    alias: String,
+    /// Original path
+    path: String,
+    /// Resource type
+    resource_type: ResourceType,
+    /// Handle to the loaded asset (keeps it alive)
+    handle: ResourceHandle,
+}
+
+/// Enum holding different types of Bevy asset handles
+#[derive(Clone)]
+enum ResourceHandle {
+    Image(Handle<Image>),
+    Font(Handle<Font>),
+    // Audio(Handle<AudioSource>), // Add when audio is enabled
+    // TODO: Add other handle types as needed
+}
+
+/// Registry for loaded resources (images, fonts, etc.)
+///
+/// This registry holds handles to loaded assets, preventing Bevy from
+/// garbage collecting them. Resources are identified by their asset_id
+/// (which matches ResourceProxy's EngineHandle).
+#[derive(Resource, Default)]
+struct ResourceRegistry {
+    /// Map from asset_id to resource entry
+    entries: HashMap<u64, ResourceRegistryEntry>,
+    /// Map from alias to asset_id (for quick lookup by name)
+    alias_to_id: HashMap<String, u64>,
+}
+
+impl ResourceRegistry {
+    /// Register a new resource
+    fn register(
+        &mut self,
+        asset_id: u64,
+        alias: String,
+        path: String,
+        resource_type: ResourceType,
+        handle: ResourceHandle,
+    ) {
+        self.alias_to_id.insert(alias.clone(), asset_id);
+        self.entries.insert(
+            asset_id,
+            ResourceRegistryEntry {
+                asset_id,
+                alias,
+                path,
+                resource_type,
+                handle,
+            },
+        );
+    }
+
+    /// Unregister a resource by asset_id
+    fn unregister(&mut self, asset_id: u64) -> Option<ResourceRegistryEntry> {
+        if let Some(entry) = self.entries.remove(&asset_id) {
+            self.alias_to_id.remove(&entry.alias);
+            Some(entry)
+        } else {
+            None
+        }
+    }
+
+    /// Clear all resources
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.alias_to_id.clear();
+    }
+
+    /// Get resource entry by asset_id
+    fn get(&self, asset_id: u64) -> Option<&ResourceRegistryEntry> {
+        self.entries.get(&asset_id)
+    }
+
+    /// Get resource entry by alias
+    fn get_by_alias(&self, alias: &str) -> Option<&ResourceRegistryEntry> {
+        self.alias_to_id
+            .get(alias)
+            .and_then(|id| self.entries.get(id))
+    }
+
+    /// Get image handle by alias (for widget use)
+    fn get_image_handle(&self, alias: &str) -> Option<Handle<Image>> {
+        self.get_by_alias(alias).and_then(|entry| {
+            if let ResourceHandle::Image(handle) = &entry.handle {
+                Some(handle.clone())
+            } else {
+                None
+            }
+        })
+    }
+}
+
+// ============================================================================
+// Pending Asset Tracker
+// ============================================================================
+
+/// Entry for a pending asset load (waiting for Bevy to finish loading)
+struct PendingAssetEntry {
+    /// Asset ID from ResourceProxy
+    asset_id: u64,
+    /// Resource alias
+    alias: String,
+    /// Untyped handle ID for checking load state
+    handle_id: bevy::asset::UntypedAssetId,
+}
+
+/// Registry for assets that are loading in Bevy
+///
+/// When `asset_server.load()` is called, we add an entry here.
+/// The `check_pending_assets` system checks `is_loaded_with_dependencies` for each entry
+/// and sends a `ResourceLoaded` event when the asset is ready.
+#[derive(Resource, Default)]
+struct PendingAssetRegistry {
+    /// List of assets waiting to be loaded
+    pending: Vec<PendingAssetEntry>,
+}
+
+impl PendingAssetRegistry {
+    /// Add a pending asset
+    fn add(&mut self, asset_id: u64, alias: String, handle_id: bevy::asset::UntypedAssetId) {
+        self.pending.push(PendingAssetEntry {
+            asset_id,
+            alias,
+            handle_id,
+        });
+    }
+}
+
 /// Component to store inherited font config on widgets
 #[derive(Component, Clone, Default)]
 struct WidgetFontConfig {
@@ -460,21 +629,29 @@ fn edge_insets_to_ui_rect(insets: &EdgeInsets) -> UiRect {
 fn process_commands(
     channels: (NonSend<CommandReceiverRes>, Res<EventSenderRes>),
     mut commands: Commands,
-    mut registry: ResMut<WindowRegistry>,
-    mut widget_registry: ResMut<WidgetRegistry>,
-    mut font_registry: ResMut<FontRegistry>,
+    mut registries: (
+        ResMut<WindowRegistry>,
+        ResMut<WidgetRegistry>,
+        ResMut<FontRegistry>,
+        ResMut<ResourceRegistry>,
+        ResMut<PendingAssetRegistry>,
+    ),
     asset_server: Res<AssetServer>,
     mut windows: Query<&mut Window>,
     mut app_exit: EventWriter<bevy::app::AppExit>,
     primary_window_query: Query<Entity, With<PrimaryWindow>>,
-    mut text_query: Query<&mut Text>,
-    mut bg_color_query: Query<&mut BackgroundColor>,
-    mut node_query: Query<&mut Node>,
-    mut text_color_query: Query<&mut TextColor>,
-    mut button_query: Query<(&mut ButtonColors, Option<&Interaction>, Option<&Children>)>,
+    mut widget_queries: (
+        Query<&mut Text>,
+        Query<&mut BackgroundColor>,
+        Query<&mut Node>,
+        Query<&mut TextColor>,
+        Query<(&mut ButtonColors, Option<&Interaction>, Option<&Children>)>,
+    ),
     ui_camera: Option<Res<UiCamera>>,
 ) {
     let (cmd_rx, event_tx) = channels;
+    let (registry, widget_registry, font_registry, resource_registry, pending_assets) = &mut registries;
+    let (text_query, bg_color_query, node_query, text_color_query, button_query) = &mut widget_queries;
     // Lock the receiver and process all available commands (non-blocking)
     let receiver = match cmd_rx.0.lock() {
         Ok(r) => r,
@@ -726,6 +903,7 @@ fn process_commands(
                     &config,
                     parent_entity,
                     &font_registry,
+                    &resource_registry,
                     None, // TODO: Get parent widget's effective font config
                 );
 
@@ -751,11 +929,11 @@ fn process_commands(
                         entity,
                         &property,
                         &value,
-                        &mut text_query,
-                        &mut bg_color_query,
-                        &mut node_query,
-                        &mut text_color_query,
-                        &mut button_query,
+                        text_query,
+                        bg_color_query,
+                        node_query,
+                        text_color_query,
+                        button_query,
                         &mut commands,
                     );
                     let _ = response_tx.send(result);
@@ -778,11 +956,11 @@ fn process_commands(
                             entity,
                             "content",
                             &PropertyValue::String(content.clone()),
-                            &mut text_query,
-                            &mut bg_color_query,
-                            &mut node_query,
-                            &mut text_color_query,
-                            &mut button_query,
+                            text_query,
+                            bg_color_query,
+                            node_query,
+                            text_color_query,
+                            button_query,
                             &mut commands,
                         ) {
                             errors.push(e);
@@ -794,11 +972,11 @@ fn process_commands(
                             entity,
                             "backgroundColor",
                             &PropertyValue::Color(color.clone()),
-                            &mut text_query,
-                            &mut bg_color_query,
-                            &mut node_query,
-                            &mut text_color_query,
-                            &mut button_query,
+                            text_query,
+                            bg_color_query,
+                            node_query,
+                            text_color_query,
+                            button_query,
                             &mut commands,
                         ) {
                             errors.push(e);
@@ -1036,6 +1214,134 @@ fn process_commands(
 
                 let _ = response_tx.send(result);
             }
+
+            // ================================================================
+            // Resource Commands
+            // ================================================================
+            GraphicCommand::LoadResource {
+                path,
+                alias,
+                resource_type,
+                asset_id,
+                force_reload,
+                response_tx,
+            } => {
+                tracing::debug!(
+                    "Loading resource: path='{}', alias='{}', type={:?}, asset_id={}",
+                    path, alias, resource_type, asset_id
+                );
+
+                // Check if already loaded (unless force_reload)
+                if !force_reload {
+                    if let Some(_existing) = resource_registry.get_by_alias(&alias) {
+                        // Already loaded, return existing info
+                        let info = ResourceInfo {
+                            alias: alias.clone(),
+                            path: path.clone(),
+                            resolved_path: path.clone(),
+                            resource_type,
+                            state: ResourceState::Loaded,
+                            size: None,
+                            error: None,
+                        };
+                        let _ = response_tx.send(Ok(info));
+                        continue;
+                    }
+                } else {
+                    // Force reload: remove existing entry if any
+                    if let Some(existing_id) = resource_registry.alias_to_id.get(&alias).copied() {
+                        resource_registry.unregister(existing_id);
+                    }
+                }
+
+                // Load the resource via AssetServer
+                // NOTE: asset_server.load() is async - it returns a handle immediately
+                // but the actual asset loading happens in the background.
+                // We return ResourceState::Loading and track the asset in PendingAssetRegistry.
+                // The check_pending_assets system will send ResourceLoaded event when done.
+                let result = match resource_type {
+                    ResourceType::Image => {
+                        let handle: Handle<Image> = asset_server.load(&path);
+                        let untyped_id = handle.id().untyped();
+                        resource_registry.register(
+                            asset_id,
+                            alias.clone(),
+                            path.clone(),
+                            resource_type,
+                            ResourceHandle::Image(handle),
+                        );
+                        // Track this asset as pending
+                        pending_assets.add(asset_id, alias.clone(), untyped_id);
+                        tracing::debug!(
+                            "Resource '{}' (asset_id={}) queued for loading, tracking in PendingAssetRegistry",
+                            alias, asset_id
+                        );
+                        Ok(ResourceInfo {
+                            alias,
+                            path: path.clone(),
+                            resolved_path: path,
+                            resource_type,
+                            state: ResourceState::Loading, // NOT Loaded yet!
+                            size: None,
+                            error: None,
+                        })
+                    }
+                    ResourceType::Font => {
+                        let handle: Handle<Font> = asset_server.load(&path);
+                        let untyped_id = handle.id().untyped();
+                        resource_registry.register(
+                            asset_id,
+                            alias.clone(),
+                            path.clone(),
+                            resource_type,
+                            ResourceHandle::Font(handle),
+                        );
+                        // Track this asset as pending
+                        pending_assets.add(asset_id, alias.clone(), untyped_id);
+                        tracing::debug!(
+                            "Font '{}' (asset_id={}) queued for loading, tracking in PendingAssetRegistry",
+                            alias, asset_id
+                        );
+                        Ok(ResourceInfo {
+                            alias,
+                            path: path.clone(),
+                            resolved_path: path,
+                            resource_type,
+                            state: ResourceState::Loading, // NOT Loaded yet!
+                            size: None,
+                            error: None,
+                        })
+                    }
+                    // TODO: Add Audio, Shader, Model3D handlers when Bevy features are enabled
+                    _ => {
+                        Err(format!(
+                            "Resource type {:?} is not yet supported by Bevy engine",
+                            resource_type
+                        ))
+                    }
+                };
+
+                let _ = response_tx.send(result);
+            }
+
+            GraphicCommand::UnloadResource { asset_id, response_tx } => {
+                tracing::debug!("Unloading resource: asset_id={}", asset_id);
+
+                if resource_registry.unregister(asset_id).is_some() {
+                    let _ = response_tx.send(Ok(()));
+                } else {
+                    let _ = response_tx.send(Err(format!(
+                        "Resource with asset_id {} not found",
+                        asset_id
+                    )));
+                }
+            }
+
+            GraphicCommand::UnloadAllResources { response_tx } => {
+                tracing::debug!("Unloading all resources");
+                resource_registry.clear();
+                let _ = response_tx.send(Ok(()));
+            }
         }
     }
 }
@@ -1049,6 +1355,7 @@ fn create_widget_entity(
     config: &WidgetConfig,
     parent_entity: Entity,
     font_registry: &FontRegistry,
+    resource_registry: &ResourceRegistry,
     parent_font: Option<&InheritedFontConfig>,
 ) -> Entity {
     // Resolve font configuration with inheritance
@@ -1368,32 +1675,147 @@ fn create_widget_entity(
         }
 
         WidgetType::Image => {
-            // For now, just create a placeholder node
-            // Full image support would require AssetServer integration
-            let bg_color = config
-                .background_color
-                .as_ref()
-                .map(color_value_to_bevy)
-                .unwrap_or(Color::srgba(0.5, 0.5, 0.5, 1.0));
+            // Get image configuration from config.image
+            let image_config = config.image.as_ref();
+            tracing::debug!("Creating Image widget: image_config={:?}", image_config);
 
-            let mut entity_cmd = commands.spawn((
-                node,
-                BackgroundColor(bg_color),
-                StamWidget {
-                    id: widget_id,
-                    window_id,
-                    widget_type,
-                },
-                WidgetEventSubscriptions::default(),
-                ChildOf(parent_entity),
-            ));
+            // Try to get image handle from resource_id or path
+            let image_handle: Option<Handle<Image>> = image_config.and_then(|img_cfg| {
+                tracing::debug!("Image effective_source: {:?}", img_cfg.effective_source());
+                match img_cfg.effective_source() {
+                    Some(ImageSource::ResourceId(ref resource_id)) => {
+                        // Look up pre-loaded resource by alias
+                        let handle = resource_registry.get_image_handle(resource_id);
+                        tracing::debug!("Looking up resource_id '{}': handle={:?}", resource_id, handle.is_some());
+                        handle
+                    }
+                    Some(ImageSource::Path(_path)) => {
+                        // Direct path loading would require AssetServer access here
+                        // For now, resources must be pre-loaded via Resource.load()
+                        tracing::warn!(
+                            "Image widget: direct path loading not yet supported. Use Resource.load() first."
+                        );
+                        None
+                    }
+                    None => None,
+                }
+            });
 
-            // Apply border radius if specified
-            if let Some(radius) = config.border_radius {
-                entity_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
+            // Convert ImageScaleMode to Bevy's NodeImageMode
+            let image_mode = image_config
+                .map(|cfg| match &cfg.scale_mode {
+                    ImageScaleMode::Auto => bevy::ui::widget::NodeImageMode::Auto,
+                    ImageScaleMode::Stretch => bevy::ui::widget::NodeImageMode::Stretch,
+                    ImageScaleMode::Tiled { tile_x, tile_y, stretch_value } => {
+                        bevy::ui::widget::NodeImageMode::Tiled {
+                            tile_x: *tile_x,
+                            tile_y: *tile_y,
+                            stretch_value: *stretch_value,
+                        }
+                    }
+                    ImageScaleMode::Sliced { top, right, bottom, left, center } => {
+                        bevy::ui::widget::NodeImageMode::Sliced(bevy::sprite::TextureSlicer {
+                            border: bevy::sprite::BorderRect {
+                                top: *top,
+                                right: *right,
+                                bottom: *bottom,
+                                left: *left,
+                            },
+                            center_scale_mode: if *center {
+                                bevy::sprite::SliceScaleMode::Stretch
+                            } else {
+                                bevy::sprite::SliceScaleMode::Tile { stretch_value: 0.0 }
+                            },
+                            sides_scale_mode: bevy::sprite::SliceScaleMode::Stretch,
+                            max_corner_scale: 1.0,
+                        })
+                    }
+                    // Contain and Cover are implemented by stretching to fill and
+                    // relying on the widget's node dimensions + overflow clipping.
+                    // For a proper implementation, we'd need to calculate aspect ratio
+                    // and set appropriate width/height constraints.
+                    // For now, map to Stretch as a placeholder.
+                    ImageScaleMode::Contain | ImageScaleMode::Cover => {
+                        // TODO: Implement proper Contain/Cover via custom sizing logic
+                        tracing::warn!(
+                            "ImageScaleMode::{:?} not yet fully implemented, using Stretch",
+                            &cfg.scale_mode
+                        );
+                        bevy::ui::widget::NodeImageMode::Stretch
+                    }
+                })
+                .unwrap_or(bevy::ui::widget::NodeImageMode::Auto);
+
+            // Build the entity
+            tracing::debug!("Image widget: handle present = {:?}, node.width={:?}, node.height={:?}",
+                image_handle.is_some(), node.width, node.height);
+            if let Some(handle) = image_handle {
+                // We have an image - create ImageNode
+                tracing::debug!("Creating ImageNode with image_mode={:?}, handle={:?}", image_mode, handle);
+                let mut image_node = bevy::ui::widget::ImageNode::new(handle.clone());
+                image_node.image_mode = image_mode;
+
+                // Apply flip if specified
+                if let Some(img_cfg) = image_config {
+                    image_node.flip_x = img_cfg.flip_x;
+                    image_node.flip_y = img_cfg.flip_y;
+
+                    // Apply tint color if specified
+                    if let Some(ref tint) = img_cfg.tint {
+                        image_node.color = color_value_to_bevy(tint);
+                    }
+                }
+
+                let mut entity_cmd = commands.spawn((
+                    node,
+                    image_node,
+                    StamWidget {
+                        id: widget_id,
+                        window_id,
+                        widget_type,
+                    },
+                    WidgetEventSubscriptions::default(),
+                    ChildOf(parent_entity),
+                ));
+
+                // Apply border radius if specified
+                if let Some(radius) = config.border_radius {
+                    entity_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
+                }
+
+                // Apply background color if specified (visible around image if it doesn't fill)
+                if let Some(ref bg_color) = config.background_color {
+                    entity_cmd.insert(BackgroundColor(color_value_to_bevy(bg_color)));
+                }
+
+                entity_cmd.id()
+            } else {
+                // No image - create placeholder with background color
+                let bg_color = config
+                    .background_color
+                    .as_ref()
+                    .map(color_value_to_bevy)
+                    .unwrap_or(Color::srgba(0.5, 0.5, 0.5, 1.0));
+
+                let mut entity_cmd = commands.spawn((
+                    node,
+                    BackgroundColor(bg_color),
+                    StamWidget {
+                        id: widget_id,
+                        window_id,
+                        widget_type,
+                    },
+                    WidgetEventSubscriptions::default(),
+                    ChildOf(parent_entity),
+                ));
+
+                // Apply border radius if specified
+                if let Some(radius) = config.border_radius {
+                    entity_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
+                }
+
+                entity_cmd.id()
             }
-
-            entity_cmd.id()
         }
     }
 }
@@ -1623,6 +2045,70 @@ fn send_engine_ready_event(event_tx: Res<EventSenderRes>, mut sent: ResMut<Engin
         // Use try_send to avoid blocking - the worker thread should have the receiver ready
         let _ = event_tx.0.try_send(GraphicEvent::EngineReady);
     }
+}
+
+/// System to check pending assets and send ResourceLoaded events when ready
+///
+/// This system runs every frame and checks if any pending assets have finished
+/// loading in Bevy's AssetServer. When an asset is ready (is_loaded_with_dependencies),
+/// we send a ResourceLoaded event to notify the ResourceProxy.
+fn check_pending_assets(
+    mut pending_assets: ResMut<PendingAssetRegistry>,
+    asset_server: Res<AssetServer>,
+    event_tx: Res<EventSenderRes>,
+) {
+    // Skip if no pending assets
+    if pending_assets.pending.is_empty() {
+        return;
+    }
+
+    tracing::trace!("check_pending_assets: {} assets pending", pending_assets.pending.len());
+
+    // Take all pending assets and check each one
+    let mut still_pending = Vec::new();
+
+    for entry in std::mem::take(&mut pending_assets.pending) {
+        // Check if the asset is loaded
+        let load_state = asset_server.get_load_state(entry.handle_id);
+        tracing::trace!(
+            "Asset '{}' (id={:?}) load_state={:?}",
+            entry.alias, entry.handle_id, load_state
+        );
+
+        match load_state {
+            Some(bevy::asset::LoadState::Loaded) => {
+                // Asset is fully loaded, send event
+                tracing::debug!(
+                    "Resource '{}' (asset_id={}) finished loading in Bevy",
+                    entry.alias, entry.asset_id
+                );
+                let _ = event_tx.0.try_send(GraphicEvent::ResourceLoaded {
+                    alias: entry.alias,
+                    asset_id: entry.asset_id,
+                });
+            }
+            Some(bevy::asset::LoadState::Failed(err)) => {
+                // Asset failed to load
+                let error_msg = format!("Failed to load asset: {:?}", err);
+                tracing::error!(
+                    "Resource '{}' (asset_id={}) failed to load: {}",
+                    entry.alias, entry.asset_id, error_msg
+                );
+                let _ = event_tx.0.try_send(GraphicEvent::ResourceFailed {
+                    alias: entry.alias,
+                    asset_id: entry.asset_id,
+                    error: error_msg,
+                });
+            }
+            Some(bevy::asset::LoadState::Loading) | Some(bevy::asset::LoadState::NotLoaded) | None => {
+                // Still loading, keep tracking
+                still_pending.push(entry);
+            }
+        }
+    }
+
+    // Put back the ones still pending
+    pending_assets.pending = still_pending;
 }
 
 /// System to send frame events

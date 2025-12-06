@@ -30,7 +30,7 @@
 //! time by build.rs and embedded into the binary.
 
 use crate::api::{AppApi, ConsoleApi, FileApi, LocaleApi, NetworkApi, ReadJsonResult, RequestUriProtocol, SystemApi, SystemEvents, ModSide};
-use crate::api::path_security::validate_path_for_creation;
+use crate::api::path_security::{validate_path_for_creation, ModPathConfig, resolve_mod_path};
 
 /// JavaScript glue code - embedded at compile time from src/adapters/js/glue/*.js
 /// This code sets up console, error handlers, and other runtime utilities.
@@ -2865,7 +2865,93 @@ fn parse_widget_config<'js>(
         widget_config.disabled = Some(disabled);
     }
 
+    // Image configuration (for Image widget)
+    // Can be specified as:
+    // - { image: { resourceId: "alias", scaleMode: ImageScaleModes.Cover } }
+    // - { resourceId: "alias", scaleMode: ImageScaleModes.Cover } (shorthand)
+    let image_config = if let Ok(image_obj) = cfg.get::<_, Object>("image") {
+        // Full form: { image: { ... } }
+        Some(parse_image_config(ctx, &image_obj)?)
+    } else if cfg.get::<_, String>("resourceId").is_ok() || cfg.get::<_, String>("path").is_ok() {
+        // Shorthand: properties directly on widget config
+        Some(parse_image_config(ctx, &cfg)?)
+    } else {
+        None
+    };
+    widget_config.image = image_config;
+
     Ok(widget_config)
+}
+
+/// Parse ImageConfig from JavaScript object
+fn parse_image_config<'js>(ctx: &Ctx<'js>, obj: &Object<'js>) -> rquickjs::Result<crate::api::graphic::ImageConfig> {
+    use crate::api::graphic::{ImageConfig, ImageScaleMode};
+
+    let mut config = ImageConfig {
+        path: None,
+        resource_id: None,
+        scale_mode: ImageScaleMode::default(),
+        tint: None,
+        opacity: None,
+        flip_x: false,
+        flip_y: false,
+        source_rect: None,
+    };
+
+    // Resource ID (alias from Resource.load())
+    if let Ok(resource_id) = obj.get::<_, String>("resourceId") {
+        config.resource_id = Some(resource_id);
+    }
+
+    // Direct path (fallback if no resourceId)
+    if let Ok(path) = obj.get::<_, String>("path") {
+        config.path = Some(path);
+    }
+
+    // Scale mode (as u32 enum value)
+    if let Ok(scale_mode) = obj.get::<_, u32>("scaleMode") {
+        config.scale_mode = match scale_mode {
+            0 => ImageScaleMode::Auto,
+            1 => ImageScaleMode::Stretch,
+            2 => ImageScaleMode::Tiled {
+                tile_x: true,
+                tile_y: true,
+                stretch_value: 1.0,
+            },
+            3 => ImageScaleMode::Sliced {
+                top: 0.0,
+                right: 0.0,
+                bottom: 0.0,
+                left: 0.0,
+                center: true,
+            },
+            4 => ImageScaleMode::Contain,
+            5 => ImageScaleMode::Cover,
+            _ => ImageScaleMode::Auto,
+        };
+    }
+
+    // Tint color
+    if let Ok(tint) = obj.get::<_, Value>("tint") {
+        if !tint.is_undefined() && !tint.is_null() {
+            config.tint = Some(parse_color(ctx, &tint)?);
+        }
+    }
+
+    // Opacity
+    if let Ok(opacity) = obj.get::<_, f32>("opacity") {
+        config.opacity = Some(opacity);
+    }
+
+    // Flip
+    if let Ok(flip_x) = obj.get::<_, bool>("flipX") {
+        config.flip_x = flip_x;
+    }
+    if let Ok(flip_y) = obj.get::<_, bool>("flipY") {
+        config.flip_y = flip_y;
+    }
+
+    Ok(config)
 }
 
 /// Setup graphic API in the JavaScript context
@@ -2942,6 +3028,433 @@ pub fn setup_graphic_api(ctx: Ctx, graphic_proxy: Arc<GraphicProxy>) -> Result<(
     align.set("Center", 3u32)?;
     align.set("Baseline", 4u32)?;
     ctx.globals().set("AlignItems", align)?;
+
+    // Create ImageScaleModes enum
+    // Maps to ImageScaleMode variants:
+    // - Auto (0): Natural dimensions
+    // - Stretch (1): Stretch to fill (ignores aspect ratio)
+    // - Tiled (2): Repeat as pattern
+    // - Sliced (3): 9-slice scaling
+    // - Contain (4): Fit within bounds (may letterbox)
+    // - Cover (5): Cover entire area (may crop)
+    let scale_modes = Object::new(ctx.clone())?;
+    scale_modes.set("Auto", 0u32)?;
+    scale_modes.set("Stretch", 1u32)?;
+    scale_modes.set("Tiled", 2u32)?;
+    scale_modes.set("Sliced", 3u32)?;
+    scale_modes.set("Contain", 4u32)?;
+    scale_modes.set("Cover", 5u32)?;
+    ctx.globals().set("ImageScaleModes", scale_modes)?;
+
+    Ok(())
+}
+
+// ============================================================================
+// Resource API Bindings
+// ============================================================================
+
+use crate::api::resource::{ResourceProxy, ResourceType, ResourceInfo, LoadingState};
+
+/// JavaScript Resource API class
+///
+/// Exposed as the `Resource` global object in JavaScript.
+/// Provides methods to load, cache, and manage resources (images, fonts, etc.).
+///
+/// This is a client-only API. On the server, all methods will throw an error.
+#[rquickjs::class]
+#[derive(Clone, Trace, JsLifetime)]
+pub struct ResourceJS {
+    /// The shared ResourceProxy for managing resources
+    #[qjs(skip_trace)]
+    resource_proxy: Arc<ResourceProxy>,
+    /// The shared GraphicProxy for loading graphic resources
+    #[qjs(skip_trace)]
+    graphic_proxy: Arc<GraphicProxy>,
+    /// The shared SystemApi for path resolution (home_dir, mod existence check)
+    #[qjs(skip_trace)]
+    system_api: SystemApi,
+}
+
+#[rquickjs::methods]
+impl ResourceJS {
+    /// Load a resource into the cache (SYNCHRONOUS)
+    ///
+    /// This method queues a resource for loading and returns immediately.
+    /// It does NOT return a Promise - use `whenLoaded()` to wait for completion.
+    ///
+    /// # Arguments
+    /// * `path` - The resource path (can use @mod-id/path syntax)
+    /// * `alias` - Unique alias for this resource
+    /// * `options` - Optional object with:
+    ///   - forceReload: boolean - reload even if cached
+    ///   - type: string - "image", "font", "audio", etc. (auto-detected if omitted)
+    ///
+    /// # Returns
+    /// - `ResourceInfo` if the resource is already loaded
+    /// - `undefined` if the resource was queued for loading
+    ///
+    /// # Example
+    /// ```javascript
+    /// // Queue resources for loading (synchronous, returns immediately)
+    /// Resource.load("@bme-assets/images/bg.jpg", "main-bg");
+    /// Resource.load("@bme-assets/images/bg2.jpg", "bg2");
+    /// // getLoadingProgress() will show requested: 2
+    ///
+    /// // Wait for a specific resource
+    /// await Resource.whenLoaded("main-bg");
+    ///
+    /// // Or wait for all resources
+    /// while (!Resource.isLoadingCompleted()) {
+    ///     await System.sleep(50);
+    /// }
+    /// ```
+    #[qjs(rename = "load")]
+    pub fn load<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        path: String,
+        alias: String,
+        options: Opt<Object<'js>>,
+    ) -> rquickjs::Result<Value<'js>> {
+        // Parse options
+        let mut force_reload = false;
+        let mut explicit_type: Option<ResourceType> = None;
+
+        if let Some(opts) = options.0 {
+            if let Ok(fr) = opts.get::<_, bool>("forceReload") {
+                force_reload = fr;
+            }
+            if let Ok(type_str) = opts.get::<_, String>("type") {
+                explicit_type = Some(ResourceType::from_extension(&type_str));
+            }
+        }
+
+        // Determine resource type from extension if not explicitly specified
+        let resource_type = explicit_type.unwrap_or_else(|| {
+            // Extract extension from path
+            let ext = path
+                .rsplit('.')
+                .next()
+                .unwrap_or("")
+                .to_lowercase();
+            ResourceType::from_extension(&ext)
+        });
+
+        // Resolve path with @mod-id support
+        let home_dir = self.system_api.get_home_dir().ok_or_else(|| {
+            throw_error(&ctx, "Home directory not configured. Cannot resolve resource path.")
+        })?;
+
+        // Create path config with mod existence check
+        let system_api = self.system_api.clone();
+        let path_config = ModPathConfig::new(&home_dir)
+            .with_mod_exists_fn(move |mod_id| {
+                system_api.get_mod(mod_id).is_some()
+            });
+
+        // Resolve the path (handles @mod-id/path syntax)
+        let resolved = resolve_mod_path(&path, &path_config)
+            .map_err(|e| throw_error(&ctx, &e))?;
+
+        // SYNCHRONOUS: Queue the load - this increments `requested` counter immediately
+        let result = self
+            .resource_proxy
+            .queue_load(&resolved.relative_path, &alias, resource_type, force_reload);
+
+        match result {
+            Ok(Some(info)) => {
+                // Already loaded, return existing info
+                Ok(resource_info_to_js(&ctx, &info)?.into_value())
+            }
+            Ok(None) => {
+                // Queued for loading, return undefined
+                Ok(Value::new_undefined(ctx))
+            }
+            Err(e) => Err(throw_error(&ctx, &e)),
+        }
+    }
+
+    /// Wait for a specific resource to be loaded
+    ///
+    /// This method waits asynchronously until the specified resource
+    /// has finished loading (either successfully or with an error).
+    ///
+    /// # Arguments
+    /// * `alias` - The alias of the resource to wait for
+    ///
+    /// # Returns
+    /// A Promise that resolves to ResourceInfo when loaded, or rejects on error.
+    ///
+    /// # Example
+    /// ```javascript
+    /// // Queue a resource
+    /// Resource.load("@bme-assets/images/bg.jpg", "main-bg");
+    ///
+    /// // Wait for it to load
+    /// const info = await Resource.whenLoaded("main-bg");
+    /// console.log(`Loaded: ${info.resolvedPath}`);
+    /// ```
+    #[qjs(rename = "whenLoaded")]
+    pub async fn when_loaded<'js>(
+        &self,
+        ctx: Ctx<'js>,
+        alias: String,
+    ) -> rquickjs::Result<Object<'js>> {
+        let result = self.resource_proxy.when_loaded(&alias).await;
+
+        match result {
+            Ok(info) => resource_info_to_js(&ctx, &info),
+            Err(e) => Err(throw_error(&ctx, &e)),
+        }
+    }
+
+    /// Wait for all requested resources to be loaded
+    ///
+    /// This method waits asynchronously until all resources queued via `load()`
+    /// have finished loading (either successfully or with errors).
+    ///
+    /// # Returns
+    /// A Promise that resolves when all resources are loaded.
+    /// If any resources failed, the Promise rejects with an array of error objects.
+    ///
+    /// # Example
+    /// ```javascript
+    /// // Queue multiple resources
+    /// Resource.load("@assets/bg1.png", "bg1");
+    /// Resource.load("@assets/bg2.png", "bg2");
+    /// Resource.load("@assets/font.ttf", "font");
+    ///
+    /// // Wait for all to complete
+    /// try {
+    ///     await Resource.whenLoadedAll();
+    ///     console.log("All resources loaded!");
+    /// } catch (errors) {
+    ///     for (const err of errors) {
+    ///         console.error(`Failed: ${err.alias} - ${err.error}`);
+    ///     }
+    /// }
+    /// ```
+    #[qjs(rename = "whenLoadedAll")]
+    pub async fn when_loaded_all<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<()> {
+        let result = self.resource_proxy.when_loaded_all().await;
+
+        match result {
+            Ok(()) => Ok(()),
+            Err(errors) => {
+                // Convert errors to JavaScript array of objects
+                let array = Array::new(ctx.clone())?;
+                for (i, (alias, error)) in errors.iter().enumerate() {
+                    let obj = Object::new(ctx.clone())?;
+                    obj.set("alias", alias.clone())?;
+                    obj.set("error", error.clone())?;
+                    array.set(i, obj)?;
+                }
+                Err(throw_error(&ctx, &format!("{} resource(s) failed to load", errors.len())))
+            }
+        }
+    }
+
+    /// Unload a resource from the cache
+    ///
+    /// # Arguments
+    /// * `alias` - The alias of the resource to unload
+    ///
+    /// # Example
+    /// ```javascript
+    /// await Resource.unload("main-bg");
+    /// ```
+    #[qjs(rename = "unload")]
+    pub async fn unload<'js>(&self, ctx: Ctx<'js>, alias: String) -> rquickjs::Result<()> {
+        self.resource_proxy
+            .unload_resource(&alias, &self.graphic_proxy)
+            .await
+            .map_err(|e| throw_error(&ctx, &e))
+    }
+
+    /// Unload all resources from the cache
+    ///
+    /// # Example
+    /// ```javascript
+    /// await Resource.unloadAll();
+    /// ```
+    #[qjs(rename = "unloadAll")]
+    pub async fn unload_all<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<()> {
+        self.resource_proxy
+            .unload_all_resources(&self.graphic_proxy)
+            .await
+            .map_err(|e| throw_error(&ctx, &e))
+    }
+
+    /// Get information about a loaded resource
+    ///
+    /// # Arguments
+    /// * `alias` - The alias of the resource
+    ///
+    /// # Returns
+    /// Resource info object or null if not found
+    ///
+    /// # Example
+    /// ```javascript
+    /// const info = Resource.getInfo("main-bg");
+    /// if (info) {
+    ///     console.log(`Resource state: ${info.state}`);
+    /// }
+    /// ```
+    #[qjs(rename = "getInfo")]
+    pub fn get_info<'js>(&self, ctx: Ctx<'js>, alias: String) -> rquickjs::Result<Value<'js>> {
+        match self.resource_proxy.get_resource_info(&alias) {
+            Some(info) => Ok(resource_info_to_js(&ctx, &info)?.into_value()),
+            None => Ok(Value::new_null(ctx)),
+        }
+    }
+
+    /// Check if a resource is loaded
+    ///
+    /// # Arguments
+    /// * `alias` - The alias to check
+    ///
+    /// # Returns
+    /// true if the resource exists in the cache
+    ///
+    /// # Example
+    /// ```javascript
+    /// if (Resource.isLoaded("main-bg")) {
+    ///     // Use the resource
+    /// }
+    /// ```
+    #[qjs(rename = "isLoaded")]
+    pub fn is_loaded(&self, alias: String) -> bool {
+        self.resource_proxy.is_resource_loaded(&alias)
+    }
+
+    /// Get current loading progress
+    ///
+    /// # Returns
+    /// Object with { requested: number, loaded: number }
+    ///
+    /// # Example
+    /// ```javascript
+    /// const progress = Resource.getLoadingProgress();
+    /// console.log(`Loaded ${progress.loaded} of ${progress.requested} resources`);
+    /// ```
+    #[qjs(rename = "getLoadingProgress")]
+    pub fn get_loading_progress<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+        let state = self.resource_proxy.get_loading_state();
+        loading_state_to_js(&ctx, &state)
+    }
+
+    /// Check if all requested resources have finished loading
+    ///
+    /// # Returns
+    /// true if all resources are loaded (requested == loaded)
+    ///
+    /// # Example
+    /// ```javascript
+    /// // Wait for all resources to load
+    /// while (!Resource.isLoadingCompleted()) {
+    ///     await sleep(100);
+    /// }
+    /// console.log("All resources loaded!");
+    /// ```
+    #[qjs(rename = "isLoadingCompleted")]
+    pub fn is_loading_completed(&self) -> bool {
+        self.resource_proxy.is_loading_completed()
+    }
+
+    /// List all loaded resource aliases
+    ///
+    /// # Returns
+    /// Array of alias strings
+    ///
+    /// # Example
+    /// ```javascript
+    /// const aliases = Resource.listLoaded();
+    /// console.log(`Loaded resources: ${aliases.join(", ")}`);
+    /// ```
+    #[qjs(rename = "listLoaded")]
+    pub fn list_loaded<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Array<'js>> {
+        let aliases = self.resource_proxy.list_loaded_resources();
+        let array = Array::new(ctx.clone())?;
+        for (i, alias) in aliases.iter().enumerate() {
+            array.set(i, alias.clone())?;
+        }
+        Ok(array)
+    }
+}
+
+/// Convert ResourceInfo to JavaScript object
+fn resource_info_to_js<'js>(ctx: &Ctx<'js>, info: &ResourceInfo) -> rquickjs::Result<Object<'js>> {
+    let obj = Object::new(ctx.clone())?;
+    obj.set("alias", info.alias.clone())?;
+    obj.set("path", info.path.clone())?;
+    obj.set("resolvedPath", info.resolved_path.clone())?;
+    obj.set("type", info.resource_type.as_str())?;
+    obj.set("state", info.state.as_str())?;
+
+    if let Some(size) = info.size {
+        obj.set("size", size as f64)?;
+    } else {
+        obj.set("size", rquickjs::Null)?;
+    }
+
+    if let Some(ref error) = info.error {
+        obj.set("error", error.clone())?;
+    } else {
+        obj.set("error", rquickjs::Null)?;
+    }
+
+    Ok(obj)
+}
+
+/// Convert LoadingState to JavaScript object
+fn loading_state_to_js<'js>(ctx: &Ctx<'js>, state: &LoadingState) -> rquickjs::Result<Object<'js>> {
+    let obj = Object::new(ctx.clone())?;
+    obj.set("requested", state.requested)?;
+    obj.set("loaded", state.loaded)?;
+    Ok(obj)
+}
+
+/// Setup Resource API in the JavaScript context
+///
+/// Creates the `Resource` global object and `ResourceTypes` enum.
+///
+/// # Arguments
+/// * `ctx` - The JavaScript context
+/// * `resource_proxy` - The shared ResourceProxy instance
+/// * `graphic_proxy` - The shared GraphicProxy instance (for loading graphic resources)
+/// * `system_api` - The shared SystemApi for path resolution
+pub fn setup_resource_api(
+    ctx: Ctx,
+    resource_proxy: Arc<ResourceProxy>,
+    graphic_proxy: Arc<GraphicProxy>,
+    system_api: SystemApi,
+) -> Result<(), rquickjs::Error> {
+    // Define the class
+    rquickjs::Class::<ResourceJS>::define(&ctx.globals())?;
+
+    // Create Resource instance
+    let resource_obj = rquickjs::Class::<ResourceJS>::instance(
+        ctx.clone(),
+        ResourceJS {
+            resource_proxy,
+            graphic_proxy,
+            system_api,
+        },
+    )?;
+    ctx.globals().set("Resource", resource_obj)?;
+
+    // Create ResourceTypes enum
+    let resource_types = Object::new(ctx.clone())?;
+    resource_types.set("Image", ResourceType::Image.as_str())?;
+    resource_types.set("Audio", ResourceType::Audio.as_str())?;
+    resource_types.set("Video", ResourceType::Video.as_str())?;
+    resource_types.set("Shader", ResourceType::Shader.as_str())?;
+    resource_types.set("Font", ResourceType::Font.as_str())?;
+    resource_types.set("Model3D", ResourceType::Model3D.as_str())?;
+    resource_types.set("Json", ResourceType::Json.as_str())?;
+    resource_types.set("Text", ResourceType::Text.as_str())?;
+    resource_types.set("Binary", ResourceType::Binary.as_str())?;
+    ctx.globals().set("ResourceTypes", resource_types)?;
 
     Ok(())
 }

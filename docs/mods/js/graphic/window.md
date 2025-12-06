@@ -86,6 +86,19 @@ Enum for window display modes:
 | `WindowModes.Fullscreen` | `1` | Exclusive fullscreen mode |
 | `WindowModes.BorderlessFullscreen` | `2` | Borderless fullscreen (covers entire screen) |
 
+### `ImageScaleModes`
+
+Enum for image scaling modes:
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `ImageScaleModes.Auto` | `0` | Image uses its natural dimensions (default) |
+| `ImageScaleModes.Stretch` | `1` | Stretch to fill container (ignores aspect ratio) |
+| `ImageScaleModes.Tiled` | `2` | Repeat image as pattern |
+| `ImageScaleModes.Sliced` | `3` | 9-slice scaling (preserves corners for UI elements) |
+| `ImageScaleModes.Contain` | `4` | Scale to fit within bounds, maintaining aspect ratio (may letterbox) |
+| `ImageScaleModes.Cover` | `5` | Scale to cover entire area, maintaining aspect ratio (may crop) |
+
 ---
 
 ## `Graphic` Object
@@ -710,13 +723,63 @@ font: {
 Image configuration:
 ```javascript
 image: {
-    path: "mods/my-mod/assets/sprite.png",
-    scaleMode: "fit",      // "fill", "fit", "stretch", "none", "tile"
-    tint: "#ffffff",       // Multiply color
+    // Source (one of these is required):
+    resourceId: "my-image",          // Pre-loaded resource alias (recommended)
+    path: "mods/my-mod/assets/sprite.png",  // Direct path (not yet supported)
+
+    // Scale mode (using ImageScaleModes enum or string):
+    scaleMode: ImageScaleModes.Cover, // or "auto", "stretch", "contain", "cover"
+
+    // For Tiled mode:
+    scaleMode: {
+        type: "Tiled",
+        tileX: true,              // Tile horizontally
+        tileY: true,              // Tile vertically
+        stretchValue: 1.0         // Stretch factor
+    },
+
+    // For 9-slice/Sliced mode:
+    scaleMode: {
+        type: "Sliced",
+        top: 10,                  // Border from top edge (px)
+        right: 10,                // Border from right edge (px)
+        bottom: 10,               // Border from bottom edge (px)
+        left: 10,                 // Border from left edge (px)
+        center: true              // Whether to draw center portion
+    },
+
+    tint: "#ffffff",              // Multiply color
     opacity: 1.0,
     flipX: false,
     flipY: false
 }
+```
+
+**Scale Mode Values:**
+
+| Mode | Description |
+|------|-------------|
+| `ImageScaleModes.Auto` | Image uses its natural dimensions |
+| `ImageScaleModes.Stretch` | Stretch to fill container (ignores aspect ratio) |
+| `ImageScaleModes.Tiled` | Repeat image as pattern |
+| `ImageScaleModes.Sliced` | 9-slice scaling for UI elements |
+| `ImageScaleModes.Contain` | Fit within bounds, maintaining aspect ratio (may letterbox) |
+| `ImageScaleModes.Cover` | Cover entire area, maintaining aspect ratio (may crop) |
+
+**Example with pre-loaded resource:**
+```javascript
+// First, load the resource
+await Resource.load("@bme-assets/background/title.jpg", "title-bg");
+
+// Then create the Image widget
+const background = await container.createChild(WidgetTypes.Image, {
+    width: "100%",
+    height: "100%",
+    image: {
+        resourceId: "title-bg",
+        scaleMode: ImageScaleModes.Cover
+    }
+});
 ```
 
 ---

@@ -33,6 +33,8 @@ bevy = { version = "0.17", default-features = false, features = [
     "bevy_ui",
     "bevy_ui_render",  # Required in Bevy 0.17+ for UI rendering
     "default_font",    # Required for text rendering without custom fonts
+    "png",             # Support for PNG images
+    "jpeg",            # Support for JPEG images
     "x11",
     "wayland",
     "multi_threaded",

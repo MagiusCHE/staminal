@@ -222,6 +222,28 @@ pub enum GraphicEvent {
         /// New interaction state: "none", "hovered", "pressed"
         interaction: String,
     },
+
+    // ========== Resource Events ==========
+    /// Resource has been loaded by the engine
+    ///
+    /// This event is sent when an asset has finished loading in the graphic engine
+    /// (e.g., when Bevy's AssetServer has fully loaded an image).
+    ResourceLoaded {
+        /// The resource alias
+        alias: String,
+        /// The asset ID
+        asset_id: u64,
+    },
+
+    /// Resource failed to load
+    ResourceFailed {
+        /// The resource alias
+        alias: String,
+        /// The asset ID
+        asset_id: u64,
+        /// Error message
+        error: String,
+    },
 }
 
 impl GraphicEvent {
@@ -252,6 +274,9 @@ impl GraphicEvent {
             Self::WidgetHovered { .. } => "graphic:widget:hovered",
             Self::WidgetFocused { .. } => "graphic:widget:focused",
             Self::WidgetInteractionChanged { .. } => "graphic:widget:interactionChanged",
+            // Resource events
+            Self::ResourceLoaded { .. } => "graphic:resource:loaded",
+            Self::ResourceFailed { .. } => "graphic:resource:failed",
         }
     }
 
@@ -434,6 +459,20 @@ impl GraphicEvent {
                     window_id.to_string(),
                     widget_id.to_string(),
                     format!("\"{}\"", interaction),
+                ]
+            }
+            // Resource events
+            Self::ResourceLoaded { alias, asset_id } => {
+                vec![
+                    format!("\"{}\"", alias),
+                    asset_id.to_string(),
+                ]
+            }
+            Self::ResourceFailed { alias, asset_id, error } => {
+                vec![
+                    format!("\"{}\"", alias),
+                    asset_id.to_string(),
+                    format!("\"{}\"", error.replace('"', "\\\"")),
                 ]
             }
         }

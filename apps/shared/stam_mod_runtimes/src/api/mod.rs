@@ -12,6 +12,7 @@ pub mod locale;
 pub mod network;
 pub mod path_security;
 pub mod process;
+pub mod resource;
 pub mod system;
 
 pub use console::ConsoleApi;
@@ -21,14 +22,19 @@ pub use graphic::{
     GraphicEngine, GraphicEngineInfo, GraphicEngines, GraphicEvent, GraphicProxy,
     InitialWindowConfig, JustifyContent, KeyModifiers, MouseButton, PropertyValue, SizeValue,
     WidgetConfig, WidgetEventType, WidgetInfo, WidgetType, WindowConfig, WindowInfo,
-    WindowMode, WindowPositionMode, EnableEngineRequest,
+    WindowMode, WindowPositionMode, EnableEngineRequest, ImageScaleMode, ImageSource,
 };
 pub use locale::LocaleApi;
 pub use network::{NetworkApi, NetworkConfig, DownloadResponse, ProgressCallback, parse_stam_uri, sanitize_uri};
-pub use path_security::{PathSecurityConfig, PathValidationResult, validate_path, validate_and_resolve_path, is_path_permitted, make_absolute};
+pub use path_security::{
+    PathSecurityConfig, PathValidationResult, validate_path, validate_and_resolve_path,
+    is_path_permitted, make_absolute, ParsedModPath, ModPathConfig, ResolvedModPath,
+    parse_mod_path, resolve_mod_path, resolve_and_validate_mod_path,
+};
 pub use file::{FileApi, ReadJsonResult};
 pub use process::{ProcessApi, AppApi};
 pub use system::{SystemApi, ModInfo, ModSide, ModPackageInfo, ModPackageManifest, ModPackagesRegistry, extract_mod_archive, extract_mod_zip, AttachModRequest, ShutdownRequest, GameInfo};
+pub use resource::{ResourceType, ResourceState, ResourceInfo, ResourceEntry, ResourceData, ResourceProxy, LoadingState, EngineHandle, bevy_supported_extensions, is_bevy_supported_extension};
 
 use std::collections::HashMap;
 use std::any::Any;

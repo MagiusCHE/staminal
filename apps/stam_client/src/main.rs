@@ -589,6 +589,8 @@ async fn connect_to_game_server(
     let mut system_api_opt: Option<stam_mod_runtimes::api::SystemApi> = None;
     // Graphic proxy for polling graphic engine events
     let mut graphic_proxy_opt: Option<Arc<GraphicProxy>> = None;
+    // Resource proxy for resource loading queue processing
+    let mut resource_proxy_opt: Option<Arc<stam_mod_runtimes::api::ResourceProxy>> = None;
     // Game root directory for resolving mod paths
     let mut game_root_opt: Option<std::path::PathBuf> = None;
 
@@ -881,6 +883,12 @@ async fn connect_to_game_server(
                 js_adapter.set_graphic_proxy(graphic_proxy.clone());
                 // Save for main loop to poll graphic events
                 graphic_proxy_opt = Some(graphic_proxy.clone());
+
+                // Setup resource proxy for resource loading and caching (client-only)
+                let resource_proxy = Arc::new(stam_mod_runtimes::api::ResourceProxy::new_client());
+                js_adapter.set_resource_proxy(resource_proxy.clone());
+                // Save for main loop to process resource loading queue
+                resource_proxy_opt = Some(resource_proxy);
 
                 // Setup locale API for internationalization in JavaScript mods
                 // LocaleApi now supports hierarchical lookup: mod locale -> global locale
@@ -1406,7 +1414,35 @@ async fn connect_to_game_server(
                         handle_graphic_event(
                             event,
                             &mut runtime_manager_opt,
+                            resource_proxy_opt.as_ref(),
                         );
+                    }
+                }
+
+                // Process resource loading queue
+                // Wait for notification that there are items in the queue, then process all
+                _ = async {
+                    if let (Some(resource_proxy), Some(_graphic_proxy)) = (&resource_proxy_opt, &graphic_proxy_opt) {
+                        // Wait for notification or check if queue has items
+                        let notify = resource_proxy.get_queue_notify();
+                        notify.notified().await;
+                    } else {
+                        std::future::pending::<()>().await
+                    }
+                } => {
+                    if let (Some(resource_proxy), Some(graphic_proxy)) = (&resource_proxy_opt, &graphic_proxy_opt) {
+                        // Process all queued items
+                        while let Some(request) = resource_proxy.take_from_queue() {
+                            let alias = request.alias.clone();
+                            match resource_proxy.process_load_request(&request, graphic_proxy).await {
+                                Ok(_info) => {
+                                    trace!("Resource '{}' loaded successfully", alias);
+                                }
+                                Err(e) => {
+                                    warn!("Failed to load resource '{}': {}", alias, e);
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -1701,6 +1737,7 @@ fn handle_send_event_request(
 fn handle_graphic_event(
     event: GraphicEvent,
     runtime_manager_opt: &mut Option<ModRuntimeManager>,
+    resource_proxy_opt: Option<&std::sync::Arc<stam_mod_runtimes::api::ResourceProxy>>,
 ) {
     match event {
         GraphicEvent::EngineReady => {
@@ -1840,6 +1877,33 @@ fn handle_graphic_event(
         GraphicEvent::WidgetInteractionChanged { window_id, widget_id, interaction } => {
             trace!("Widget {} interaction changed to '{}' in window {}", widget_id, interaction, window_id);
             // Internal event for tracking, usually not dispatched
+        }
+        // Resource events
+        GraphicEvent::ResourceLoaded { alias, asset_id } => {
+            debug!("Resource '{}' (asset_id={}) loaded by graphic engine", alias, asset_id);
+
+            // Mark the resource as loaded in the ResourceProxy
+            if let Some(resource_proxy) = resource_proxy_opt {
+                if let Err(e) = resource_proxy.mark_loaded(&alias) {
+                    error!("Failed to mark resource '{}' as loaded: {}", alias, e);
+                } else {
+                    debug!("Resource '{}' marked as loaded in ResourceProxy", alias);
+                }
+            } else {
+                warn!("ResourceLoaded event received but no ResourceProxy available");
+            }
+        }
+        GraphicEvent::ResourceFailed { alias, asset_id, error } => {
+            error!("Resource '{}' (asset_id={}) failed to load: {}", alias, asset_id, error);
+
+            // Mark the resource as failed in the ResourceProxy
+            if let Some(resource_proxy) = resource_proxy_opt {
+                if let Err(e) = resource_proxy.mark_failed(&alias, error.clone()) {
+                    error!("Failed to mark resource '{}' as failed: {}", alias, e);
+                }
+            } else {
+                warn!("ResourceFailed event received but no ResourceProxy available");
+            }
         }
     }
 }
