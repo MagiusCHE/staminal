@@ -833,9 +833,14 @@ await image.insert("ImageNode", {
   - `NodeImageMode.Stretch` (1): Stretch to fill the node (may distort aspect ratio)
   - `NodeImageMode.Sliced` (2): 9-slice scaling (for UI panels)
   - `NodeImageMode.Tiled` (3): Tile the image to fill the node
+  - `NodeImageMode.Contain` (4): Scale to fit inside node while maintaining aspect ratio (letterboxing)
+  - `NodeImageMode.Cover` (5): Scale to cover node while maintaining aspect ratio (may crop)
 - `flip_x`: Flip the image horizontally (boolean, default: false)
 - `flip_y`: Flip the image vertically (boolean, default: false)
 - `color`: Tint color (`{ r, g, b, a }` or hex string, default: white)
+- `cover_position`: Anchor point for Cover/Contain modes (optional, default: centered)
+  - `x`: Horizontal anchor (`"0%"` = left, `"50%"` = center, `"100%"` = right, or `0.0`-`1.0`)
+  - `y`: Vertical anchor (`"0%"` = top, `"50%"` = center, `"100%"` = bottom, or `0.0`-`1.0`)
 
 **Example with full options:**
 ```javascript
@@ -851,9 +856,30 @@ const decoratedPanel = await World.spawn({
 });
 ```
 
-**Note:** The `NodeImageMode` enum is available as a global constant with values: `Auto`, `Stretch`, `Sliced`, `Tiled`.
+**Example with Cover mode and custom anchor:**
+```javascript
+// Background image that covers the container, keeping the top visible
+const background = await World.spawn({
+    Node: { width: "100%", height: "100%" },
+    ImageNode: {
+        resource_id: "hero-background",
+        image_mode: NodeImageMode.Cover,
+        cover_position: { x: "50%", y: "0%" }  // Top-center anchor
+    }
+});
 
-> **Not yet implemented:** CSS-like `Cover` (scale to cover while maintaining aspect ratio) and `Contain` (scale to fit while maintaining aspect ratio) modes are not yet available. Use `Stretch` for full coverage or calculate custom dimensions manually.
+// Background with bottom-right corner always visible
+const cornerFocused = await World.spawn({
+    Node: { width: "100%", height: "100%" },
+    ImageNode: {
+        resource_id: "landscape",
+        image_mode: NodeImageMode.Cover,
+        cover_position: { x: "100%", y: "100%" }  // Bottom-right anchor
+    }
+});
+```
+
+**Note:** The `NodeImageMode` enum is available as a global constant with values: `Auto`, `Stretch`, `Sliced`, `Tiled`, `Contain`, `Cover`.
 
 ### Button Event Handlers
 

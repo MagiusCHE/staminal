@@ -370,6 +370,11 @@ struct CoverContainImage {
     image_handle: Handle<Image>,
     /// Last known container size - used to detect when recalculation is needed
     last_container_size: Vec2,
+    /// Anchor position for Cover mode (0.0-1.0 for each axis)
+    /// x=0.0 means left edge visible, x=1.0 means right edge visible, x=0.5 means centered
+    /// y=0.0 means top edge visible, y=1.0 means bottom edge visible, y=0.5 means centered
+    /// Default is (0.5, 0.5) for centered
+    anchor_position: Vec2,
 }
 
 impl Default for ButtonColors {
@@ -1608,7 +1613,8 @@ mod native_component_converters {
     ///   "image_mode": 0,                  // Optional: NodeImageMode enum value (0=Auto, 1=Stretch, 2=Sliced, 3=Tiled, 4=Contain, 5=Cover)
     ///   "flip_x": false,                  // Optional: horizontal flip
     ///   "flip_y": false,                  // Optional: vertical flip
-    ///   "color": "#FFFFFF"                // Optional: tint color
+    ///   "color": "#FFFFFF",               // Optional: tint color
+    ///   "cover_position": { "x": "50%", "y": "50%" }  // Optional: anchor position for Cover mode (default: centered)
     /// }
     /// ```
     pub struct ImageNodeConfig {
@@ -1619,6 +1625,10 @@ mod native_component_converters {
         pub flip_x: bool,
         pub flip_y: bool,
         pub color: Option<Color>,
+        /// Anchor position for Cover mode (0.0-1.0, default 0.5 for centered)
+        /// x=0 means left visible, x=1 means right visible
+        /// y=0 means top visible, y=1 means bottom visible
+        pub cover_position: Vec2,
     }
 
     /// Parse NodeImageMode from JSON value
@@ -1746,6 +1756,13 @@ mod native_component_converters {
             None
         };
 
+        // Parse cover_position (optional, defaults to centered 0.5, 0.5)
+        let cover_position = if let Some(pos_val) = obj.get("cover_position") {
+            parse_cover_position(pos_val)?
+        } else {
+            Vec2::new(0.5, 0.5)
+        };
+
         Ok(ImageNodeConfig {
             resource_id,
             image_mode,
@@ -1753,7 +1770,58 @@ mod native_component_converters {
             flip_x,
             flip_y,
             color,
+            cover_position,
         })
+    }
+
+    /// Parse cover_position from JSON
+    /// Accepts: { "x": "50%", "y": "50%" } or { "x": 0.5, "y": 0.5 }
+    /// Percentage strings like "50%" are converted to 0.0-1.0 range
+    fn parse_cover_position(json: &Value) -> Result<Vec2, String> {
+        let obj = json.as_object().ok_or("cover_position must be an object with x and y fields")?;
+
+        let x = parse_position_value(obj.get("x"), "x")?;
+        let y = parse_position_value(obj.get("y"), "y")?;
+
+        Ok(Vec2::new(x, y))
+    }
+
+    /// Parse a single position value (x or y)
+    /// Accepts: "50%" -> 0.5, "0%" -> 0.0, "100%" -> 1.0, or direct float 0.0-1.0
+    fn parse_position_value(value: Option<&Value>, field_name: &str) -> Result<f32, String> {
+        match value {
+            Some(v) => {
+                // Handle string percentage like "50%"
+                if let Some(s) = v.as_str() {
+                    let s = s.trim();
+                    if s.ends_with('%') {
+                        let num_str = s.trim_end_matches('%');
+                        let percentage: f32 = num_str.parse()
+                            .map_err(|_| format!("Invalid percentage value for {}: '{}'", field_name, s))?;
+                        // Convert percentage (0-100) to normalized (0-1)
+                        return Ok((percentage / 100.0).clamp(0.0, 1.0));
+                    } else {
+                        // Try parsing as direct float
+                        let value: f32 = s.parse()
+                            .map_err(|_| format!("Invalid position value for {}: '{}'. Use '50%' or 0.5", field_name, s))?;
+                        return Ok(value.clamp(0.0, 1.0));
+                    }
+                }
+                // Handle number directly
+                if let Some(n) = v.as_f64() {
+                    return Ok((n as f32).clamp(0.0, 1.0));
+                }
+                if let Some(n) = v.as_i64() {
+                    // If integer >= 0 and <= 100, treat as percentage
+                    if n >= 0 && n <= 100 {
+                        return Ok((n as f32 / 100.0).clamp(0.0, 1.0));
+                    }
+                    return Ok((n as f32).clamp(0.0, 1.0));
+                }
+                Err(format!("Invalid position value for {}: expected string like '50%' or number 0.0-1.0", field_name))
+            }
+            None => Ok(0.5) // Default to centered
+        }
     }
 
     /// Parse color value from JSON (hex string or {r,g,b,a} object)
@@ -2638,8 +2706,9 @@ fn process_commands(
                                                             scale_mode: scale_mode.clone(),
                                                             image_handle: image_handle.clone(),
                                                             last_container_size: Vec2::ZERO,
+                                                            anchor_position: config.cover_position,
                                                         });
-                                                        tracing::debug!("Added CoverContainImage component for {:?} mode on entity {}", scale_mode, script_id);
+                                                        tracing::debug!("Added CoverContainImage component for {:?} mode on entity {} with anchor {:?}", scale_mode, script_id, config.cover_position);
                                                     }
                                                     _ => {}
                                                 }
@@ -2881,8 +2950,9 @@ fn process_commands(
                                                     scale_mode: scale_mode.clone(),
                                                     image_handle: image_handle.clone(),
                                                     last_container_size: Vec2::ZERO,
+                                                    anchor_position: config.cover_position,
                                                 });
-                                                tracing::debug!("Added CoverContainImage component for {:?} mode on entity {}", scale_mode, entity_id);
+                                                tracing::debug!("Added CoverContainImage component for {:?} mode on entity {} with anchor {:?}", scale_mode, entity_id, config.cover_position);
                                             }
                                             _ => {
                                                 // Remove CoverContainImage if switching away from Cover/Contain
@@ -3993,18 +4063,24 @@ fn update_cover_contain_images(
         let container_height = parent_size.y;
         let container_ratio = container_width / container_height;
 
+        // Get anchor position (defaults to 0.5, 0.5 for centered)
+        let anchor_x = cover_contain.anchor_position.x;
+        let anchor_y = cover_contain.anchor_position.y;
+
         tracing::debug!(
-            "Cover/Contain sizing for entity {:?}: image={}x{} (ratio={:.3}), container={}x{} (ratio={:.3}), mode={:?}",
+            "Cover/Contain sizing for entity {:?}: image={}x{} (ratio={:.3}), container={}x{} (ratio={:.3}), mode={:?}, anchor=({:.2}, {:.2})",
             entity, image_width, image_height, image_ratio,
             container_width, container_height, container_ratio,
-            cover_contain.scale_mode
+            cover_contain.scale_mode, anchor_x, anchor_y
         );
 
-        // For both Cover and Contain, we use absolute positioning with transform centering.
-        // Set position_type to Absolute and position at 50%/50%, then use negative margins to center.
+        // For both Cover and Contain, we use absolute positioning.
+        // Position at anchor percentage, then use negative margins based on anchor to position correctly.
+        // anchor_x=0 means left edge visible, anchor_x=1 means right edge visible
+        // anchor_y=0 means top edge visible, anchor_y=1 means bottom edge visible
         node.position_type = PositionType::Absolute;
-        node.left = Val::Percent(50.0);
-        node.top = Val::Percent(50.0);
+        node.left = Val::Percent(anchor_x * 100.0);
+        node.top = Val::Percent(anchor_y * 100.0);
 
         match cover_contain.scale_mode {
             ImageScaleMode::Cover => {
@@ -4014,7 +4090,7 @@ fn update_cover_contain_images(
                 // - At least one dimension fills the container exactly
                 // - The other dimension overflows (and is clipped by the parent)
                 // - The aspect ratio of the node matches the image aspect ratio
-                // - The node is centered using position: absolute + left/top: 50% + negative margins
+                // - The node is positioned using anchor_position
 
                 let (node_width, node_height) = if image_ratio > container_ratio {
                     // Image is relatively wider than container
@@ -4033,14 +4109,14 @@ fn update_cover_contain_images(
                 node.width = Val::Px(node_width);
                 node.height = Val::Px(node_height);
 
-                // Center the image by using negative margins (half of width/height)
-                // This works with position: absolute, left: 50%, top: 50%
-                node.margin.left = Val::Px(-node_width / 2.0);
-                node.margin.top = Val::Px(-node_height / 2.0);
+                // Position the image using anchor-based margins
+                // margin = -size * anchor (so anchor=0 means margin=0, anchor=0.5 means margin=-size/2, anchor=1 means margin=-size)
+                node.margin.left = Val::Px(-node_width * anchor_x);
+                node.margin.top = Val::Px(-node_height * anchor_y);
 
                 tracing::debug!(
-                    "Cover applied: width={:.1}px, height={:.1}px, margin=({:.1}, {:.1}) (container: {:.1}x{:.1})",
-                    node_width, node_height, -node_width / 2.0, -node_height / 2.0, container_width, container_height
+                    "Cover applied: width={:.1}px, height={:.1}px, margin=({:.1}, {:.1}), anchor=({:.2}, {:.2}) (container: {:.1}x{:.1})",
+                    node_width, node_height, -node_width * anchor_x, -node_height * anchor_y, anchor_x, anchor_y, container_width, container_height
                 );
             }
             ImageScaleMode::Contain => {
@@ -4049,7 +4125,7 @@ fn update_cover_contain_images(
                 // - At least one dimension fills the container exactly
                 // - The other dimension is smaller (letterboxing)
                 // - The aspect ratio of the node matches the image aspect ratio
-                // - The node is centered using position: absolute + left/top: 50% + negative margins
+                // - The node is positioned using anchor_position
 
                 let (node_width, node_height) = if image_ratio > container_ratio {
                     // Image is relatively wider than container
@@ -4068,13 +4144,13 @@ fn update_cover_contain_images(
                 node.width = Val::Px(node_width);
                 node.height = Val::Px(node_height);
 
-                // Center the image by using negative margins (half of width/height)
-                node.margin.left = Val::Px(-node_width / 2.0);
-                node.margin.top = Val::Px(-node_height / 2.0);
+                // Position the image using anchor-based margins
+                node.margin.left = Val::Px(-node_width * anchor_x);
+                node.margin.top = Val::Px(-node_height * anchor_y);
 
                 tracing::debug!(
-                    "Contain applied: width={:.1}px, height={:.1}px, margin=({:.1}, {:.1}) (container: {:.1}x{:.1})",
-                    node_width, node_height, -node_width / 2.0, -node_height / 2.0, container_width, container_height
+                    "Contain applied: width={:.1}px, height={:.1}px, margin=({:.1}, {:.1}), anchor=({:.2}, {:.2}) (container: {:.1}x{:.1})",
+                    node_width, node_height, -node_width * anchor_x, -node_height * anchor_y, anchor_x, anchor_y, container_width, container_height
                 );
             }
             _ => {
