@@ -20,9 +20,9 @@ pub use events::{EventDispatcher, EventHandler, EventKey, SystemEvents, RequestU
 pub use graphic::{
     AlignItems, ColorValue, EdgeInsets, FlexDirection, FontConfig, FontInfo, GraphicCommand,
     GraphicEngine, GraphicEngineInfo, GraphicEngines, GraphicEvent, GraphicProxy,
-    InitialWindowConfig, JustifyContent, KeyModifiers, MouseButton, PropertyValue, SizeValue,
-    WidgetConfig, WidgetEventType, WidgetInfo, WidgetType, WindowConfig, WindowInfo,
-    WindowMode, WindowPositionMode, EnableEngineRequest, ImageScaleMode, ImageSource,
+    InitialWindowConfig, JustifyContent, KeyModifiers, MouseButton, SizeValue,
+    WindowConfig, WindowInfo, WindowMode, WindowPositionMode, EnableEngineRequest,
+    ImageScaleMode, ImageSource,
 };
 pub use locale::LocaleApi;
 pub use network::{NetworkApi, NetworkConfig, DownloadResponse, ProgressCallback, parse_stam_uri, sanitize_uri};

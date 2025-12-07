@@ -800,6 +800,61 @@ const pill = await World.spawn({
 - Number: Same radius for all corners (in pixels)
 - Object: `{ top_left, top_right, bottom_left, bottom_right }` - Individual corner radii
 
+#### ImageNode
+
+The ImageNode component displays an image in the UI. Images must be loaded first using the `Resource.load()` API before they can be used.
+
+```javascript
+// First, load the image resource
+Resource.load("@my-mod/assets/images/background.png", "bg-image");
+await Resource.whenLoadedAll();
+
+// Spawn an image element
+const image = await World.spawn({
+    Node: { width: "100%", height: "100%" },
+    ImageNode: {
+        resource_id: "bg-image",
+        image_mode: NodeImageMode.Stretch
+    }
+});
+
+// Update image properties
+await image.insert("ImageNode", {
+    resource_id: "bg-image",
+    image_mode: NodeImageMode.Tiled,
+    flip_x: true
+});
+```
+
+**Fields:**
+- `resource_id` (required): The resource alias used when loading with `Resource.load()`
+- `image_mode`: How the image should be rendered:
+  - `NodeImageMode.Auto` (0): Uses the image's original dimensions with layout constraints
+  - `NodeImageMode.Stretch` (1): Stretch to fill the node (may distort aspect ratio)
+  - `NodeImageMode.Sliced` (2): 9-slice scaling (for UI panels)
+  - `NodeImageMode.Tiled` (3): Tile the image to fill the node
+- `flip_x`: Flip the image horizontally (boolean, default: false)
+- `flip_y`: Flip the image vertically (boolean, default: false)
+- `color`: Tint color (`{ r, g, b, a }` or hex string, default: white)
+
+**Example with full options:**
+```javascript
+const decoratedPanel = await World.spawn({
+    Node: { width: 300, height: 200 },
+    ImageNode: {
+        resource_id: "panel-border",
+        image_mode: NodeImageMode.Sliced,
+        flip_x: false,
+        flip_y: false,
+        color: "#ffffff"
+    }
+});
+```
+
+**Note:** The `NodeImageMode` enum is available as a global constant with values: `Auto`, `Stretch`, `Sliced`, `Tiled`.
+
+> **Not yet implemented:** CSS-like `Cover` (scale to cover while maintaining aspect ratio) and `Contain` (scale to fit while maintaining aspect ratio) modes are not yet available. Use `Stretch` for full coverage or calculate custom dimensions manually.
+
 ### Button Event Handlers
 
 The `Button` component supports event callback fields for direct event handling. These are language-agnostic - each runtime (JavaScript, Lua, C#, etc.) handles the callbacks in its native way.
@@ -971,7 +1026,7 @@ const visiblePlayers = await World.query({
 
 Script-defined components are stored as JSON data since Rust cannot dynamically create struct types at runtime. Each component is validated against its schema (if registered) when inserted.
 
-Native Bevy components (Transform, Sprite, Visibility, Node, BackgroundColor, Text, BorderRadius) are stored directly in Bevy's ECS as their native types, providing better performance and integration with the rendering and UI pipelines.
+Native Bevy components (Transform, Sprite, Visibility, Node, BackgroundColor, Text, BorderRadius, ImageNode, Button, Interaction) are stored directly in Bevy's ECS as their native types, providing better performance and integration with the rendering and UI pipelines.
 
 ### Entity IDs
 

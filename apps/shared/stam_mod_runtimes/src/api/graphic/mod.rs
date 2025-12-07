@@ -19,23 +19,27 @@
 //!
 //! All graphic operations are client-only. On the server, `GraphicProxy` returns
 //! descriptive errors for all operations.
+//!
+//! # UI System
+//!
+//! The UI system uses the ECS API for creating UI elements. The legacy widget system
+//! has been removed. See `ecs` module and `docs/graphic/ecs.md` for more information.
 
 mod commands;
 pub mod ecs;
 mod engines;
 mod events;
 mod proxy;
-mod widget;
+mod common_types;
 mod window;
 
 pub use commands::GraphicCommand;
 pub use engines::{GraphicEngine, GraphicEngineInfo, GraphicEngines};
 pub use events::{GraphicEvent, KeyModifiers, MouseButton};
 pub use proxy::{EnableEngineRequest, GraphicProxy};
-pub use widget::{
+pub use common_types::{
     AlignItems, BlendMode, ColorParseError, ColorValue, EdgeInsets, FlexDirection, FontConfig,
     FontInfo, FontStyle, FontWeight, ImageConfig, ImageScaleMode, ImageSource, JustifyContent, LayoutType,
-    PropertyValue, RectValue, ShadowConfig, SizeValue, TextAlign, WidgetConfig, WidgetEventType,
-    WidgetFilter, WidgetInfo, WidgetSubscriptions, WidgetType,
+    RectValue, ShadowConfig, SizeValue, TextAlign,
 };
 pub use window::{InitialWindowConfig, WindowConfig, WindowInfo, WindowMode, WindowPositionMode};

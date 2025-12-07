@@ -1838,46 +1838,8 @@ fn handle_graphic_event(
             info!("Graphic engine is shutting down");
             warn!("TODO: Dispatch engine:shuttingDown event to mods");
         }
-        // Widget events
-        GraphicEvent::WidgetCreated { window_id, widget_id, widget_type } => {
-            trace!("Widget {} ({:?}) created in window {}", widget_id, widget_type, window_id);
-            warn!("TODO: Dispatch widget:created event to mods");
-        }
-        GraphicEvent::WidgetDestroyed { window_id, widget_id } => {
-            trace!("Widget {} destroyed in window {}", widget_id, window_id);
-            warn!("TODO: Dispatch widget:destroyed event to mods");
-        }
-        GraphicEvent::WidgetClicked { window_id, widget_id, x, y, button } => {
-            trace!("Widget {} clicked in window {} at ({}, {}) with {:?}", widget_id, window_id, x, y, button);
+        // Note: Widget events removed - use ECS entity event callbacks instead
 
-            // Dispatch widget click event to mods
-            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
-                // Create event data object
-                let event_data = serde_json::json!({
-                    "windowId": window_id,
-                    "widgetId": widget_id,
-                    "x": x,
-                    "y": y,
-                    "button": button.as_str(),
-                });
-
-                if let Err(e) = runtime_manager.dispatch_widget_event(widget_id, "click", event_data) {
-                    error!("Failed to dispatch widget click event: {}", e);
-                }
-            }
-        }
-        GraphicEvent::WidgetHovered { window_id, widget_id, entered, x, y } => {
-            trace!("Widget {} hover {} in window {} at ({}, {})", widget_id, if entered { "enter" } else { "leave" }, window_id, x, y);
-            warn!("TODO: Dispatch widget:hovered event to mods");
-        }
-        GraphicEvent::WidgetFocused { window_id, widget_id, focused } => {
-            trace!("Widget {} focus {} in window {}", widget_id, if focused { "gained" } else { "lost" }, window_id);
-            warn!("TODO: Dispatch widget:focused event to mods");
-        }
-        GraphicEvent::WidgetInteractionChanged { window_id, widget_id, interaction } => {
-            trace!("Widget {} interaction changed to '{}' in window {}", widget_id, interaction, window_id);
-            // Internal event for tracking, usually not dispatched
-        }
         // Resource events
         GraphicEvent::ResourceLoaded { alias, asset_id } => {
             debug!("Resource '{}' (asset_id={}) loaded by graphic engine", alias, asset_id);

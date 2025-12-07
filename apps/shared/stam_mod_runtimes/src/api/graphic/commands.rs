@@ -3,7 +3,7 @@
 //! Commands sent from the GraphicProxy (worker thread) to the graphic engine (main thread).
 
 use super::ecs::{ComponentSchema, DeclaredSystem, QueryOptions, QueryResult};
-use super::{GraphicEngineInfo, PropertyValue, WidgetConfig, WidgetEventType, WidgetType, WindowConfig, WindowMode};
+use super::{GraphicEngineInfo, WindowConfig, WindowMode};
 use crate::api::resource::{ResourceInfo, ResourceType};
 use std::collections::HashMap;
 use tokio::sync::oneshot;
@@ -116,94 +116,6 @@ pub enum GraphicCommand {
     GetEngineInfo {
         /// Channel to send the engine info back
         response_tx: oneshot::Sender<GraphicEngineInfo>,
-    },
-
-    // ========================================================================
-    // Widget Commands
-    // ========================================================================
-
-    /// Create a new widget in a window
-    CreateWidget {
-        /// Parent window ID
-        window_id: u64,
-        /// Unique widget ID (assigned by GraphicProxy)
-        widget_id: u64,
-        /// Parent widget ID (None = root of window)
-        parent_id: Option<u64>,
-        /// Type of widget to create
-        widget_type: WidgetType,
-        /// Widget configuration
-        config: WidgetConfig,
-        /// Channel to send the result back
-        response_tx: oneshot::Sender<Result<(), String>>,
-    },
-
-    /// Update a widget property
-    UpdateWidgetProperty {
-        /// Widget ID to update
-        widget_id: u64,
-        /// Property name
-        property: String,
-        /// New property value
-        value: PropertyValue,
-        /// Channel to send the result back
-        response_tx: oneshot::Sender<Result<(), String>>,
-    },
-
-    /// Update multiple widget properties at once
-    UpdateWidgetConfig {
-        /// Widget ID to update
-        widget_id: u64,
-        /// New configuration (only set fields are updated)
-        config: WidgetConfig,
-        /// Channel to send the result back
-        response_tx: oneshot::Sender<Result<(), String>>,
-    },
-
-    /// Destroy a widget and all its children
-    DestroyWidget {
-        /// Widget ID to destroy
-        widget_id: u64,
-        /// Channel to send the result back
-        response_tx: oneshot::Sender<Result<(), String>>,
-    },
-
-    /// Move a widget to a new parent
-    ReparentWidget {
-        /// Widget ID to move
-        widget_id: u64,
-        /// New parent widget ID (None = root of window)
-        new_parent_id: Option<u64>,
-        /// Channel to send the result back
-        response_tx: oneshot::Sender<Result<(), String>>,
-    },
-
-    /// Destroy all widgets in a window
-    ClearWindowWidgets {
-        /// Window ID to clear
-        window_id: u64,
-        /// Channel to send the result back
-        response_tx: oneshot::Sender<Result<(), String>>,
-    },
-
-    /// Subscribe to widget events
-    SubscribeWidgetEvents {
-        /// Widget ID
-        widget_id: u64,
-        /// Event types to subscribe to
-        event_types: Vec<WidgetEventType>,
-        /// Channel to send the result back
-        response_tx: oneshot::Sender<Result<(), String>>,
-    },
-
-    /// Unsubscribe from widget events
-    UnsubscribeWidgetEvents {
-        /// Widget ID
-        widget_id: u64,
-        /// Event types to unsubscribe from
-        event_types: Vec<WidgetEventType>,
-        /// Channel to send the result back
-        response_tx: oneshot::Sender<Result<(), String>>,
     },
 
     // ========================================================================
@@ -522,70 +434,6 @@ impl std::fmt::Debug for GraphicCommand {
                 .finish(),
             Self::Shutdown { .. } => f.debug_struct("Shutdown").finish(),
             Self::GetEngineInfo { .. } => f.debug_struct("GetEngineInfo").finish(),
-            // Widget commands
-            Self::CreateWidget {
-                window_id,
-                widget_id,
-                parent_id,
-                widget_type,
-                ..
-            } => f
-                .debug_struct("CreateWidget")
-                .field("window_id", window_id)
-                .field("widget_id", widget_id)
-                .field("parent_id", parent_id)
-                .field("widget_type", widget_type)
-                .finish(),
-            Self::UpdateWidgetProperty {
-                widget_id,
-                property,
-                value,
-                ..
-            } => f
-                .debug_struct("UpdateWidgetProperty")
-                .field("widget_id", widget_id)
-                .field("property", property)
-                .field("value", value)
-                .finish(),
-            Self::UpdateWidgetConfig { widget_id, .. } => f
-                .debug_struct("UpdateWidgetConfig")
-                .field("widget_id", widget_id)
-                .finish(),
-            Self::DestroyWidget { widget_id, .. } => f
-                .debug_struct("DestroyWidget")
-                .field("widget_id", widget_id)
-                .finish(),
-            Self::ReparentWidget {
-                widget_id,
-                new_parent_id,
-                ..
-            } => f
-                .debug_struct("ReparentWidget")
-                .field("widget_id", widget_id)
-                .field("new_parent_id", new_parent_id)
-                .finish(),
-            Self::ClearWindowWidgets { window_id, .. } => f
-                .debug_struct("ClearWindowWidgets")
-                .field("window_id", window_id)
-                .finish(),
-            Self::SubscribeWidgetEvents {
-                widget_id,
-                event_types,
-                ..
-            } => f
-                .debug_struct("SubscribeWidgetEvents")
-                .field("widget_id", widget_id)
-                .field("event_types", event_types)
-                .finish(),
-            Self::UnsubscribeWidgetEvents {
-                widget_id,
-                event_types,
-                ..
-            } => f
-                .debug_struct("UnsubscribeWidgetEvents")
-                .field("widget_id", widget_id)
-                .field("event_types", event_types)
-                .finish(),
             // Asset commands
             Self::LoadFont { path, alias, .. } => f
                 .debug_struct("LoadFont")

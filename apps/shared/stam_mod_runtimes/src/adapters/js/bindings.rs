@@ -181,10 +181,6 @@ impl Drop for TempFileManager {
 /// Name of the global JavaScript object used to store event handlers
 const JS_EVENT_HANDLERS_MAP: &str = "__eventHandlers";
 
-/// Name of the global JavaScript object used to store widget event callbacks
-/// Key format: "widgetId:eventType", value: callback function
-const JS_WIDGET_HANDLERS_MAP: &str = "__widgetHandlers";
-
 /// Store a JavaScript function handler in the context's handler map
 pub fn store_js_handler<'js>(
     ctx: &Ctx<'js>,
@@ -231,76 +227,6 @@ pub fn init_event_handlers_map(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     let handlers_map = Object::new(ctx.clone())?;
     ctx.globals().set(JS_EVENT_HANDLERS_MAP, handlers_map)?;
     Ok(())
-}
-
-/// Initialize the widget event handlers map in a JavaScript context
-pub fn init_widget_handlers_map(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
-    let handlers_map = Object::new(ctx.clone())?;
-    ctx.globals().set(JS_WIDGET_HANDLERS_MAP, handlers_map)?;
-    Ok(())
-}
-
-/// Store a widget event callback in the context's widget handlers map
-///
-/// # Arguments
-/// * `ctx` - JavaScript context
-/// * `widget_id` - Widget ID
-/// * `event_type` - Event type ("click", "hover", "focus")
-/// * `callback` - JavaScript callback function
-pub fn store_widget_handler<'js>(
-    ctx: &Ctx<'js>,
-    widget_id: u64,
-    event_type: &str,
-    callback: Function<'js>,
-) -> rquickjs::Result<()> {
-    let globals = ctx.globals();
-    let handlers_map: Object = globals.get(JS_WIDGET_HANDLERS_MAP)?;
-    let key = format!("{}:{}", widget_id, event_type);
-    handlers_map.set(key, callback)?;
-    Ok(())
-}
-
-/// Remove a widget event callback from the context's widget handlers map
-///
-/// Returns true if a handler was removed, false if none was found
-pub fn remove_widget_handler(ctx: &Ctx<'_>, widget_id: u64, event_type: &str) -> rquickjs::Result<bool> {
-    let globals = ctx.globals();
-    let handlers_map: Object = globals.get(JS_WIDGET_HANDLERS_MAP)?;
-    let key = format!("{}:{}", widget_id, event_type);
-    let exists: bool = handlers_map.contains_key(&key)?;
-    if exists {
-        handlers_map.set(&key, rquickjs::Undefined)?;
-    }
-    Ok(exists)
-}
-
-/// Remove all event handlers for a widget
-///
-/// Removes handlers for all event types (click, hover, focus)
-pub fn remove_all_widget_handlers(ctx: &Ctx<'_>, widget_id: u64) -> rquickjs::Result<()> {
-    // Remove handlers for all known event types
-    let event_types = ["click", "hover", "focus"];
-    for event_type in event_types {
-        let _ = remove_widget_handler(ctx, widget_id, event_type)?;
-    }
-    Ok(())
-}
-
-/// Get a widget event callback from the context's widget handlers map
-pub fn get_widget_handler<'js>(
-    ctx: &Ctx<'js>,
-    widget_id: u64,
-    event_type: &str,
-) -> rquickjs::Result<Option<Function<'js>>> {
-    let globals = ctx.globals();
-    let handlers_map: Object = globals.get(JS_WIDGET_HANDLERS_MAP)?;
-    let key = format!("{}:{}", widget_id, event_type);
-    let handler: rquickjs::Value = handlers_map.get(&key)?;
-    if handler.is_undefined() || handler.is_null() {
-        Ok(None)
-    } else {
-        Ok(handler.into_function())
-    }
 }
 
 /// Setup console API in the JavaScript context
@@ -1289,7 +1215,6 @@ impl SystemJS {
 pub fn setup_system_api(ctx: Ctx, system_api: SystemApi, game_config_dir: Option<PathBuf>) -> Result<(), rquickjs::Error> {
     // Initialize the event handlers map (must be done before any handler registration)
     init_event_handlers_map(&ctx)?;
-    init_widget_handlers_map(&ctx)?;
 
     // First, define the class in the runtime (required before creating instances)
     rquickjs::Class::<SystemJS>::define(&ctx.globals())?;
@@ -1655,8 +1580,7 @@ pub fn setup_text_api(ctx: Ctx) -> Result<(), rquickjs::Error> {
 
 use crate::api::{
     AlignItems, ColorValue, EdgeInsets, FlexDirection, FontConfig, GraphicEngines, GraphicProxy,
-    InitialWindowConfig, JustifyContent, PropertyValue, SizeValue, WidgetConfig, WidgetEventType,
-    WidgetType, WindowConfig, WindowMode, WindowPositionMode,
+    InitialWindowConfig, JustifyContent, SizeValue, WindowConfig, WindowMode, WindowPositionMode,
 };
 
 /// JavaScript Graphic API class
@@ -2139,68 +2063,7 @@ impl WindowJS {
     }
 
     // Note: setResizable was removed - resizable must be set at window creation time via enableEngine()
-
-    /// Create a widget in this window
-    ///
-    /// # Arguments
-    /// * `widget_type` - WidgetTypes enum value (0=container, 1=text, 2=button, 3=image, 4=panel)
-    /// * `config` - Widget configuration object
-    ///
-    /// # Returns
-    /// Promise that resolves to a Widget object
-    #[qjs(rename = "createWidget")]
-    pub async fn create_widget<'js>(
-        &self,
-        ctx: Ctx<'js>,
-        widget_type: u32,
-        config: Opt<Object<'js>>,
-    ) -> rquickjs::Result<rquickjs::Class<'js, WidgetJS>> {
-        let wtype = WidgetType::from_u32(widget_type).ok_or_else(|| {
-            let msg = format!(
-                "Invalid widget type: {}. Use WidgetTypes.Container (0), Text (1), Button (2), Image (3), or Panel (4)",
-                widget_type
-            );
-            ctx.throw(rquickjs::String::from_str(ctx.clone(), &msg).unwrap().into())
-        })?;
-
-        let widget_config = parse_widget_config(&ctx, config.0)?;
-
-        let widget_id = self
-            .graphic_proxy
-            .create_widget(self.id, wtype, widget_config)
-            .await
-            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))?;
-
-        rquickjs::Class::<WidgetJS>::instance(
-            ctx,
-            WidgetJS {
-                id: widget_id,
-                window_id: self.id,
-                graphic_proxy: self.graphic_proxy.clone(),
-            },
-        )
-    }
-
-    /// Clear all widgets from this window
-    ///
-    /// This also removes all event handlers registered for widgets in this window.
-    ///
-    /// # Returns
-    /// Promise that resolves when all widgets are destroyed
-    #[qjs(rename = "clearWidgets")]
-    pub async fn clear_widgets(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
-        // First, remove all JavaScript handlers for widgets in this window
-        let widgets = self.graphic_proxy.get_window_widgets(self.id);
-        for widget in &widgets {
-            remove_all_widget_handlers(&ctx, widget.id)?;
-        }
-
-        // Then clear widgets from the graphic engine and proxy cache
-        self.graphic_proxy
-            .clear_window_widgets(self.id)
-            .await
-            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
-    }
+    // Note: Widget methods (createWidget, clearWidgets) removed - use ECS API instead (World.spawn, entity.insert)
 
     /// Set the default font for this window
     ///
@@ -2294,253 +2157,10 @@ impl WindowJS {
     }
 }
 
-/// JavaScript Widget class
-///
-/// Represents a UI widget created in a window.
-/// Instances are returned by `window.createWidget()`.
-#[rquickjs::class]
-#[derive(Clone, Trace, JsLifetime)]
-pub struct WidgetJS {
-    #[qjs(skip_trace)]
-    id: u64,
-    #[qjs(skip_trace)]
-    window_id: u64,
-    #[qjs(skip_trace)]
-    graphic_proxy: Arc<GraphicProxy>,
-}
-
-#[rquickjs::methods]
-impl WidgetJS {
-    /// Get the widget ID
-    #[qjs(get, rename = "id")]
-    pub fn get_id(&self) -> u64 {
-        self.id
-    }
-
-    /// Get the parent window ID
-    #[qjs(get, rename = "windowId")]
-    pub fn get_window_id(&self) -> u64 {
-        self.window_id
-    }
-
-    /// Set text content (for Text widgets) or label (for Button widgets)
-    ///
-    /// # Arguments
-    /// * `content` - The text content
-    #[qjs(rename = "setContent")]
-    pub async fn set_content(&self, ctx: Ctx<'_>, content: String) -> rquickjs::Result<()> {
-        use crate::api::PropertyValue;
-        self.graphic_proxy
-            .update_widget_property(self.id, "content".to_string(), PropertyValue::String(content))
-            .await
-            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
-    }
-
-    /// Set background color
-    ///
-    /// # Arguments
-    /// * `color` - Color string ("#RGB", "#RRGGBB", "rgba(r,g,b,a)") or color object
-    #[qjs(rename = "setBackgroundColor")]
-    pub async fn set_background_color<'js>(
-        &self,
-        ctx: Ctx<'js>,
-        color: Value<'js>,
-    ) -> rquickjs::Result<()> {
-        use crate::api::PropertyValue;
-        let color_value = parse_color(&ctx, &color)?;
-        self.graphic_proxy
-            .update_widget_property(
-                self.id,
-                "backgroundColor".to_string(),
-                PropertyValue::Color(color_value),
-            )
-            .await
-            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
-    }
-
-    /// Create a child widget
-    ///
-    /// # Arguments
-    /// * `widget_type` - WidgetTypes enum value
-    /// * `config` - Widget configuration object
-    ///
-    /// # Returns
-    /// Promise that resolves to a Widget object
-    #[qjs(rename = "createChild")]
-    pub async fn create_child<'js>(
-        &self,
-        ctx: Ctx<'js>,
-        widget_type: u32,
-        config: Opt<Object<'js>>,
-    ) -> rquickjs::Result<rquickjs::Class<'js, WidgetJS>> {
-        let wtype = WidgetType::from_u32(widget_type).ok_or_else(|| {
-            let msg = format!(
-                "Invalid widget type: {}. Use WidgetTypes.Container (0), Text (1), Button (2), Image (3), or Panel (4)",
-                widget_type
-            );
-            ctx.throw(rquickjs::String::from_str(ctx.clone(), &msg).unwrap().into())
-        })?;
-
-        let mut widget_config = parse_widget_config(&ctx, config.0)?;
-        widget_config.parent_id = Some(self.id);
-
-        let widget_id = self
-            .graphic_proxy
-            .create_widget(self.window_id, wtype, widget_config)
-            .await
-            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))?;
-
-        rquickjs::Class::<WidgetJS>::instance(
-            ctx,
-            WidgetJS {
-                id: widget_id,
-                window_id: self.window_id,
-                graphic_proxy: self.graphic_proxy.clone(),
-            },
-        )
-    }
-
-    /// Destroy this widget and all its children
-    ///
-    /// This also removes all event handlers registered for this widget and its descendants.
-    #[qjs(rename = "destroy")]
-    pub async fn destroy(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
-        // First, remove all JavaScript handlers for this widget and its descendants
-        remove_all_widget_handlers(&ctx, self.id)?;
-        let descendants = self.graphic_proxy.get_widget_descendants(self.id);
-        for descendant_id in descendants {
-            remove_all_widget_handlers(&ctx, descendant_id)?;
-        }
-
-        // Then destroy the widget from the graphic engine and proxy cache
-        self.graphic_proxy
-            .destroy_widget(self.id)
-            .await
-            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
-    }
-
-    /// Set a widget property dynamically
-    ///
-    /// # Arguments
-    /// * `property` - Property name (e.g., "content", "width", "backgroundColor", "disabled", "label")
-    /// * `value` - Property value (string, number, boolean, or color)
-    ///
-    /// # Example
-    /// ```javascript
-    /// await widget.setProperty("content", "New text");
-    /// await widget.setProperty("width", "50%");
-    /// await widget.setProperty("backgroundColor", "#ff0000");
-    /// await widget.setProperty("disabled", true);
-    /// ```
-    #[qjs(rename = "setProperty")]
-    pub async fn set_property<'js>(
-        &self,
-        ctx: Ctx<'js>,
-        property: String,
-        value: Value<'js>,
-    ) -> rquickjs::Result<()> {
-        use crate::api::PropertyValue;
-
-        // Parse the value based on the property name and value type
-        let prop_value = parse_property_value(&ctx, &property, &value)?;
-
-        self.graphic_proxy
-            .update_widget_property(self.id, property, prop_value)
-            .await
-            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))
-    }
-
-    /// Subscribe to widget events
-    ///
-    /// # Arguments
-    /// * `event_type` - Event type string ("click", "hover", "focus")
-    /// * `callback` - JavaScript callback function
-    ///
-    /// # Example
-    /// ```javascript
-    /// await widget.on("click", () => { console.log("Clicked!"); });
-    /// ```
-    #[qjs(rename = "on")]
-    pub async fn on<'js>(
-        &self,
-        ctx: Ctx<'js>,
-        event_type: String,
-        callback: Function<'js>,
-    ) -> rquickjs::Result<()> {
-        use crate::api::WidgetEventType;
-
-        // Parse event type string to enum
-        let event = match event_type.to_lowercase().as_str() {
-            "click" => WidgetEventType::Click,
-            "hover" => WidgetEventType::Hover,
-            "focus" => WidgetEventType::Focus,
-            _ => {
-                return Err(throw_error(
-                    &ctx,
-                    &format!(
-                        "Invalid event type: '{}'. Valid types are: 'click', 'hover', 'focus'",
-                        event_type
-                    ),
-                ));
-            }
-        };
-
-        // Subscribe to the event in the graphic engine
-        self.graphic_proxy
-            .subscribe_widget_events(self.id, vec![event])
-            .await
-            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))?;
-
-        // Store the callback in the widget handlers map
-        store_widget_handler(&ctx, self.id, &event_type.to_lowercase(), callback)?;
-
-        Ok(())
-    }
-
-    /// Unsubscribe from widget events
-    ///
-    /// # Arguments
-    /// * `event_type` - Event type string ("click", "hover", "focus")
-    ///
-    /// # Example
-    /// ```javascript
-    /// await widget.off("click");
-    /// ```
-    #[qjs(rename = "off")]
-    pub async fn off<'js>(&self, ctx: Ctx<'js>, event_type: String) -> rquickjs::Result<()> {
-        use crate::api::WidgetEventType;
-
-        // Parse event type string to enum
-        let event = match event_type.to_lowercase().as_str() {
-            "click" => WidgetEventType::Click,
-            "hover" => WidgetEventType::Hover,
-            "focus" => WidgetEventType::Focus,
-            _ => {
-                return Err(throw_error(
-                    &ctx,
-                    &format!(
-                        "Invalid event type: '{}'. Valid types are: 'click', 'hover', 'focus'",
-                        event_type
-                    ),
-                ));
-            }
-        };
-
-        // Unsubscribe from the event
-        self.graphic_proxy
-            .unsubscribe_widget_events(self.id, vec![event])
-            .await
-            .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))?;
-
-        // Remove the callback from the widget handlers map
-        remove_widget_handler(&ctx, self.id, &event_type.to_lowercase())?;
-
-        Ok(())
-    }
-}
+// Note: WidgetJS class has been removed. Use ECS API instead (World.spawn, entity.insert)
 
 // ============================================================================
-// Widget Config Parsing Helpers
+// Parsing Helpers
 // ============================================================================
 
 /// Helper to throw a JavaScript Error with stack trace
@@ -2554,29 +2174,6 @@ fn throw_error<'js>(ctx: &Ctx<'js>, message: &str) -> rquickjs::Error {
         Err(_) => {
             // Fallback to string throw if eval fails for some reason
             ctx.throw(rquickjs::String::from_str(ctx.clone(), message).unwrap().into())
-        }
-    }
-}
-
-impl WidgetType {
-    pub fn from_u32(v: u32) -> Option<Self> {
-        match v {
-            0 => Some(WidgetType::Container),
-            1 => Some(WidgetType::Text),
-            2 => Some(WidgetType::Button),
-            3 => Some(WidgetType::Image),
-            4 => Some(WidgetType::Panel),
-            _ => None,
-        }
-    }
-
-    pub fn to_u32(&self) -> u32 {
-        match self {
-            WidgetType::Container => 0,
-            WidgetType::Text => 1,
-            WidgetType::Button => 2,
-            WidgetType::Image => 3,
-            WidgetType::Panel => 4,
         }
     }
 }
@@ -2603,81 +2200,6 @@ fn parse_color<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::Result<Colo
     Err(throw_error(
         ctx,
         "Color must be a string ('#RGB', '#RRGGBB', 'rgba(r,g,b,a)') or object { r, g, b, a }",
-    ))
-}
-
-/// Parse a property value from JavaScript based on property name
-///
-/// This function intelligently converts JavaScript values to PropertyValue
-/// based on the property name and the type of value provided.
-fn parse_property_value<'js>(
-    ctx: &Ctx<'js>,
-    property: &str,
-    value: &Value<'js>,
-) -> rquickjs::Result<PropertyValue> {
-    // Boolean properties
-    if property == "disabled" {
-        if let Some(b) = value.as_bool() {
-            return Ok(PropertyValue::Bool(b));
-        }
-        return Err(throw_error(ctx, "Property 'disabled' expects a boolean value"));
-    }
-
-    // Color properties
-    let color_props = [
-        "backgroundColor",
-        "fontColor",
-        "borderColor",
-        "hoverColor",
-        "pressedColor",
-        "disabledColor",
-    ];
-    if color_props.contains(&property) {
-        let color = parse_color(ctx, value)?;
-        return Ok(PropertyValue::Color(color));
-    }
-
-    // Size properties
-    let size_props = ["width", "height", "minWidth", "maxWidth", "minHeight", "maxHeight"];
-    if size_props.contains(&property) {
-        let size = parse_size_value(ctx, value)?;
-        return Ok(PropertyValue::Size(size));
-    }
-
-    // Number properties
-    let number_props = ["opacity", "borderRadius", "gap"];
-    if number_props.contains(&property) {
-        if let Some(n) = value.as_number() {
-            return Ok(PropertyValue::Number(n));
-        }
-        return Err(throw_error(
-            ctx,
-            &format!("Property '{}' expects a number value", property),
-        ));
-    }
-
-    // String properties (content, label, etc.)
-    // Also used as fallback for unknown properties
-    if let Some(s) = value.as_string() {
-        return Ok(PropertyValue::String(s.to_string()?));
-    }
-
-    // If it's a number and not handled above, convert to Number
-    if let Some(n) = value.as_number() {
-        return Ok(PropertyValue::Number(n));
-    }
-
-    // If it's a boolean and not handled above, convert to Bool
-    if let Some(b) = value.as_bool() {
-        return Ok(PropertyValue::Bool(b));
-    }
-
-    Err(throw_error(
-        ctx,
-        &format!(
-            "Cannot convert value to property '{}'. Expected string, number, or boolean.",
-            property
-        ),
     ))
 }
 
@@ -2805,181 +2327,6 @@ fn parse_edge_insets<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> rquickjs::Resul
     ))
 }
 
-/// Parse widget configuration from JavaScript object
-fn parse_widget_config<'js>(
-    ctx: &Ctx<'js>,
-    config: Option<Object<'js>>,
-) -> rquickjs::Result<WidgetConfig> {
-    let Some(cfg) = config else {
-        return Ok(WidgetConfig::default());
-    };
-
-    let mut widget_config = WidgetConfig::default();
-
-    // Parent ID
-    if let Ok(pid) = cfg.get::<_, u64>("parentId") {
-        widget_config.parent_id = Some(pid);
-    }
-
-    // Layout
-    if let Ok(dir) = cfg.get::<_, u32>("direction") {
-        widget_config.direction = match dir {
-            0 => Some(FlexDirection::Row),
-            1 => Some(FlexDirection::Column),
-            2 => Some(FlexDirection::RowReverse),
-            3 => Some(FlexDirection::ColumnReverse),
-            _ => None,
-        };
-    }
-
-    if let Ok(jc) = cfg.get::<_, u32>("justifyContent") {
-        widget_config.justify_content = match jc {
-            0 => Some(JustifyContent::FlexStart),
-            1 => Some(JustifyContent::FlexEnd),
-            2 => Some(JustifyContent::Center),
-            3 => Some(JustifyContent::SpaceBetween),
-            4 => Some(JustifyContent::SpaceAround),
-            5 => Some(JustifyContent::SpaceEvenly),
-            _ => None,
-        };
-    }
-
-    if let Ok(ai) = cfg.get::<_, u32>("alignItems") {
-        widget_config.align_items = match ai {
-            0 => Some(AlignItems::Stretch),
-            1 => Some(AlignItems::FlexStart),
-            2 => Some(AlignItems::FlexEnd),
-            3 => Some(AlignItems::Center),
-            4 => Some(AlignItems::Baseline),
-            _ => None,
-        };
-    }
-
-    if let Ok(gap) = cfg.get::<_, f32>("gap") {
-        widget_config.gap = Some(gap);
-    }
-
-    // Dimensions
-    if let Ok(width) = cfg.get::<_, Value>("width") {
-        if !width.is_undefined() && !width.is_null() {
-            widget_config.width = Some(parse_size_value(ctx, &width)?);
-        }
-    }
-
-    if let Ok(height) = cfg.get::<_, Value>("height") {
-        if !height.is_undefined() && !height.is_null() {
-            widget_config.height = Some(parse_size_value(ctx, &height)?);
-        }
-    }
-
-    // Spacing
-    if let Ok(margin) = cfg.get::<_, Value>("margin") {
-        if !margin.is_undefined() && !margin.is_null() {
-            widget_config.margin = Some(parse_edge_insets(ctx, &margin)?);
-        }
-    }
-
-    if let Ok(padding) = cfg.get::<_, Value>("padding") {
-        if !padding.is_undefined() && !padding.is_null() {
-            widget_config.padding = Some(parse_edge_insets(ctx, &padding)?);
-        }
-    }
-
-    // Colors
-    if let Ok(bg_color) = cfg.get::<_, Value>("backgroundColor") {
-        if !bg_color.is_undefined() && !bg_color.is_null() {
-            widget_config.background_color = Some(parse_color(ctx, &bg_color)?);
-        }
-    }
-
-    if let Ok(font_color) = cfg.get::<_, Value>("fontColor") {
-        if !font_color.is_undefined() && !font_color.is_null() {
-            widget_config.font_color = Some(parse_color(ctx, &font_color)?);
-        }
-    }
-
-    if let Ok(hover_color) = cfg.get::<_, Value>("hoverColor") {
-        if !hover_color.is_undefined() && !hover_color.is_null() {
-            widget_config.hover_color = Some(parse_color(ctx, &hover_color)?);
-        }
-    }
-
-    if let Ok(pressed_color) = cfg.get::<_, Value>("pressedColor") {
-        if !pressed_color.is_undefined() && !pressed_color.is_null() {
-            widget_config.pressed_color = Some(parse_color(ctx, &pressed_color)?);
-        }
-    }
-
-    if let Ok(disabled_color) = cfg.get::<_, Value>("disabledColor") {
-        if !disabled_color.is_undefined() && !disabled_color.is_null() {
-            widget_config.disabled_color = Some(parse_color(ctx, &disabled_color)?);
-        }
-    }
-
-    // Text content
-    if let Ok(content) = cfg.get::<_, String>("content") {
-        widget_config.content = Some(content);
-    }
-
-    if let Ok(label) = cfg.get::<_, String>("label") {
-        widget_config.label = Some(label);
-    }
-
-    // Font configuration
-    if let Ok(font_obj) = cfg.get::<_, Object>("font") {
-        let mut font_config = FontConfig::default();
-        if let Ok(family) = font_obj.get::<_, String>("family") {
-            font_config.family = family;
-        }
-        if let Ok(size) = font_obj.get::<_, f32>("size") {
-            font_config.size = size;
-        }
-        widget_config.font = Some(font_config);
-    } else if let Ok(font_size) = cfg.get::<_, f32>("fontSize") {
-        let mut font_config = FontConfig::default();
-        font_config.size = font_size;
-        widget_config.font = Some(font_config);
-    }
-
-    // Opacity
-    if let Ok(opacity) = cfg.get::<_, f32>("opacity") {
-        widget_config.opacity = Some(opacity);
-    }
-
-    // Border
-    if let Ok(border_radius) = cfg.get::<_, f32>("borderRadius") {
-        widget_config.border_radius = Some(border_radius);
-    }
-
-    if let Ok(border_color) = cfg.get::<_, Value>("borderColor") {
-        if !border_color.is_undefined() && !border_color.is_null() {
-            widget_config.border_color = Some(parse_color(ctx, &border_color)?);
-        }
-    }
-
-    // Disabled state
-    if let Ok(disabled) = cfg.get::<_, bool>("disabled") {
-        widget_config.disabled = Some(disabled);
-    }
-
-    // Image configuration (for Image widget)
-    // Can be specified as:
-    // - { image: { resourceId: "alias", scaleMode: ImageScaleModes.Cover } }
-    // - { resourceId: "alias", scaleMode: ImageScaleModes.Cover } (shorthand)
-    let image_config = if let Ok(image_obj) = cfg.get::<_, Object>("image") {
-        // Full form: { image: { ... } }
-        Some(parse_image_config(ctx, &image_obj)?)
-    } else if cfg.get::<_, String>("resourceId").is_ok() || cfg.get::<_, String>("path").is_ok() {
-        // Shorthand: properties directly on widget config
-        Some(parse_image_config(ctx, &cfg)?)
-    } else {
-        None
-    };
-    widget_config.image = image_config;
-
-    Ok(widget_config)
-}
-
 /// Parse ImageConfig from JavaScript object
 fn parse_image_config<'js>(ctx: &Ctx<'js>, obj: &Object<'js>) -> rquickjs::Result<crate::api::graphic::ImageConfig> {
     use crate::api::graphic::{ImageConfig, ImageScaleMode};
@@ -3054,7 +2401,8 @@ fn parse_image_config<'js>(ctx: &Ctx<'js>, obj: &Object<'js>) -> rquickjs::Resul
 /// Setup graphic API in the JavaScript context
 ///
 /// Creates the `graphic` global object and `GraphicEngines` enum.
-/// Also defines the `WindowJS` and `WidgetJS` classes for instances.
+/// Also defines the `WindowJS` class for instances.
+/// Note: WidgetJS class has been removed. Use ECS API instead (World.spawn, entity.insert).
 ///
 /// # Arguments
 /// * `ctx` - The JavaScript context
@@ -3063,7 +2411,6 @@ pub fn setup_graphic_api(ctx: Ctx, graphic_proxy: Arc<GraphicProxy>) -> Result<(
     // Define classes
     rquickjs::Class::<GraphicJS>::define(&ctx.globals())?;
     rquickjs::Class::<WindowJS>::define(&ctx.globals())?;
-    rquickjs::Class::<WidgetJS>::define(&ctx.globals())?;
 
     // Create Graphic instance (capitalized for Staminal convention)
     let graphic_obj =
@@ -3090,14 +2437,7 @@ pub fn setup_graphic_api(ctx: Ctx, graphic_proxy: Arc<GraphicProxy>) -> Result<(
     window_modes.set("BorderlessFullscreen", WindowMode::BorderlessFullscreen.to_u32())?;
     ctx.globals().set("WindowModes", window_modes)?;
 
-    // Create WidgetTypes enum
-    let widget_types = Object::new(ctx.clone())?;
-    widget_types.set("Container", WidgetType::Container.to_u32())?;
-    widget_types.set("Text", WidgetType::Text.to_u32())?;
-    widget_types.set("Button", WidgetType::Button.to_u32())?;
-    widget_types.set("Image", WidgetType::Image.to_u32())?;
-    widget_types.set("Panel", WidgetType::Panel.to_u32())?;
-    ctx.globals().set("WidgetTypes", widget_types)?;
+    // Note: WidgetTypes enum removed - use ECS API with ComponentTypes instead
 
     // Create FlexDirection enum
     let flex_dirs = Object::new(ctx.clone())?;
@@ -3132,7 +2472,7 @@ pub fn setup_graphic_api(ctx: Ctx, graphic_proxy: Arc<GraphicProxy>) -> Result<(
     pos_type.set("Absolute", 1u32)?;
     ctx.globals().set("PositionType", pos_type)?;
 
-    // Create ImageScaleModes enum
+    // Create ImageScaleModes enum (legacy widget system - deprecated)
     // Maps to ImageScaleMode variants:
     // - Auto (0): Natural dimensions
     // - Stretch (1): Stretch to fill (ignores aspect ratio)
@@ -3148,6 +2488,19 @@ pub fn setup_graphic_api(ctx: Ctx, graphic_proxy: Arc<GraphicProxy>) -> Result<(
     scale_modes.set("Contain", 4u32)?;
     scale_modes.set("Cover", 5u32)?;
     ctx.globals().set("ImageScaleModes", scale_modes)?;
+
+    // Create NodeImageMode enum (for ECS ImageNode component)
+    // Maps to Bevy's NodeImageMode variants:
+    // - Auto (0): Image sized automatically based on source image size
+    // - Stretch (1): Image stretched to match node size (ignores aspect ratio)
+    // - Sliced (2): 9-slice scaling for UI panels
+    // - Tiled (3): Image repeats as a pattern
+    let node_image_mode = Object::new(ctx.clone())?;
+    node_image_mode.set("Auto", 0u32)?;
+    node_image_mode.set("Stretch", 1u32)?;
+    node_image_mode.set("Sliced", 2u32)?;
+    node_image_mode.set("Tiled", 3u32)?;
+    ctx.globals().set("NodeImageMode", node_image_mode)?;
 
     Ok(())
 }

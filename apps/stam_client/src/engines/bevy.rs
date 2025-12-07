@@ -15,9 +15,8 @@ use tokio::sync::mpsc::Sender;
 use stam_mod_runtimes::api::{
     ColorValue, EdgeInsets, FlexDirection, GraphicCommand, GraphicEngine, GraphicEngineInfo,
     GraphicEngines, GraphicEvent, InitialWindowConfig, JustifyContent, KeyModifiers, MouseButton,
-    PropertyValue, SizeValue, WidgetConfig, WidgetEventType, WidgetType, WindowPositionMode,
-    AlignItems, WindowMode as StamWindowMode, ResourceType, ResourceState, ResourceInfo,
-    ImageScaleMode, ImageSource,
+    SizeValue, WindowPositionMode, AlignItems, WindowMode as StamWindowMode,
+    ResourceType, ResourceState, ResourceInfo, ImageScaleMode, ImageSource,
     graphic::ecs::{ComponentSchema, DeclaredSystem, QueryOptions, QueryResult, FieldType, SystemBehavior},
 };
 
@@ -117,7 +116,7 @@ impl GraphicEngine for BevyEngine {
         app.insert_non_send_resource(CommandReceiverRes(Mutex::new(command_rx)));
         app.insert_resource(EventSenderRes(event_tx.clone()));
         app.insert_resource(WindowRegistry::default());
-        app.insert_resource(WidgetRegistry::default());
+        app.insert_resource(WindowUIRegistry::default());
         app.insert_resource(FontRegistry::default());
         app.insert_resource(ResourceRegistry::default());
         app.insert_resource(PendingAssetRegistry::default());
@@ -167,7 +166,6 @@ impl GraphicEngine for BevyEngine {
                 handle_keyboard_input,
                 handle_mouse_input,
                 handle_window_events,
-                handle_widget_interactions,
                 handle_script_entity_interactions,
                 apply_script_button_colors,
                 apply_disabled_button_colors,
@@ -305,42 +303,19 @@ impl WindowRegistry {
 // Widget System Resources and Components
 // ============================================================================
 
-/// Registry mapping widget IDs to Bevy Entities
+/// Registry for window UI infrastructure (cameras and root nodes)
+///
+/// Note: The legacy widget system has been removed. Use the ECS API instead.
+/// This registry now only manages cameras and root UI nodes for each window.
 #[derive(Resource, Default)]
-struct WidgetRegistry {
-    /// Map from widget ID to Bevy Entity
-    id_to_entity: HashMap<u64, Entity>,
-    /// Map from Bevy Entity to widget ID
-    entity_to_id: HashMap<Entity, u64>,
+struct WindowUIRegistry {
     /// Root UI nodes for each window (window_id -> root node entity)
     window_roots: HashMap<u64, Entity>,
     /// Camera entities for each window (window_id -> camera entity)
     window_cameras: HashMap<u64, Entity>,
 }
 
-impl WidgetRegistry {
-    fn register(&mut self, id: u64, entity: Entity) {
-        self.id_to_entity.insert(id, entity);
-        self.entity_to_id.insert(entity, id);
-    }
-
-    fn unregister(&mut self, id: u64) -> Option<Entity> {
-        if let Some(entity) = self.id_to_entity.remove(&id) {
-            self.entity_to_id.remove(&entity);
-            Some(entity)
-        } else {
-            None
-        }
-    }
-
-    fn get_entity(&self, id: u64) -> Option<Entity> {
-        self.id_to_entity.get(&id).copied()
-    }
-
-    fn get_id(&self, entity: Entity) -> Option<u64> {
-        self.entity_to_id.get(&entity).copied()
-    }
-
+impl WindowUIRegistry {
     fn set_window_root(&mut self, window_id: u64, root_entity: Entity) {
         self.window_roots.insert(window_id, root_entity);
     }
@@ -366,24 +341,7 @@ impl WidgetRegistry {
     }
 }
 
-/// Marker component for Staminal widgets
-#[derive(Component)]
-struct StamWidget {
-    /// Unique widget ID
-    id: u64,
-    /// Parent window ID
-    window_id: u64,
-    /// Widget type
-    widget_type: WidgetType,
-}
-
-/// Component tracking which events this widget is subscribed to
-#[derive(Component, Default)]
-struct WidgetEventSubscriptions {
-    on_click: bool,
-    on_hover: bool,
-    on_focus: bool,
-}
+// Note: StamWidget and WidgetEventSubscriptions removed - use ECS API with ScriptEntity instead
 
 /// Component for button color states
 #[derive(Component)]
@@ -901,6 +859,8 @@ enum NativeComponent {
     Interaction,
     /// Button marker component for clickable UI elements
     Button,
+    /// ImageNode component for UI image rendering
+    ImageNode,
 }
 
 impl NativeComponent {
@@ -916,6 +876,7 @@ impl NativeComponent {
             NativeComponent::BorderRadius => "BorderRadius",
             NativeComponent::Interaction => "Interaction",
             NativeComponent::Button => "Button",
+            NativeComponent::ImageNode => "ImageNode",
         }
     }
 
@@ -931,6 +892,7 @@ impl NativeComponent {
             "BorderRadius" => Some(NativeComponent::BorderRadius),
             "Interaction" => Some(NativeComponent::Interaction),
             "Button" => Some(NativeComponent::Button),
+            "ImageNode" => Some(NativeComponent::ImageNode),
             _ => None,
         }
     }
@@ -1636,6 +1598,200 @@ mod native_component_converters {
             Ok(bevy::ui::widget::Button)
         }
     }
+
+    /// ImageNode configuration from JSON
+    ///
+    /// Expected format:
+    /// ```json
+    /// {
+    ///   "resource_id": "my-image-alias",  // Required: alias from Resource.load()
+    ///   "image_mode": 0,                  // Optional: NodeImageMode enum value (0=Auto, 1=Stretch, 2=Sliced, 3=Tiled)
+    ///   "flip_x": false,                  // Optional: horizontal flip
+    ///   "flip_y": false,                  // Optional: vertical flip
+    ///   "color": "#FFFFFF"                // Optional: tint color
+    /// }
+    /// ```
+    pub struct ImageNodeConfig {
+        pub resource_id: String,
+        pub image_mode: bevy::ui::widget::NodeImageMode,
+        pub flip_x: bool,
+        pub flip_y: bool,
+        pub color: Option<Color>,
+    }
+
+    /// Parse NodeImageMode from JSON value
+    /// Accepts: number (0-3), string ("auto", "stretch", "sliced", "tiled"), or object with mode config
+    pub fn parse_node_image_mode(json: &Value) -> Result<bevy::ui::widget::NodeImageMode, String> {
+        // Handle number
+        if let Some(n) = json.as_u64() {
+            return match n {
+                0 => Ok(bevy::ui::widget::NodeImageMode::Auto),
+                1 => Ok(bevy::ui::widget::NodeImageMode::Stretch),
+                2 => {
+                    // Sliced with default values
+                    Ok(bevy::ui::widget::NodeImageMode::Sliced(bevy::sprite::TextureSlicer::default()))
+                }
+                3 => {
+                    // Tiled with default values
+                    Ok(bevy::ui::widget::NodeImageMode::Tiled {
+                        tile_x: true,
+                        tile_y: true,
+                        stretch_value: 1.0,
+                    })
+                }
+                _ => Err(format!("Invalid image_mode: {}. Use 0=Auto, 1=Stretch, 2=Sliced, 3=Tiled", n)),
+            };
+        }
+
+        // Handle string
+        if let Some(s) = json.as_str() {
+            return match s.to_lowercase().as_str() {
+                "auto" => Ok(bevy::ui::widget::NodeImageMode::Auto),
+                "stretch" => Ok(bevy::ui::widget::NodeImageMode::Stretch),
+                "sliced" => Ok(bevy::ui::widget::NodeImageMode::Sliced(bevy::sprite::TextureSlicer::default())),
+                "tiled" => Ok(bevy::ui::widget::NodeImageMode::Tiled {
+                    tile_x: true,
+                    tile_y: true,
+                    stretch_value: 1.0,
+                }),
+                _ => Err(format!("Invalid image_mode: '{}'. Use 'auto', 'stretch', 'sliced', or 'tiled'", s)),
+            };
+        }
+
+        // Handle object for detailed configuration
+        if let Some(obj) = json.as_object() {
+            if let Some(mode_type) = obj.get("type").and_then(|v| v.as_str()) {
+                return match mode_type.to_lowercase().as_str() {
+                    "auto" => Ok(bevy::ui::widget::NodeImageMode::Auto),
+                    "stretch" => Ok(bevy::ui::widget::NodeImageMode::Stretch),
+                    "sliced" => {
+                        // Parse TextureSlicer configuration
+                        let border = obj.get("border").and_then(|b| b.as_object());
+                        let top = border.and_then(|b| b.get("top")).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                        let right = border.and_then(|b| b.get("right")).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                        let bottom = border.and_then(|b| b.get("bottom")).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                        let left = border.and_then(|b| b.get("left")).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+
+                        Ok(bevy::ui::widget::NodeImageMode::Sliced(bevy::sprite::TextureSlicer {
+                            border: bevy::sprite::BorderRect { top, right, bottom, left },
+                            center_scale_mode: bevy::sprite::SliceScaleMode::Stretch,
+                            sides_scale_mode: bevy::sprite::SliceScaleMode::Stretch,
+                            max_corner_scale: 1.0,
+                        }))
+                    }
+                    "tiled" => {
+                        let tile_x = obj.get("tile_x").and_then(|v| v.as_bool()).unwrap_or(true);
+                        let tile_y = obj.get("tile_y").and_then(|v| v.as_bool()).unwrap_or(true);
+                        let stretch_value = obj.get("stretch_value").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+
+                        Ok(bevy::ui::widget::NodeImageMode::Tiled {
+                            tile_x,
+                            tile_y,
+                            stretch_value,
+                        })
+                    }
+                    _ => Err(format!("Invalid image_mode type: '{}'. Use 'auto', 'stretch', 'sliced', or 'tiled'", mode_type)),
+                };
+            }
+        }
+
+        // Default to Auto
+        Ok(bevy::ui::widget::NodeImageMode::Auto)
+    }
+
+    /// Parse ImageNode configuration from JSON
+    pub fn json_to_image_node_config(json: &Value) -> Result<ImageNodeConfig, String> {
+        let obj = json.as_object().ok_or("ImageNode must be an object")?;
+
+        // resource_id is required
+        let resource_id = obj
+            .get("resource_id")
+            .and_then(|v| v.as_str())
+            .ok_or("ImageNode requires 'resource_id' field")?
+            .to_string();
+
+        // Parse image_mode (optional, defaults to Auto)
+        let image_mode = if let Some(mode_val) = obj.get("image_mode") {
+            parse_node_image_mode(mode_val)?
+        } else {
+            bevy::ui::widget::NodeImageMode::Auto
+        };
+
+        // Parse flip options
+        let flip_x = obj.get("flip_x").and_then(|v| v.as_bool()).unwrap_or(false);
+        let flip_y = obj.get("flip_y").and_then(|v| v.as_bool()).unwrap_or(false);
+
+        // Parse color/tint
+        let color = if let Some(color_val) = obj.get("color") {
+            Some(parse_color_value(color_val)?)
+        } else {
+            None
+        };
+
+        Ok(ImageNodeConfig {
+            resource_id,
+            image_mode,
+            flip_x,
+            flip_y,
+            color,
+        })
+    }
+
+    /// Parse color value from JSON (hex string or {r,g,b,a} object)
+    fn parse_color_value(json: &Value) -> Result<Color, String> {
+        if let Some(s) = json.as_str() {
+            // Parse hex color
+            let s = s.trim_start_matches('#');
+            match s.len() {
+                6 => {
+                    let r = u8::from_str_radix(&s[0..2], 16).map_err(|_| "Invalid hex color")?;
+                    let g = u8::from_str_radix(&s[2..4], 16).map_err(|_| "Invalid hex color")?;
+                    let b = u8::from_str_radix(&s[4..6], 16).map_err(|_| "Invalid hex color")?;
+                    Ok(Color::srgba(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0))
+                }
+                8 => {
+                    let r = u8::from_str_radix(&s[0..2], 16).map_err(|_| "Invalid hex color")?;
+                    let g = u8::from_str_radix(&s[2..4], 16).map_err(|_| "Invalid hex color")?;
+                    let b = u8::from_str_radix(&s[4..6], 16).map_err(|_| "Invalid hex color")?;
+                    let a = u8::from_str_radix(&s[6..8], 16).map_err(|_| "Invalid hex color")?;
+                    Ok(Color::srgba(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, a as f32 / 255.0))
+                }
+                _ => Err("Hex color must be 6 or 8 characters".to_string()),
+            }
+        } else if let Some(obj) = json.as_object() {
+            let r = obj.get("r").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            let g = obj.get("g").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            let b = obj.get("b").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            let a = obj.get("a").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
+            Ok(Color::srgba(r, g, b, a))
+        } else {
+            Err("Color must be hex string or {r,g,b,a} object".to_string())
+        }
+    }
+
+    /// Convert ImageNode component to JSON
+    pub fn image_node_to_json(image_node: &bevy::ui::widget::ImageNode) -> Value {
+        let image_mode = match image_node.image_mode {
+            bevy::ui::widget::NodeImageMode::Auto => "auto",
+            bevy::ui::widget::NodeImageMode::Stretch => "stretch",
+            bevy::ui::widget::NodeImageMode::Sliced(_) => "sliced",
+            bevy::ui::widget::NodeImageMode::Tiled { .. } => "tiled",
+        };
+
+        let rgba = image_node.color.to_srgba().to_f32_array();
+
+        json!({
+            "image_mode": image_mode,
+            "flip_x": image_node.flip_x,
+            "flip_y": image_node.flip_y,
+            "color": {
+                "r": rgba[0],
+                "g": rgba[1],
+                "b": rgba[2],
+                "a": rgba[3]
+            }
+        })
+    }
 }
 
 /// Component to store inherited font config on widgets
@@ -1691,7 +1847,7 @@ fn process_commands(
     mut commands: Commands,
     mut registries: (
         ResMut<WindowRegistry>,
-        ResMut<WidgetRegistry>,
+        ResMut<WindowUIRegistry>,
         ResMut<FontRegistry>,
         ResMut<ResourceRegistry>,
         ResMut<PendingAssetRegistry>,
@@ -1730,16 +1886,17 @@ fn process_commands(
         Query<&mut BorderRadius, With<ScriptEntity>>,
         Query<&Interaction, With<ScriptEntity>>,
         Query<&bevy::ui::widget::Button, With<ScriptEntity>>,
+        Query<&bevy::ui::widget::ImageNode, With<ScriptEntity>>,
     ),
     // Query for ScriptButtonColors (pseudo-components for button state colors)
     mut button_colors_query: Query<&mut ScriptButtonColors, With<ScriptEntity>>,
 ) {
     let (cmd_rx, event_tx) = channels;
-    let (registry, widget_registry, font_registry, resource_registry, pending_assets) = &mut registries;
+    let (registry, window_ui_registry, font_registry, resource_registry, pending_assets) = &mut registries;
     let (script_entity_registry, script_component_registry, declared_system_registry, entity_event_callback_registry) = &mut ecs_registries;
     let (text_query, bg_color_query, node_query, text_color_query, button_query) = &mut widget_queries;
     let (transform_query, sprite_query, visibility_query) = &mut native_queries;
-    let (ecs_node_query, ecs_bg_color_query, ecs_text_query, ecs_border_radius_query, ecs_interaction_query, ecs_button_query) = &mut ui_queries;
+    let (ecs_node_query, ecs_bg_color_query, ecs_text_query, ecs_border_radius_query, ecs_interaction_query, ecs_button_query, ecs_image_node_query) = &mut ui_queries;
     // Lock the receiver and process all available commands (non-blocking)
     let receiver = match cmd_rx.0.lock() {
         Ok(r) => r,
@@ -1798,7 +1955,7 @@ fn process_commands(
                         ..default()
                     },
                 )).id();
-                widget_registry.set_window_camera(id, camera_entity);
+                window_ui_registry.set_window_camera(id, camera_entity);
                 tracing::debug!("Created camera {:?} for window {}", camera_entity, id);
 
                 // Create root UI node for this window
@@ -1812,7 +1969,7 @@ fn process_commands(
                     },
                     UiTargetCamera(camera_entity),
                 )).id();
-                widget_registry.set_window_root(id, root);
+                window_ui_registry.set_window_root(id, root);
                 tracing::debug!("Created root UI node {:?} for window {}", root, id);
 
                 let _ = response_tx.send(Ok(()));
@@ -1827,14 +1984,14 @@ fn process_commands(
                 if let Some(entity) = registry.unregister(id) {
                     // Cleanup window-associated resources
                     // Remove and despawn the camera for this window
-                    if let Some(camera_entity) = widget_registry.remove_window_camera(id) {
+                    if let Some(camera_entity) = window_ui_registry.remove_window_camera(id) {
                         commands.entity(camera_entity).despawn();
                         tracing::debug!("Despawned camera {:?} for window {}", camera_entity, id);
                     }
 
                     // Remove and despawn the root UI node for this window (and all children)
                     // Note: In Bevy 0.17+, despawn() automatically despawns descendants
-                    if let Some(root_entity) = widget_registry.remove_window_root(id) {
+                    if let Some(root_entity) = window_ui_registry.remove_window_root(id) {
                         commands.entity(root_entity).despawn();
                         tracing::debug!("Despawned root UI node {:?} for window {}", root_entity, id);
                     }
@@ -1963,268 +2120,6 @@ fn process_commands(
                     supports_audio: false,
                 };
                 let _ = response_tx.send(info);
-            }
-
-            // ================================================================
-            // Widget Commands
-            // ================================================================
-            GraphicCommand::CreateWidget {
-                window_id,
-                widget_id,
-                parent_id,
-                widget_type,
-                config,
-                response_tx,
-            } => {
-                // tracing::debug!(
-                //     "Creating widget {} (type: {:?}) in window {}",
-                //     widget_id,
-                //     widget_type,
-                //     window_id
-                // );
-
-                // Ensure window has a camera for UI rendering
-                let camera_entity = if let Some(camera) = widget_registry.get_window_camera(window_id) {
-                    camera
-                } else {
-                    // Create a camera for this window
-                    // We need to find the window entity first to set TargetCamera
-                    let window_entity = registry.get_entity(window_id);
-
-                    let camera = if let Some(win_entity) = window_entity {
-                        // Create camera targeting this specific window
-                        commands.spawn((
-                            Camera2d,
-                            Camera {
-                                target: RenderTarget::Window(WindowRef::Entity(win_entity)),
-                                ..default()
-                            },
-                        )).id()
-                    } else {
-                        // Fallback: create default camera (shouldn't normally happen)
-                        tracing::warn!("Window {} entity not found, creating default camera", window_id);
-                        commands.spawn(Camera2d).id()
-                    };
-
-                    widget_registry.set_window_camera(window_id, camera);
-                    tracing::debug!("Created camera {:?} for window {}", camera, window_id);
-                    camera
-                };
-
-                // Ensure window has a root UI node
-                let root_entity = if let Some(root) = widget_registry.get_window_root(window_id) {
-                    root
-                } else {
-                    // Create root UI node for this window
-                    // This root node fills the entire window and acts as the base for all UI
-                    let mut root_cmd = commands.spawn((
-                        Node {
-                            width: Val::Percent(100.0),
-                            height: Val::Percent(100.0),
-                            flex_direction: bevy::ui::FlexDirection::Column,
-                            justify_content: bevy::ui::JustifyContent::FlexStart,
-                            align_items: bevy::ui::AlignItems::Stretch,
-                            ..default()
-                        },
-                    ));
-
-                    // Associate root UI node with the window's camera
-                    root_cmd.insert(UiTargetCamera(camera_entity));
-                    tracing::debug!(
-                        "Root UI node associated with camera {:?}",
-                        camera_entity
-                    );
-
-                    let root = root_cmd.id();
-                    widget_registry.set_window_root(window_id, root);
-                    tracing::debug!("Created root UI node for window {}", window_id);
-                    root
-                };
-
-                // Determine parent entity
-                let parent_entity = match parent_id {
-                    Some(pid) => widget_registry.get_entity(pid).unwrap_or(root_entity),
-                    None => root_entity,
-                };
-
-                // Create widget entity based on type
-                // For now, we pass None for parent_font since we don't track parent widget's font
-                // A full implementation would query the parent entity's WidgetFontConfig
-                let widget_entity = create_widget_entity(
-                    &mut commands,
-                    widget_id,
-                    window_id,
-                    widget_type,
-                    &config,
-                    parent_entity,
-                    &font_registry,
-                    &resource_registry,
-                    None, // TODO: Get parent widget's effective font config
-                );
-
-                widget_registry.register(widget_id, widget_entity);
-                let _ = response_tx.send(Ok(()));
-
-                // Send widget created event
-                let _ = event_tx.0.try_send(GraphicEvent::WidgetCreated {
-                    window_id,
-                    widget_id,
-                    widget_type,
-                });
-            }
-
-            GraphicCommand::UpdateWidgetProperty {
-                widget_id,
-                property,
-                value,
-                response_tx,
-            } => {
-                if let Some(entity) = widget_registry.get_entity(widget_id) {
-                    let result = update_widget_property(
-                        entity,
-                        &property,
-                        &value,
-                        text_query,
-                        bg_color_query,
-                        node_query,
-                        text_color_query,
-                        button_query,
-                        &mut commands,
-                    );
-                    let _ = response_tx.send(result);
-                } else {
-                    let _ = response_tx.send(Err(format!("Widget {} not found", widget_id)));
-                }
-            }
-
-            GraphicCommand::UpdateWidgetConfig {
-                widget_id,
-                config,
-                response_tx,
-            } => {
-                if let Some(entity) = widget_registry.get_entity(widget_id) {
-                    // Update multiple properties from config
-                    let mut errors = Vec::new();
-
-                    if let Some(ref content) = config.content {
-                        if let Err(e) = update_widget_property(
-                            entity,
-                            "content",
-                            &PropertyValue::String(content.clone()),
-                            text_query,
-                            bg_color_query,
-                            node_query,
-                            text_color_query,
-                            button_query,
-                            &mut commands,
-                        ) {
-                            errors.push(e);
-                        }
-                    }
-
-                    if let Some(ref color) = config.background_color {
-                        if let Err(e) = update_widget_property(
-                            entity,
-                            "backgroundColor",
-                            &PropertyValue::Color(color.clone()),
-                            text_query,
-                            bg_color_query,
-                            node_query,
-                            text_color_query,
-                            button_query,
-                            &mut commands,
-                        ) {
-                            errors.push(e);
-                        }
-                    }
-
-                    if errors.is_empty() {
-                        let _ = response_tx.send(Ok(()));
-                    } else {
-                        let _ = response_tx.send(Err(errors.join("; ")));
-                    }
-                } else {
-                    let _ = response_tx.send(Err(format!("Widget {} not found", widget_id)));
-                }
-            }
-
-            GraphicCommand::DestroyWidget {
-                widget_id,
-                response_tx,
-            } => {
-                if let Some(entity) = widget_registry.unregister(widget_id) {
-                    commands.entity(entity).despawn();
-                    let _ = response_tx.send(Ok(()));
-
-                    // Note: We'd need to track window_id to send proper event
-                    // For now, use window_id 0
-                    let _ = event_tx.0.try_send(GraphicEvent::WidgetDestroyed {
-                        window_id: 0,
-                        widget_id,
-                    });
-                } else {
-                    let _ = response_tx.send(Err(format!("Widget {} not found", widget_id)));
-                }
-            }
-
-            GraphicCommand::ReparentWidget {
-                widget_id,
-                new_parent_id,
-                response_tx,
-            } => {
-                if let Some(widget_entity) = widget_registry.get_entity(widget_id) {
-                    let new_parent = match new_parent_id {
-                        Some(pid) => widget_registry.get_entity(pid),
-                        None => {
-                            // Get window root - we'd need to track which window this widget belongs to
-                            // For simplicity, just use the first window root
-                            widget_registry.window_roots.values().next().copied()
-                        }
-                    };
-
-                    if let Some(parent_entity) = new_parent {
-                        commands.entity(widget_entity).insert(ChildOf(parent_entity));
-                        let _ = response_tx.send(Ok(()));
-                    } else {
-                        let _ = response_tx.send(Err("Parent widget not found".to_string()));
-                    }
-                } else {
-                    let _ = response_tx.send(Err(format!("Widget {} not found", widget_id)));
-                }
-            }
-
-            GraphicCommand::ClearWindowWidgets {
-                window_id,
-                response_tx,
-            } => {
-                // Remove root node for this window (despawn will also remove all children)
-                if let Some(root_entity) = widget_registry.window_roots.remove(&window_id) {
-                    commands.entity(root_entity).despawn();
-                }
-
-                // Remove all widgets that belong to this window from registry
-                // Note: This requires tracking window_id in widget registry
-                // For now, just clear the root
-                let _ = response_tx.send(Ok(()));
-            }
-
-            GraphicCommand::SubscribeWidgetEvents {
-                widget_id,
-                event_types,
-                response_tx,
-            } => {
-                // Widget event subscriptions are tracked on the GraphicProxy side
-                // We just acknowledge the command here
-                // In a more sophisticated implementation, we'd update the WidgetEventSubscriptions component
-                let _ = response_tx.send(Ok(()));
-            }
-
-            GraphicCommand::UnsubscribeWidgetEvents {
-                widget_id,
-                event_types,
-                response_tx,
-            } => {
-                let _ = response_tx.send(Ok(()));
             }
 
             // ================================================================
@@ -2636,7 +2531,7 @@ fn process_commands(
                                             .and_then(|alias| font_registry.get_font(alias))
                                             .or_else(|| {
                                                 // Try to get window's default font
-                                                widget_registry.window_roots.keys().next()
+                                                window_ui_registry.window_roots.keys().next()
                                                     .and_then(|&window_id| {
                                                         let window_font = font_registry.get_window_font(window_id);
                                                         font_registry.get_font(&window_font.family)
@@ -2699,6 +2594,32 @@ fn process_commands(
                                     }
                                 }
                             }
+                            NativeComponent::ImageNode => {
+                                match json_to_image_node_config(&component_data) {
+                                    Ok(config) => {
+                                        tracing::debug!("ImageNode config: resource='{}', image_mode={:?}, flip_x={}, flip_y={}",
+                                            config.resource_id, config.image_mode, config.flip_x, config.flip_y);
+                                        // Look up the image handle from the resource registry
+                                        if let Some(image_handle) = resource_registry.get_image_handle(&config.resource_id) {
+                                            let mut image_node = bevy::ui::widget::ImageNode::new(image_handle);
+                                            image_node.image_mode = config.image_mode;
+                                            image_node.flip_x = config.flip_x;
+                                            image_node.flip_y = config.flip_y;
+                                            if let Some(color) = config.color {
+                                                image_node.color = color;
+                                            }
+                                            entity_commands.insert(image_node);
+                                            is_ui_entity = true;  // Mark as UI entity
+                                            tracing::debug!("Added native ImageNode component to entity {} with resource '{}'", script_id, config.resource_id);
+                                        } else {
+                                            tracing::warn!("Resource '{}' not found in registry. Make sure to call Resource.load() first.", config.resource_id);
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to create ImageNode component: {}", e);
+                                    }
+                                }
+                            }
                         }
                     } else {
                         // Custom script component
@@ -2756,8 +2677,8 @@ fn process_commands(
                     }
                 } else if is_ui_entity {
                     // No explicit parent but this is a UI entity - parent to window root
-                    if let Some(main_window_id) = widget_registry.window_roots.keys().next().copied() {
-                        if let Some(root_entity) = widget_registry.get_window_root(main_window_id) {
+                    if let Some(main_window_id) = window_ui_registry.window_roots.keys().next().copied() {
+                        if let Some(root_entity) = window_ui_registry.get_window_root(main_window_id) {
                             commands.entity(entity).insert(ChildOf(root_entity));
                             tracing::debug!(
                                 "UI entity {} parented to window {} root {:?}",
@@ -2865,7 +2786,7 @@ fn process_commands(
                                     .and_then(|alias| font_registry.get_font(alias))
                                     .or_else(|| {
                                         // Try to get window's default font
-                                        widget_registry.window_roots.keys().next()
+                                        window_ui_registry.window_roots.keys().next()
                                             .and_then(|&window_id| {
                                                 let window_font = font_registry.get_window_font(window_id);
                                                 font_registry.get_font(&window_font.family)
@@ -2903,6 +2824,22 @@ fn process_commands(
                                 let button = json_to_button(&component_data)?;
                                 commands.entity(entity).insert(button);
                                 tracing::debug!("Inserted native Button on entity {}", entity_id);
+                            }
+                            NativeComponent::ImageNode => {
+                                let config = json_to_image_node_config(&component_data)?;
+                                if let Some(image_handle) = resource_registry.get_image_handle(&config.resource_id) {
+                                    let mut image_node = bevy::ui::widget::ImageNode::new(image_handle);
+                                    image_node.image_mode = config.image_mode;
+                                    image_node.flip_x = config.flip_x;
+                                    image_node.flip_y = config.flip_y;
+                                    if let Some(color) = config.color {
+                                        image_node.color = color;
+                                    }
+                                    commands.entity(entity).insert(image_node);
+                                    tracing::debug!("Inserted/Updated native ImageNode on entity {} with resource '{}'", entity_id, config.resource_id);
+                                } else {
+                                    return Err(format!("Resource '{}' not found. Make sure to call Resource.load() first.", config.resource_id));
+                                }
                             }
                         }
                         return Ok(());
@@ -3175,6 +3112,11 @@ fn process_commands(
                                 tracing::debug!("Removed native Button from entity {}", entity_id);
                                 return Ok(());
                             }
+                            NativeComponent::ImageNode => {
+                                commands.entity(entity).remove::<bevy::ui::widget::ImageNode>();
+                                tracing::debug!("Removed native ImageNode from entity {}", entity_id);
+                                return Ok(());
+                            }
                         }
                         return Err(format!(
                             "Native component '{}' not found on entity {}",
@@ -3269,6 +3211,11 @@ fn process_commands(
                                     return Ok(Some(serde_json::json!(true)));
                                 }
                             }
+                            NativeComponent::ImageNode => {
+                                if let Ok(image_node) = ecs_image_node_query.get(entity) {
+                                    return Ok(Some(image_node_to_json(&image_node)));
+                                }
+                            }
                         }
                         return Ok(None);
                     }
@@ -3327,6 +3274,9 @@ fn process_commands(
                             }
                             NativeComponent::Button => {
                                 return Ok(ecs_button_query.get(entity).is_ok());
+                            }
+                            NativeComponent::ImageNode => {
+                                return Ok(ecs_image_node_query.get(entity).is_ok());
                             }
                         }
                     }
@@ -3492,713 +3442,8 @@ fn process_commands(
     }
 }
 
-/// Create a widget entity based on type
-fn create_widget_entity(
-    commands: &mut Commands,
-    widget_id: u64,
-    window_id: u64,
-    widget_type: WidgetType,
-    config: &WidgetConfig,
-    parent_entity: Entity,
-    font_registry: &FontRegistry,
-    resource_registry: &ResourceRegistry,
-    parent_font: Option<&InheritedFontConfig>,
-) -> Entity {
-    // Resolve font configuration with inheritance
-    // Priority: widget config > parent widget > window default > global default
-    let window_font = font_registry.get_window_font(window_id);
-    let base_font = parent_font.unwrap_or(&window_font);
-
-    // Build widget's font config from config.font
-    let widget_font_config = WidgetFontConfig {
-        family: config.font.as_ref().and_then(|f| {
-            if f.family.is_empty() || f.family == "default" {
-                None
-            } else {
-                Some(f.family.clone())
-            }
-        }),
-        size: config.font.as_ref().map(|f| f.size),
-    };
-
-    // Resolve the effective font for this widget
-    let effective_font = widget_font_config.resolve(base_font);
-
-    // Get the font handle (if loaded), or None for default
-    let font_handle = font_registry.get_font(&effective_font.family);
-
-    // Build base Node component from config
-    let mut node = Node::default();
-
-    // Apply dimensions
-    if let Some(ref width) = config.width {
-        node.width = size_value_to_val(width);
-    }
-    if let Some(ref height) = config.height {
-        node.height = size_value_to_val(height);
-    }
-
-    // Apply layout
-    if let Some(ref direction) = config.direction {
-        node.flex_direction = match direction {
-            FlexDirection::Row => bevy::ui::FlexDirection::Row,
-            FlexDirection::Column => bevy::ui::FlexDirection::Column,
-            FlexDirection::RowReverse => bevy::ui::FlexDirection::RowReverse,
-            FlexDirection::ColumnReverse => bevy::ui::FlexDirection::ColumnReverse,
-        };
-    }
-
-    if let Some(ref justify) = config.justify_content {
-        node.justify_content = match justify {
-            JustifyContent::Default => bevy::ui::JustifyContent::Default,
-            JustifyContent::FlexStart => bevy::ui::JustifyContent::FlexStart,
-            JustifyContent::FlexEnd => bevy::ui::JustifyContent::FlexEnd,
-            JustifyContent::Center => bevy::ui::JustifyContent::Center,
-            JustifyContent::SpaceBetween => bevy::ui::JustifyContent::SpaceBetween,
-            JustifyContent::SpaceAround => bevy::ui::JustifyContent::SpaceAround,
-            JustifyContent::SpaceEvenly => bevy::ui::JustifyContent::SpaceEvenly,
-            JustifyContent::Stretch => bevy::ui::JustifyContent::Stretch,
-            JustifyContent::Start => bevy::ui::JustifyContent::Start,
-            JustifyContent::End => bevy::ui::JustifyContent::End,
-        };
-    }
-
-    if let Some(ref align) = config.align_items {
-        node.align_items = match align {
-            AlignItems::Default => bevy::ui::AlignItems::Default,
-            AlignItems::Stretch => bevy::ui::AlignItems::Stretch,
-            AlignItems::FlexStart => bevy::ui::AlignItems::FlexStart,
-            AlignItems::FlexEnd => bevy::ui::AlignItems::FlexEnd,
-            AlignItems::Center => bevy::ui::AlignItems::Center,
-            AlignItems::Baseline => bevy::ui::AlignItems::Baseline,
-            AlignItems::Start => bevy::ui::AlignItems::Start,
-            AlignItems::End => bevy::ui::AlignItems::End,
-        };
-    }
-
-    // Apply spacing
-    if let Some(ref margin) = config.margin {
-        node.margin = edge_insets_to_ui_rect(margin);
-    }
-    if let Some(ref padding) = config.padding {
-        node.padding = edge_insets_to_ui_rect(padding);
-    }
-    if let Some(gap) = config.gap {
-        node.row_gap = Val::Px(gap);
-        node.column_gap = Val::Px(gap);
-    }
-
-    // Create widget based on type
-    match widget_type {
-        WidgetType::Container => {
-            // For containers, ensure we have a default flex direction if not specified
-            let mut container_node = node;
-            if config.direction.is_none() {
-                container_node.flex_direction = bevy::ui::FlexDirection::Column;
-            }
-            if config.align_items.is_none() {
-                container_node.align_items = bevy::ui::AlignItems::Stretch;
-            }
-            // Ensure containers without explicit dimensions can still contain children
-            // by using Auto sizing which allows growth based on content
-            if config.width.is_none() {
-                container_node.width = Val::Auto;
-            }
-            if config.height.is_none() {
-                container_node.height = Val::Auto;
-            }
-
-            let mut entity_cmd = commands.spawn((
-                container_node,
-                StamWidget {
-                    id: widget_id,
-                    window_id,
-                    widget_type,
-                },
-                WidgetEventSubscriptions::default(),
-            ));
-
-            if let Some(ref color) = config.background_color {
-                entity_cmd.insert(BackgroundColor(color_value_to_bevy(color)));
-            }
-
-            // Apply border radius if specified
-            if let Some(radius) = config.border_radius {
-                entity_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
-            }
-
-            entity_cmd.insert(ChildOf(parent_entity));
-            entity_cmd.id()
-        }
-
-        WidgetType::Text => {
-            let content = config.content.clone().unwrap_or_default();
-            // Use effective_font which has inheritance applied
-            let font_size = effective_font.size;
-            let color = config
-                .font_color
-                .as_ref()
-                .map(color_value_to_bevy)
-                .unwrap_or(Color::WHITE);
-
-            // tracing::debug!(
-            //     "Creating Text widget: content='{}', font='{}', font_size={}, color={:?}, parent={:?}",
-            //     content,
-            //     effective_font.family,
-            //     font_size,
-            //     color,
-            //     parent_entity
-            // );
-
-            // In Bevy 0.15, Text UI needs a properly configured Node for layout
-            // Use the node from config (which may have width/height) or create one with auto sizing
-            let mut text_node = node;
-            // Ensure text can grow to fit content
-            if config.width.is_none() {
-                text_node.width = Val::Auto;
-            }
-            if config.height.is_none() {
-                text_node.height = Val::Auto;
-            }
-
-            // Build TextFont with the appropriate font handle
-            let text_font = if let Some(ref handle) = font_handle {
-                TextFont {
-                    font: handle.clone(),
-                    font_size,
-                    ..default()
-                }
-            } else {
-                TextFont {
-                    font_size,
-                    ..default()
-                }
-            };
-
-            let mut entity_cmd = commands.spawn((
-                text_node,
-                Text::new(content),
-                TextColor(color),
-                text_font,
-                StamWidget {
-                    id: widget_id,
-                    window_id,
-                    widget_type,
-                },
-                WidgetEventSubscriptions::default(),
-                widget_font_config.clone(), // Store for child inheritance
-            ));
-
-            // Add background color if specified (transparent by default in Bevy 0.17)
-            if let Some(ref bg_color) = config.background_color {
-                entity_cmd.insert(BackgroundColor(color_value_to_bevy(bg_color)));
-            }
-
-            // Apply border radius if specified
-            if let Some(radius) = config.border_radius {
-                entity_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
-            }
-
-            let entity = entity_cmd.id();
-            commands.entity(entity).insert(ChildOf(parent_entity));
-
-            //tracing::debug!("Text widget entity {:?} created and parented", entity);
-            entity
-        }
-
-        WidgetType::Button => {
-            let label = config.label.clone().unwrap_or_default();
-
-            let normal = config
-                .background_color
-                .as_ref()
-                .map(color_value_to_bevy)
-                .unwrap_or(Color::srgb(0.3, 0.3, 0.3));
-            let hovered = config
-                .hover_color
-                .as_ref()
-                .map(color_value_to_bevy)
-                .unwrap_or(Color::srgb(0.4, 0.4, 0.4));
-            let pressed = config
-                .pressed_color
-                .as_ref()
-                .map(color_value_to_bevy)
-                .unwrap_or(Color::srgb(0.2, 0.2, 0.2));
-            let disabled = config
-                .disabled_color
-                .as_ref()
-                .map(color_value_to_bevy)
-                .unwrap_or(Color::srgb(0.5, 0.5, 0.5));
-
-            // Set default button styling
-            let mut button_node = node.clone();
-            button_node.padding = UiRect::all(Val::Px(10.0));
-            button_node.justify_content = bevy::ui::JustifyContent::Center;
-            button_node.align_items = bevy::ui::AlignItems::Center;
-
-            // Build TextFont with inherited font configuration
-            let text_font = if let Some(handle) = font_handle.clone() {
-                TextFont {
-                    font: handle,
-                    font_size: effective_font.size,
-                    ..default()
-                }
-            } else {
-                TextFont {
-                    font_size: effective_font.size,
-                    ..default()
-                }
-            };
-
-            let mut button_cmd = commands.spawn((
-                button_node,
-                Button,
-                BackgroundColor(normal),
-                ButtonColors {
-                    normal,
-                    hovered,
-                    pressed,
-                    disabled,
-                },
-                StamWidget {
-                    id: widget_id,
-                    window_id,
-                    widget_type,
-                },
-                WidgetEventSubscriptions {
-                    on_click: true,
-                    on_hover: true,
-                    ..default()
-                },
-                PreviousInteraction::default(),
-                widget_font_config.clone(), // Store for child inheritance
-            ));
-
-            // Apply border radius if specified
-            if let Some(radius) = config.border_radius {
-                button_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
-            }
-
-            let button_entity = button_cmd
-                .with_children(|parent| {
-                    parent.spawn((
-                        Text::new(label),
-                        TextColor(Color::WHITE),
-                        text_font,
-                    ));
-                })
-                .insert(ChildOf(parent_entity))
-                .id();
-
-            button_entity
-        }
-
-        WidgetType::Panel => {
-            let bg_color = config
-                .background_color
-                .as_ref()
-                .map(color_value_to_bevy)
-                .unwrap_or(Color::srgba(0.2, 0.2, 0.2, 0.8));
-
-            let mut entity_cmd = commands.spawn((
-                node,
-                BackgroundColor(bg_color),
-                StamWidget {
-                    id: widget_id,
-                    window_id,
-                    widget_type,
-                },
-                WidgetEventSubscriptions::default(),
-                ChildOf(parent_entity),
-            ));
-
-            // Apply border radius if specified
-            if let Some(radius) = config.border_radius {
-                entity_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
-            }
-
-            entity_cmd.id()
-        }
-
-        WidgetType::Image => {
-            // Get image configuration from config.image
-            let image_config = config.image.as_ref();
-            tracing::debug!("Creating Image widget: image_config={:?}", image_config);
-
-            // Try to get image handle from resource_id or path
-            let image_handle: Option<Handle<Image>> = image_config.and_then(|img_cfg| {
-                tracing::debug!("Image effective_source: {:?}", img_cfg.effective_source());
-                match img_cfg.effective_source() {
-                    Some(ImageSource::ResourceId(ref resource_id)) => {
-                        // Look up pre-loaded resource by alias
-                        let handle = resource_registry.get_image_handle(resource_id);
-                        tracing::debug!("Looking up resource_id '{}': handle={:?}", resource_id, handle.is_some());
-                        handle
-                    }
-                    Some(ImageSource::Path(_path)) => {
-                        // Direct path loading would require AssetServer access here
-                        // For now, resources must be pre-loaded via Resource.load()
-                        tracing::warn!(
-                            "Image widget: direct path loading not yet supported. Use Resource.load() first."
-                        );
-                        None
-                    }
-                    None => None,
-                }
-            });
-
-            // Get the scale mode for later use
-            let scale_mode = image_config
-                .map(|cfg| cfg.scale_mode.clone())
-                .unwrap_or_default();
-
-            // Check if this is a Cover or Contain mode
-            let is_cover_contain = matches!(scale_mode, ImageScaleMode::Cover | ImageScaleMode::Contain);
-
-            // Convert ImageScaleMode to Bevy's NodeImageMode
-            let image_mode = match &scale_mode {
-                    ImageScaleMode::Auto => bevy::ui::widget::NodeImageMode::Auto,
-                    ImageScaleMode::Stretch => bevy::ui::widget::NodeImageMode::Stretch,
-                    ImageScaleMode::Tiled { tile_x, tile_y, stretch_value } => {
-                        bevy::ui::widget::NodeImageMode::Tiled {
-                            tile_x: *tile_x,
-                            tile_y: *tile_y,
-                            stretch_value: *stretch_value,
-                        }
-                    }
-                    ImageScaleMode::Sliced { top, right, bottom, left, center } => {
-                        bevy::ui::widget::NodeImageMode::Sliced(bevy::sprite::TextureSlicer {
-                            border: bevy::sprite::BorderRect {
-                                top: *top,
-                                right: *right,
-                                bottom: *bottom,
-                                left: *left,
-                            },
-                            center_scale_mode: if *center {
-                                bevy::sprite::SliceScaleMode::Stretch
-                            } else {
-                                bevy::sprite::SliceScaleMode::Tile { stretch_value: 0.0 }
-                            },
-                            sides_scale_mode: bevy::sprite::SliceScaleMode::Stretch,
-                            max_corner_scale: 1.0,
-                        })
-                    }
-                // Cover and Contain use Stretch mode to fill the node.
-                // The node dimensions are calculated by update_cover_contain_images system
-                // to achieve the Cover/Contain effect while maintaining aspect ratio.
-                // - Cover: node is sized to cover container (may overflow, uses overflow: clip)
-                // - Contain: node is sized to fit within container (may letterbox)
-                ImageScaleMode::Contain | ImageScaleMode::Cover => {
-                    bevy::ui::widget::NodeImageMode::Stretch
-                }
-            };
-
-            // Build the entity
-            tracing::debug!("Image widget: handle present = {:?}, node.width={:?}, node.height={:?}",
-                image_handle.is_some(), node.width, node.height);
-            if let Some(handle) = image_handle {
-                // We have an image - create ImageNode
-                tracing::debug!("Creating ImageNode with image_mode={:?}, handle={:?}", image_mode, handle);
-                let mut image_node = bevy::ui::widget::ImageNode::new(handle.clone());
-                image_node.image_mode = image_mode;
-
-                // Apply flip if specified
-                if let Some(img_cfg) = image_config {
-                    image_node.flip_x = img_cfg.flip_x;
-                    image_node.flip_y = img_cfg.flip_y;
-
-                    // Apply tint color if specified
-                    if let Some(ref tint) = img_cfg.tint {
-                        image_node.color = color_value_to_bevy(tint);
-                    }
-                }
-
-                if is_cover_contain {
-                    // For Cover/Contain modes, we create a two-node structure:
-                    // 1. Outer container: has the requested dimensions, overflow: clip
-                    // 2. Inner image: positioned absolutely, centered, sized for Cover/Contain
-                    //
-                    // This emulates CSS object-fit: cover/contain behavior
-
-                    // Create outer container with requested dimensions and overflow clipping
-                    let mut container_node = node.clone();
-                    container_node.overflow = bevy::ui::Overflow::clip();
-
-                    // Create inner image node with absolute positioning for centering
-                    let mut inner_image_node = Node::default();
-                    inner_image_node.position_type = bevy::ui::PositionType::Absolute;
-                    // Position at center of container
-                    inner_image_node.left = Val::Percent(50.0);
-                    inner_image_node.top = Val::Percent(50.0);
-                    // Start with 100% dimensions, will be adjusted by update system
-                    inner_image_node.width = Val::Percent(100.0);
-                    inner_image_node.height = Val::Percent(100.0);
-
-                    // Spawn outer container
-                    let container_entity = commands.spawn((
-                        container_node,
-                        StamWidget {
-                            id: widget_id,
-                            window_id,
-                            widget_type,
-                        },
-                        WidgetEventSubscriptions::default(),
-                        ChildOf(parent_entity),
-                    )).id();
-
-                    // Spawn inner image as child of container
-                    let mut image_cmd = commands.spawn((
-                        inner_image_node,
-                        image_node,
-                        CoverContainImage {
-                            scale_mode: scale_mode.clone(),
-                            image_handle: handle.clone(),
-                            last_container_size: Vec2::ZERO,
-                        },
-                        ChildOf(container_entity),
-                    ));
-
-                    // Apply border radius to container if specified
-                    if let Some(radius) = config.border_radius {
-                        commands.entity(container_entity).insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
-                    }
-
-                    // Apply background color to container if specified
-                    if let Some(ref bg_color) = config.background_color {
-                        commands.entity(container_entity).insert(BackgroundColor(color_value_to_bevy(bg_color)));
-                    }
-
-                    container_entity
-                } else {
-                    // Normal image mode - single node with image
-                    let mut entity_cmd = commands.spawn((
-                        node,
-                        image_node,
-                        StamWidget {
-                            id: widget_id,
-                            window_id,
-                            widget_type,
-                        },
-                        WidgetEventSubscriptions::default(),
-                        ChildOf(parent_entity),
-                    ));
-
-                    // Apply border radius if specified
-                    if let Some(radius) = config.border_radius {
-                        entity_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
-                    }
-
-                    // Apply background color if specified (visible around image if it doesn't fill)
-                    if let Some(ref bg_color) = config.background_color {
-                        entity_cmd.insert(BackgroundColor(color_value_to_bevy(bg_color)));
-                    }
-
-                    entity_cmd.id()
-                }
-            } else {
-                // No image - create placeholder with background color
-                let bg_color = config
-                    .background_color
-                    .as_ref()
-                    .map(color_value_to_bevy)
-                    .unwrap_or(Color::srgba(0.5, 0.5, 0.5, 1.0));
-
-                let mut entity_cmd = commands.spawn((
-                    node,
-                    BackgroundColor(bg_color),
-                    StamWidget {
-                        id: widget_id,
-                        window_id,
-                        widget_type,
-                    },
-                    WidgetEventSubscriptions::default(),
-                    ChildOf(parent_entity),
-                ));
-
-                // Apply border radius if specified
-                if let Some(radius) = config.border_radius {
-                    entity_cmd.insert(bevy::ui::BorderRadius::all(Val::Px(radius)));
-                }
-
-                entity_cmd.id()
-            }
-        }
-    }
-}
-
-/// Update a widget property
-fn update_widget_property(
-    entity: Entity,
-    property: &str,
-    value: &PropertyValue,
-    text_query: &mut Query<&mut Text, Without<ScriptEntity>>,
-    bg_color_query: &mut Query<&mut BackgroundColor, Without<ScriptEntity>>,
-    node_query: &mut Query<&mut Node, Without<ScriptEntity>>,
-    text_color_query: &mut Query<&mut TextColor>,
-    button_query: &mut Query<(&mut ButtonColors, Option<&Interaction>, Option<&Children>)>,
-    commands: &mut Commands,
-) -> Result<(), String> {
-    match property {
-        "content" | "label" => {
-            if let PropertyValue::String(text) = value {
-                // First try direct text component
-                if let Ok(mut text_component) = text_query.get_mut(entity) {
-                    *text_component = Text::new(text.clone());
-                    return Ok(());
-                }
-                // For buttons, the text is on a child entity
-                if let Ok((_, _, Some(children))) = button_query.get(entity) {
-                    for child in children.iter() {
-                        if let Ok(mut text_component) = text_query.get_mut(child) {
-                            *text_component = Text::new(text.clone());
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-            Err(format!("Cannot update {} on this widget", property))
-        }
-        "backgroundColor" => {
-            if let PropertyValue::Color(color) = value {
-                let bevy_color = color_value_to_bevy(color);
-
-                // Update the background color
-                if let Ok(mut bg) = bg_color_query.get_mut(entity) {
-                    *bg = BackgroundColor(bevy_color);
-
-                    // For buttons, also update the 'normal' state color
-                    // so that when interaction changes back to None, it uses the new color
-                    if let Ok((mut button_colors, _, _)) = button_query.get_mut(entity) {
-                        button_colors.normal = bevy_color;
-                    }
-
-                    return Ok(());
-                }
-            }
-            Err(format!("Cannot update {} on this widget", property))
-        }
-        "fontColor" => {
-            if let PropertyValue::Color(color) = value {
-                // First try direct text color component
-                if let Ok(mut text_color) = text_color_query.get_mut(entity) {
-                    *text_color = TextColor(color_value_to_bevy(color));
-                    return Ok(());
-                }
-                // For buttons, the text color is on a child entity
-                if let Ok((_, _, Some(children))) = button_query.get(entity) {
-                    for child in children.iter() {
-                        if let Ok(mut text_color) = text_color_query.get_mut(child) {
-                            *text_color = TextColor(color_value_to_bevy(color));
-                            return Ok(());
-                        }
-                    }
-                }
-            }
-            Err(format!("Cannot update {} on this widget", property))
-        }
-        "width" => {
-            if let PropertyValue::Size(size) = value {
-                if let Ok(mut node) = node_query.get_mut(entity) {
-                    node.width = size_value_to_val(size);
-                    return Ok(());
-                }
-            }
-            Err(format!("Cannot update {} on this widget", property))
-        }
-        "height" => {
-            if let PropertyValue::Size(size) = value {
-                if let Ok(mut node) = node_query.get_mut(entity) {
-                    node.height = size_value_to_val(size);
-                    return Ok(());
-                }
-            }
-            Err(format!("Cannot update {} on this widget", property))
-        }
-        "disabled" => {
-            if let PropertyValue::Bool(disabled) = value {
-                // For buttons, update the background color based on disabled state
-                if let Ok((button_colors, _, _)) = button_query.get(entity) {
-                    let new_color = if *disabled {
-                        button_colors.disabled
-                    } else {
-                        button_colors.normal
-                    };
-                    if let Ok(mut bg) = bg_color_query.get_mut(entity) {
-                        *bg = BackgroundColor(new_color);
-
-                        // Add or remove the ButtonDisabled marker component
-                        if *disabled {
-                            commands.entity(entity).insert(ButtonDisabled);
-                        } else {
-                            commands.entity(entity).remove::<ButtonDisabled>();
-                        }
-
-                        return Ok(());
-                    }
-                }
-            }
-            Err(format!("Cannot update {} on this widget", property))
-        }
-        "hoverColor" => {
-            if let PropertyValue::Color(color) = value {
-                if let Ok((mut button_colors, interaction_opt, _)) = button_query.get_mut(entity) {
-                    let new_color = color_value_to_bevy(color);
-                    button_colors.hovered = new_color;
-
-                    // If the button is currently hovered, update the background color immediately
-                    if let Some(interaction) = interaction_opt {
-                        if *interaction == Interaction::Hovered {
-                            if let Ok(mut bg) = bg_color_query.get_mut(entity) {
-                                *bg = BackgroundColor(new_color);
-                            }
-                        }
-                    }
-
-                    return Ok(());
-                }
-            }
-            Err(format!("Cannot update {} on this widget", property))
-        }
-        "pressedColor" => {
-            if let PropertyValue::Color(color) = value {
-                if let Ok((mut button_colors, interaction_opt, _)) = button_query.get_mut(entity) {
-                    let new_color = color_value_to_bevy(color);
-                    button_colors.pressed = new_color;
-
-                    // If the button is currently pressed, update the background color immediately
-                    if let Some(interaction) = interaction_opt {
-                        if *interaction == Interaction::Pressed {
-                            if let Ok(mut bg) = bg_color_query.get_mut(entity) {
-                                *bg = BackgroundColor(new_color);
-                            }
-                        }
-                    }
-
-                    return Ok(());
-                }
-            }
-            Err(format!("Cannot update {} on this widget", property))
-        }
-        "disabledColor" => {
-            if let PropertyValue::Color(color) = value {
-                if let Ok((mut button_colors, _, _)) = button_query.get_mut(entity) {
-                    button_colors.disabled = color_value_to_bevy(color);
-                    return Ok(());
-                }
-            }
-            Err(format!("Cannot update {} on this widget", property))
-        }
-        "borderRadius" => {
-            if let PropertyValue::Number(radius) = value {
-                // Insert or update the BorderRadius component
-                commands.entity(entity).insert(bevy::ui::BorderRadius::all(Val::Px(*radius as f32)));
-                return Ok(());
-            }
-            Err(format!("Cannot update {} on this widget", property))
-        }
-        _ => Err(format!("Unknown property: {}", property)),
-    }
-}
+// Note: Legacy widget functions (create_widget_entity, update_widget_property) have been removed.
+// Use the ECS API (World.spawn, entity.insert, entity.update) instead.
 
 /// Resource to track if EngineReady has been sent
 #[derive(Resource, Default)]
@@ -4214,10 +3459,10 @@ const PRIMARY_WINDOW_ID: u64 = 1;
 /// so that JS code can modify it via `mainWindow` from `getEngineInfo()`.
 ///
 /// Note: Camera creation is now lazy - cameras are created per-window when the first
-/// widget is created for that window (in CreateWidget handler).
+/// ECS entity is created for that window (in SpawnEntity handler).
 fn register_primary_window(
     mut registry: ResMut<WindowRegistry>,
-    mut widget_registry: ResMut<WidgetRegistry>,
+    mut window_ui_registry: ResMut<WindowUIRegistry>,
     primary_window_query: Query<Entity, With<PrimaryWindow>>,
     mut commands: Commands,
 ) {
@@ -4235,7 +3480,7 @@ fn register_primary_window(
                 ..default()
             },
         )).id();
-        widget_registry.set_window_camera(PRIMARY_WINDOW_ID, camera_entity);
+        window_ui_registry.set_window_camera(PRIMARY_WINDOW_ID, camera_entity);
         tracing::debug!("Created camera {:?} for primary window {}", camera_entity, PRIMARY_WINDOW_ID);
 
         // Create root UI node for this window
@@ -4249,7 +3494,7 @@ fn register_primary_window(
             },
             UiTargetCamera(camera_entity),
         )).id();
-        widget_registry.set_window_root(PRIMARY_WINDOW_ID, root);
+        window_ui_registry.set_window_root(PRIMARY_WINDOW_ID, root);
         tracing::debug!("Created root UI node {:?} for primary window {}", root, PRIMARY_WINDOW_ID);
     } else {
         tracing::warn!("No primary window found to register");
@@ -4484,80 +3729,7 @@ fn handle_window_events(
     }
 }
 
-/// System to handle widget interactions (buttons, hover, etc.)
-fn handle_widget_interactions(
-    event_tx: Res<EventSenderRes>,
-    mut query: Query<
-        (
-            &Interaction,
-            &mut BackgroundColor,
-            &ButtonColors,
-            &StamWidget,
-            &WidgetEventSubscriptions,
-            &mut PreviousInteraction,
-        ),
-        (Changed<Interaction>, With<Button>, Without<ButtonDisabled>),
-    >,
-    windows: Query<&Window, With<PrimaryWindow>>,
-) {
-    // Get cursor position for click events
-    let cursor_pos = windows
-        .single()
-        .ok()
-        .and_then(|w| w.cursor_position())
-        .unwrap_or(Vec2::ZERO);
-
-    for (interaction, mut bg_color, colors, widget, subs, mut prev_interaction) in query.iter_mut()
-    {
-        let prev = prev_interaction.0;
-        prev_interaction.0 = *interaction;
-
-        match *interaction {
-            Interaction::Pressed => {
-                *bg_color = BackgroundColor(colors.pressed);
-
-                // Send click event if subscribed
-                if subs.on_click {
-                    let _ = event_tx.0.try_send(GraphicEvent::WidgetClicked {
-                        window_id: widget.window_id,
-                        widget_id: widget.id,
-                        x: cursor_pos.x,
-                        y: cursor_pos.y,
-                        button: MouseButton::Left,
-                    });
-                }
-            }
-            Interaction::Hovered => {
-                *bg_color = BackgroundColor(colors.hovered);
-
-                // Send hover enter event if subscribed and wasn't hovered before
-                if subs.on_hover && prev != Interaction::Hovered {
-                    let _ = event_tx.0.try_send(GraphicEvent::WidgetHovered {
-                        window_id: widget.window_id,
-                        widget_id: widget.id,
-                        entered: true,
-                        x: cursor_pos.x,
-                        y: cursor_pos.y,
-                    });
-                }
-            }
-            Interaction::None => {
-                *bg_color = BackgroundColor(colors.normal);
-
-                // Send hover leave event if subscribed and was hovered before
-                if subs.on_hover && prev == Interaction::Hovered {
-                    let _ = event_tx.0.try_send(GraphicEvent::WidgetHovered {
-                        window_id: widget.window_id,
-                        widget_id: widget.id,
-                        entered: false,
-                        x: cursor_pos.x,
-                        y: cursor_pos.y,
-                    });
-                }
-            }
-        }
-    }
-}
+// Note: handle_widget_interactions has been removed - use ECS entity event callbacks instead
 
 /// Component to track previous interaction state for ECS entities
 #[derive(Component, Default)]

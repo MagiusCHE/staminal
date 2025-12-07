@@ -58,7 +58,7 @@ export class Game {
         //let first = true;
         //console.log("Found", windows.length, "windows...");
         //console.log("Main window:", engine.mainWindow.id);
-        
+
 
         // All windows are destroyed, create our main window
         //console.log(" - Win:", win.id);
@@ -70,21 +70,24 @@ export class Game {
             resizable: this.#config.graphic.resizable,
             mode: this.#config.graphic.mode,
             positionMode: WindowPositionModes.Centered,
-        });        
-        
+        });
+
         Graphic.setMainWindow(mainWin);
 
         for (const win of windows) {
             await win.close();
         }
 
-        const cont = await mainWin.createWidget(WidgetTypes.Container, {
-            width: "100%",
-            height: "100%",
-            direction: FlexDirection.Column,
-            justifyContent: JustifyContent.Center,
-            alignItems: AlignItems.Center,
-            backgroundColor: "#1a1a2e",
+        // Create container using ECS API
+        const cont = await World.spawn({
+            Node: {
+                width: "100%",
+                height: "100%",
+                flex_direction: "column",
+                justify_content: "center",
+                align_items: "center",
+            },
+            BackgroundColor: "#1a1a2e",
         });
 
         // console.log("Waiting 5 seconds to ensure resources are loaded...");
@@ -95,13 +98,20 @@ export class Game {
             throw new Error("Title screen background resource not loaded: title-screen-background");
         }
 
-        const bkg = await cont.createChild(WidgetTypes.Image, {
-            resourceId: "title-screen-background",
-            width: "100%",
-            height: "100%",
-            scaleMode: ImageScaleModes.Contain,
-            //backgroundColor: "#00000000", // no need
-        });
+        // Create background image using ECS API
+        const bkg = await World.spawn({
+            Node: {
+                width: "100%",
+                height: "100%",
+            },
+            ImageNode: {
+                resource_id: "title-screen-background",
+                image_mode: NodeImageMode.Auto,
+            },
+        },cont.id);
+
+        // Set parent relationship
+        
 
     }
     async startGame() {

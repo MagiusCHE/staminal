@@ -1,10 +1,12 @@
-# Graphic Engine: Windows and Widgets
+# Graphic Engine: Windows and ECS UI
 
-This document describes the architecture of the Staminal graphic system, focusing on window management and widget creation.
+This document describes the architecture of the Staminal graphic system, focusing on window management and ECS-based UI creation.
 
 ## Overview
 
-The graphic system provides a **language-agnostic API** for creating windows and UI widgets. All operations are **client-only** - on the server, all graphic methods return descriptive errors.
+The graphic system provides a **language-agnostic API** for creating windows and UI elements using the **ECS (Entity Component System)** paradigm. All operations are **client-only** - on the server, all graphic methods return descriptive errors.
+
+> **Note**: The legacy widget system (`window.createWidget()`, `WidgetTypes`, etc.) has been removed. Use the ECS API (`World.spawn()`, component types) instead. See [ecs.md](ecs.md) for the complete ECS API documentation.
 
 ## Architecture
 
@@ -17,7 +19,7 @@ The graphic system provides a **language-agnostic API** for creating windows and
 │  │ BevyEngine                                    │  │
 │  │  • Window management (winit)                  │  │
 │  │  • UI rendering (bevy_ui)                     │  │
-│  │  • Widget entity creation/updates             │  │
+│  │  • ECS entity creation/updates                │  │
 │  └──────────────────────────────────────────────┘  │
 └─────────────────────────────────────────────────────┘
            ↕ channels (std::sync::mpsc / tokio::sync::mpsc)
@@ -27,7 +29,7 @@ The graphic system provides a **language-agnostic API** for creating windows and
 │  │ GraphicProxy                                  │  │
 │  │  • Routes commands to engine                  │  │
 │  │  • Receives events from engine                │  │
-│  │  • Manages window/widget registries           │  │
+│  │  • Manages window registries                  │  │
 │  │  • Shared by ALL runtime adapters             │  │
 │  └──────────────────────────────────────────────┘  │
 │  ┌──────────────────────────────────────────────┐  │
@@ -43,13 +45,13 @@ The graphic system provides a **language-agnostic API** for creating windows and
 
 | File | Description |
 |------|-------------|
-| [proxy.rs](../apps/shared/stam_mod_runtimes/src/api/graphic/proxy.rs) | `GraphicProxy` - Central coordinator |
-| [commands.rs](../apps/shared/stam_mod_runtimes/src/api/graphic/commands.rs) | Command definitions (worker → engine) |
-| [events.rs](../apps/shared/stam_mod_runtimes/src/api/graphic/events.rs) | Event definitions (engine → worker) |
-| [window.rs](../apps/shared/stam_mod_runtimes/src/api/graphic/window.rs) | Window configuration types |
-| [widget.rs](../apps/shared/stam_mod_runtimes/src/api/graphic/widget.rs) | Widget types and configuration |
-| [engines.rs](../apps/shared/stam_mod_runtimes/src/api/graphic/engines.rs) | Supported engine definitions |
-| [bevy.rs](../apps/stam_client/src/engines/bevy.rs) | Bevy engine implementation |
+| [proxy.rs](../../apps/shared/stam_mod_runtimes/src/api/graphic/proxy.rs) | `GraphicProxy` - Central coordinator |
+| [commands.rs](../../apps/shared/stam_mod_runtimes/src/api/graphic/commands.rs) | Command definitions (worker → engine) |
+| [events.rs](../../apps/shared/stam_mod_runtimes/src/api/graphic/events.rs) | Event definitions (engine → worker) |
+| [window.rs](../../apps/shared/stam_mod_runtimes/src/api/graphic/window.rs) | Window configuration types |
+| [common_types.rs](../../apps/shared/stam_mod_runtimes/src/api/graphic/common_types.rs) | Shared types (colors, sizes, layout) |
+| [ecs.rs](../../apps/shared/stam_mod_runtimes/src/api/graphic/ecs.rs) | ECS command and query types |
+| [bevy.rs](../../apps/stam_client/src/engines/bevy.rs) | Bevy engine implementation |
 
 ## GraphicProxy
 
@@ -73,10 +75,8 @@ GraphicProxy maintains:
 - `command_tx`: Channel to send commands to engine
 - `event_rx`: Channel to receive events from engine
 - `windows`: Registry of window IDs → `WindowInfo`
-- `widgets`: Registry of widget IDs → `WidgetInfo`
-- `widget_subscriptions`: Event subscriptions per widget
 - `loaded_fonts`: Loaded font aliases
-- `next_window_id` / `next_widget_id`: Atomic counters
+- `next_window_id`: Atomic counter for window IDs
 
 ## Window Management
 
@@ -85,7 +85,7 @@ GraphicProxy maintains:
 1. **Enable Engine** → Creates main window (ID 1)
 2. **Create Window** → Creates additional windows (ID 2+)
 3. **Modify Window** → Set title, size, fullscreen, visibility
-4. **Close Window** → Destroys window and its widgets
+4. **Close Window** → Destroys window and all its UI entities
 
 ### Window Configuration
 
@@ -117,19 +117,19 @@ pub enum WindowPositionMode {
 | `SetWindowTitle` | Update window title |
 | `SetWindowMode` | Set window mode (Windowed, Fullscreen, BorderlessFullscreen) |
 | `SetWindowVisible` | Show/hide window |
-| `SetWindowFont` | Set default font for window widgets |
+| `SetWindowFont` | Set default font for window |
 
 ### JavaScript API
 
 ```javascript
 // Enable graphic engine (creates main window)
-await Graphic.enableEngine("bevy", {
+await Graphic.enableEngine(GraphicEngines.Bevy, {
     title: "My Game",
     width: 1920,
     height: 1080,
     resizable: true,
     fullscreen: false,
-    position: 1  // 0=default, 1=centered
+    position: WindowPositionModes.Centered
 });
 
 // Get main window
@@ -151,154 +151,66 @@ await mainWindow.setMode(WindowModes.BorderlessFullscreen);
 await secondWindow.close();
 ```
 
-## Widget System
+## UI Creation with ECS
 
-### Widget Types
+UI elements are now created using the ECS API instead of the legacy widget system. See [ecs.md](ecs.md) for complete documentation.
 
-| Type | Description | Key Properties |
-|------|-------------|----------------|
-| `Container` | Flexbox/grid layout | `direction`, `justifyContent`, `alignItems`, `gap` |
-| `Text` | Static/dynamic text | `content`, `font`, `fontColor`, `textAlign` |
-| `Button` | Clickable button | `label`, `hoverColor`, `pressedColor`, `disabled` |
-| `Image` | Image display | `image.path`, `image.scaleMode`, `image.tint` |
-| `Panel` | Container with background | `backgroundColor`, `backgroundImage` |
-
-### Widget Hierarchy
-
-```
-Window (Bevy Entity)
- └── RootNode (Node, TargetCamera)
-      └── Container (Node, Layout)
-           ├── Text (Node, Text, TextColor)
-           ├── Button (Node, Button, BackgroundColor)
-           │    └── ButtonLabel (Text)
-           └── Panel (Node, BackgroundColor)
-                └── ... (nested widgets)
-```
-
-### Widget Configuration
-
-```rust
-pub struct WidgetConfig {
-    // Hierarchy
-    pub parent_id: Option<u64>,     // Parent widget (None = window root)
-
-    // Layout
-    pub layout: Option<LayoutType>,
-    pub direction: Option<FlexDirection>,
-    pub justify_content: Option<JustifyContent>,
-    pub align_items: Option<AlignItems>,
-    pub gap: Option<f32>,
-
-    // Dimensions
-    pub width: Option<SizeValue>,   // Px(f32), Percent(f32), Auto
-    pub height: Option<SizeValue>,
-    pub min_width: Option<SizeValue>,
-    pub max_width: Option<SizeValue>,
-
-    // Spacing
-    pub margin: Option<EdgeInsets>,
-    pub padding: Option<EdgeInsets>,
-
-    // Appearance
-    pub background_color: Option<ColorValue>,
-    pub border_color: Option<ColorValue>,
-    pub border_width: Option<EdgeInsets>,
-    pub border_radius: Option<f32>,
-    pub opacity: Option<f32>,
-
-    // Text
-    pub content: Option<String>,
-    pub font: Option<FontConfig>,
-    pub font_color: Option<ColorValue>,
-    pub text_align: Option<TextAlign>,
-
-    // Button
-    pub label: Option<String>,
-    pub hover_color: Option<ColorValue>,
-    pub pressed_color: Option<ColorValue>,
-    pub disabled: Option<bool>,
-
-    // Image
-    pub image: Option<ImageConfig>,
-    pub background_image: Option<ImageConfig>,
-}
-```
-
-### Color Values
-
-Colors support multiple formats:
-
-```rust
-// Rust
-ColorValue::rgba(1.0, 0.0, 0.0, 1.0)
-ColorValue::from_hex("#FF0000")
-ColorValue::from_hex("#FF0000FF")
-ColorValue::from_hex("rgba(255, 0, 0, 0.5)")
-```
+### Basic Example
 
 ```javascript
-// JavaScript
-backgroundColor: "#FF0000"           // Hex RGB
-backgroundColor: "#FF0000FF"         // Hex RGBA
-backgroundColor: "rgba(255,0,0,0.5)" // RGBA function
-backgroundColor: "rgb(255,0,0)"      // RGB function
+// Create a container
+const container = await World.spawn({
+    Node: {
+        width: "100%",
+        height: "100%",
+        flexDirection: FlexDirection.Column,
+        justifyContent: JustifyContent.Center,
+        alignItems: AlignItems.Center
+    },
+    BackgroundColor: "#1a1a2e"
+});
+
+// Create text
+const text = await World.spawn({
+    Text: "Hello World",
+    TextColor: "#ffffff",
+    TextFont: { size: 32 }
+});
+await text.setParent(container);
+
+// Create interactive button
+const button = await World.spawn({
+    Button: true,
+    Node: {
+        padding: 20,
+        width: 200,
+        height: 50
+    },
+    BackgroundColor: "#4A90D9",
+    HoverBackgroundColor: "#5BA0E9",
+    PressedBackgroundColor: "#3A80C9"
+});
+
+// Register click callback
+await button.on("click", (event) => {
+    console.log(`Button clicked at ${event.x}, ${event.y}`);
+});
 ```
 
-### Widget Commands
+### Component Types for UI
 
-| Command | Description |
-|---------|-------------|
-| `CreateWidget` | Create widget in window |
-| `UpdateWidgetProperty` | Update single property |
-| `UpdateWidgetConfig` | Update multiple properties |
-| `DestroyWidget` | Destroy widget and children |
-| `ReparentWidget` | Move to new parent |
-| `ClearWindowWidgets` | Destroy all widgets in window |
-| `SubscribeWidgetEvents` | Register for click/hover/focus |
-| `UnsubscribeWidgetEvents` | Unregister events |
-
-### JavaScript API
-
-```javascript
-// Create panel
-const panel = await window.createWidget("panel", {
-    width: "100%",
-    height: "100%",
-    backgroundColor: "rgba(0, 0, 0, 0.7)"
-});
-
-// Create text with custom font
-await Graphic.loadFont("fonts/Roboto-Bold.ttf", "roboto-bold");
-const title = await window.createWidget("text", {
-    parent: panel.id,
-    content: "Hello World",
-    font: { family: "roboto-bold", size: 32 },
-    fontColor: "#FFFFFF"
-});
-
-// Create button with events
-const button = await window.createWidget("button", {
-    parent: panel.id,
-    label: "Click Me",
-    backgroundColor: "#4A90D9",
-    hoverColor: "#5BA0E9",
-    pressedColor: "#3A80C9"
-});
-
-button.onClick((event) => {
-    console.log(`Clicked at ${event.x}, ${event.y}`);
-});
-
-// Update widget
-await button.setProperty("label", "Clicked!");
-
-// Destroy widget
-await button.destroy();
-
-// Clear all widgets
-await window.clearWidgets();
-```
+| Component | Description |
+|-----------|-------------|
+| `Node` | Layout properties (width, height, flex, padding, margin) |
+| `Text` | Text content |
+| `TextColor` | Text color |
+| `TextFont` | Font size and family |
+| `Button` | Makes entity interactive |
+| `BackgroundColor` | Background color |
+| `HoverBackgroundColor` | Color when hovered (pseudo-component) |
+| `PressedBackgroundColor` | Color when pressed (pseudo-component) |
+| `DisabledBackgroundColor` | Color when disabled (pseudo-component) |
+| `ImageNode` | Image display |
 
 ## Event System
 
@@ -307,27 +219,40 @@ await window.clearWidgets();
 ```
 ┌─────────────────────────────────────────────────────┐
 │                   Bevy Main Thread                  │
-│  • Detects Interaction changes                      │
-│  • Sends GraphicEvent via channel                   │
+│  • Detects Interaction changes on Button entities   │
+│  • Sends EntityEventCallback via channel            │
 └─────────────────────────────────────────────────────┘
            ↓ event_tx (tokio::sync::mpsc)
 ┌─────────────────────────────────────────────────────┐
 │                  Worker Thread                      │
 │  • Main event loop receives GraphicEvent            │
-│  • Calls RuntimeAdapter.dispatch_widget_callback()  │
+│  • Calls RuntimeAdapter.dispatch_entity_event()     │
 │  • Handler executes in mod's JS context             │
 └─────────────────────────────────────────────────────┘
 ```
 
-### Widget Events
+### Entity Event Callbacks
 
-| Event | Description |
-|-------|-------------|
-| `WidgetCreated` | Widget was created |
-| `WidgetDestroyed` | Widget was destroyed |
-| `WidgetClicked` | Mouse click on widget |
-| `WidgetHovered` | Mouse enter/leave widget |
-| `WidgetFocused` | Focus gained/lost |
+Instead of widget events, use ECS entity callbacks:
+
+```javascript
+// Register callback when entity is clicked
+await entity.on("click", (event) => {
+    console.log("Clicked!", event);
+});
+
+// Register hover callbacks
+await entity.on("hover_enter", (event) => {
+    console.log("Mouse entered");
+});
+
+await entity.on("hover_leave", (event) => {
+    console.log("Mouse left");
+});
+
+// Unregister callback
+await entity.off("click");
+```
 
 ### Window Events
 
@@ -349,10 +274,10 @@ Fonts must be loaded before use:
 // Load font with custom alias
 await Graphic.loadFont("mods/my-mod/assets/fonts/Custom.ttf", "custom");
 
-// Use in widget
-const text = await window.createWidget("text", {
-    content: "Hello",
-    font: { family: "custom", size: 24 }
+// Use in ECS entity
+const text = await World.spawn({
+    Text: "Hello",
+    TextFont: { family: "custom", size: 24 }
 });
 
 // Set window default font
@@ -367,18 +292,19 @@ const fonts = Graphic.getLoadedFonts();
 
 ### Image Loading
 
-Images are loaded on-demand, but can be preloaded:
+Images are loaded via the Resource API:
 
 ```javascript
-// Preload for faster first use
-await Graphic.preloadImage("mods/my-mod/assets/images/background.png");
+// Load image resource
+Resource.load("mods/my-mod/assets/images/bg.png", "background");
+await Resource.whenLoadedAll();
 
-// Use in widget
-const img = await window.createWidget("image", {
-    image: {
-        path: "mods/my-mod/assets/images/background.png",
-        scaleMode: "fit",
-        tint: "rgba(255,255,255,0.9)"
+// Use in ECS entity
+const image = await World.spawn({
+    Node: { width: "100%", height: "100%" },
+    ImageNode: {
+        resource_id: "background",
+        image_mode: NodeImageMode.Stretch
     }
 });
 ```
@@ -395,7 +321,7 @@ All graphic operations return descriptive errors on the server:
 
 ```javascript
 try {
-    await Graphic.enableEngine("bevy");
+    await Graphic.enableEngine(GraphicEngines.Bevy);
 } catch (e) {
     // "Graphic.enableEngine() is not available on the server.
     //  This method is client-only."
@@ -409,14 +335,14 @@ try {
 | "No graphic engine enabled" | Call `enableEngine()` first |
 | "A graphic engine is already enabled" | Engine already running |
 | "Graphic engine '...' is not yet supported" | Unknown engine type |
-| "Widget not found" | Invalid widget ID |
+| "Entity not found" | Invalid entity ID |
 | "Window not found" | Invalid window ID |
 
 ## Thread Safety
 
 `GraphicProxy` is designed to be shared via `Arc`:
 
-- `RwLock` protects window/widget registries
+- `RwLock` protects window registries
 - `Mutex` protects event receiver
 - `AtomicU64` for ID counters
 - Commands use `std::sync::mpsc` (sync channel for Bevy)
@@ -429,64 +355,22 @@ Currently only **Bevy** is supported:
 ```rust
 pub enum GraphicEngines {
     Bevy,      // ✅ Supported
-    SDL,       // ❌ Planned
-    OpenGL,    // ❌ Planned
-    Vulkan,    // ❌ Planned
+    Wgpu,      // ❌ Planned
+    Terminal,  // ❌ Planned
 }
 ```
 
 ## Per-Window Camera System
 
-The graphic engine implements a **lazy camera creation** system that automatically manages UI cameras for each window.
+The graphic engine implements a **camera creation** system that automatically manages UI cameras for each window.
 
 ### How It Works
 
-When widgets are created on a window, the engine needs a **Camera2D** that targets that specific window for the UI to be visible. The system handles this automatically:
+When the engine is enabled, a **Camera2D** is created for the main window. Each window has its own camera for the UI to be visible:
 
-1. **First widget creation**: When the first widget is created for a window, the engine automatically creates a `Camera2D` that targets that window's entity
-2. **Subsequent widgets**: All additional widgets on the same window reuse the existing camera
-3. **Window close cleanup**: When a window is closed, its associated camera and root UI node are automatically despawned
-
-### Custom Camera Support
-
-If a mod needs a custom camera configuration (e.g., for special effects, multiple cameras, or 3D rendering), it can create its own camera **before** creating any widgets:
-
-```javascript
-// Create custom camera first (before any widgets)
-// This camera should target the specific window
-const customCamera = await window.createCamera({
-    // custom camera configuration
-});
-
-// Now create widgets - the default camera will NOT be created
-// because the window already has a camera
-const panel = await window.createWidget("panel", {
-    width: "100%",
-    height: "100%"
-});
-```
-
-**Important**: The automatic camera is only created if the window doesn't already have a camera when the first widget is created. If you need a custom camera, create it before creating any widgets.
-
-### Resource Cleanup
-
-When a window is closed (either via `window.close()` or by the user):
-
-1. **Camera**: The window's camera entity is despawned (if it was auto-created)
-2. **Root UI Node**: The root node that contains all widgets is despawned
-3. **All Widgets**: Since the root node is despawned, all child widgets are automatically despawned by Bevy's hierarchy system
-4. **Widget Registry**: All widget entries for that window are removed from the registry
-
-This ensures no orphaned entities remain in the ECS after a window is closed.
-
-### Multi-Window Considerations
-
-Each window has its own:
-- **Camera**: Targeting that specific window
-- **Root UI Node**: With `UiTargetCamera` pointing to the window's camera
-- **Widget Tree**: Hierarchy of UI widgets parented to the root
-
-This allows multiple windows to have independent UI layouts, cameras, and rendering pipelines.
+1. **Engine startup**: Camera2D and root UI node are created for the main window
+2. **Additional windows**: Each new window gets its own camera and root node
+3. **Window close cleanup**: When a window is closed, its camera and root UI node are automatically despawned
 
 ### Technical Details
 
@@ -504,18 +388,59 @@ Node { width: Val::Percent(100.0), height: Val::Percent(100.0), .. }
 UiTargetCamera(camera_entity)
 ```
 
-The `WidgetRegistry` tracks:
+The `WindowUIRegistry` tracks:
 - `window_cameras: HashMap<u64, Entity>` - Camera entity per window
 - `window_roots: HashMap<u64, Entity>` - Root UI node per window
-- `id_to_entity: HashMap<u64, Entity>` - Widget ID to entity mapping
+
+## Migration from Widget API
+
+If you have code using the legacy widget API, here's how to migrate:
+
+### Before (Widget API - REMOVED)
+
+```javascript
+// OLD - No longer works
+const panel = await window.createWidget(WidgetTypes.Container, {
+    width: "100%",
+    height: "100%",
+    backgroundColor: "#1a1a2e"
+});
+
+const button = await panel.createChild(WidgetTypes.Button, {
+    label: "Click Me",
+    backgroundColor: "#4A90D9"
+});
+
+button.on("click", () => console.log("Clicked!"));
+```
+
+### After (ECS API)
+
+```javascript
+// NEW - Use ECS API
+const panel = await World.spawn({
+    Node: { width: "100%", height: "100%" },
+    BackgroundColor: "#1a1a2e"
+});
+
+const button = await World.spawn({
+    Button: true,
+    Node: { padding: 10 },
+    BackgroundColor: "#4A90D9",
+    Text: "Click Me"
+});
+await button.setParent(panel);
+
+await button.on("click", () => console.log("Clicked!"));
+```
 
 ## Best Practices
 
 1. **Always check engine availability** before graphic operations
-2. **Load fonts before creating widgets** that use them
-3. **Use widget IDs** to track and update widgets
-4. **Clean up widgets** when changing screens/scenes
+2. **Load fonts before creating entities** that use them
+3. **Use entity IDs** to track and update UI elements
+4. **Clean up entities** when changing screens/scenes using `entity.destroy()`
 5. **Handle window close events** for multi-window apps
 6. **Use percentage sizes** for responsive layouts
-7. **Preload large images** to avoid frame drops
-8. **Create custom cameras before widgets** if you need non-default camera configuration
+7. **Preload large images** via Resource.load() to avoid frame drops
+8. **Use the ECS API** (`World.spawn()`) instead of the removed widget API
