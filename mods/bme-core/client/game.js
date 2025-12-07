@@ -107,12 +107,12 @@ export class Game {
             ImageNode: {
                 resource_id: "title-screen-background",
                 image_mode: NodeImageMode.Cover,
-                cover_position: {
-                    x: "100%",
-                    y: "0%",
-                },
+                // cover_position: {
+                //     x: "50%",
+                //     y: "50%",
+                // },
             },
-        },cont.id);
+        },  cont );
 
         // Set parent relationship
         

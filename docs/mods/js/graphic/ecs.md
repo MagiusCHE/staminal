@@ -53,13 +53,13 @@ System.registerEvent(System.GraphicEngineReady, async (req, res) => {
         HoverBackgroundColor: "#5ba0e9",
         PressedBackgroundColor: "#3a80c9",
         BorderRadius: 8
-    }, { parent: window });
+    }, window);
 
     // Add text as child
     const label = await World.spawn({
         Node: { width: "auto", height: "auto" },
         Text: { value: "Click Me!", font_size: 18, color: "#ffffff" }
-    }, { parent: button });
+    }, button);
 });
 ```
 
@@ -103,14 +103,13 @@ Enum for component schema field types:
 
 ## `World` Object
 
-### `World.spawn(components?, options?)`
+### `World.spawn(components?, parent?)`
 
 Spawn a new entity with optional initial components.
 
 **Parameters:**
 - `components?`: `object` - Component names as keys, component data as values
-- `options?`: `object` - Spawn options
-  - `parent`: `Entity | Window | number` - Parent entity, window, or entity ID
+- `parent?`: `Entity` - Parent entity (optional)
 
 **Returns:** `Promise<Entity>` - Handle to the spawned entity
 
@@ -128,13 +127,13 @@ const player = await World.spawn({
 const child = await World.spawn({
     Node: { width: 50, height: 50 },
     BackgroundColor: "#ff0000"
-}, { parent: player });
+}, player);
 
-// Spawn as child of window (for UI)
+// Spawn as child of a container
 const uiElement = await World.spawn({
     Node: { width: "100%", height: 50 },
     BackgroundColor: "#333333"
-}, { parent: window });
+}, container);
 ```
 
 ---
@@ -529,7 +528,7 @@ const button = await World.spawn({
         }
     },
     BackgroundColor: "#3366CC"
-}, { parent: window });
+}, window);
 ```
 
 **Button.on_click callback:**
@@ -563,7 +562,7 @@ const button = await World.spawn({
     BackgroundColor: "#4a90d9",
     HoverBackgroundColor: "#5ba0e9",
     BorderRadius: 8
-}, { parent: window });
+}, window);
 ```
 
 **Benefits of direct callbacks:**
@@ -618,7 +617,7 @@ const button = await World.spawn({
     DisabledBackgroundColor: "#666666",   // When disabled
     Disabled: false,                       // Initially enabled
     BorderRadius: 8
-}, { parent: window });
+}, window);
 ```
 
 **Color cascade:**
@@ -642,7 +641,7 @@ const button = await World.spawn({
     BackgroundColor: "#3366CC",
     DisabledBackgroundColor: "#666666",
     Disabled: true  // Button starts disabled
-}, { parent: window });
+}, window);
 ```
 
 ### At Runtime
@@ -731,12 +730,12 @@ async function createButton(window, text, onClick) {
         HoverBackgroundColor: "#5ba0e9",
         PressedBackgroundColor: "#3a80c9",
         BorderRadius: 8
-    }, { parent: window });
+    }, window);
 
     await World.spawn({
         Node: { width: "auto", height: "auto" },
         Text: { value: text, font_size: 18, color: "#ffffff" }
-    }, { parent: button });
+    }, button);
 
     // Store callback
     button._onClick = onClick;
@@ -789,7 +788,7 @@ async function createProgressBar(parent, width) {
         },
         BackgroundColor: "#4a90d9",
         BorderRadius: 2
-    }, { parent: container });
+    }, container);
 
     return {
         container,
@@ -822,7 +821,7 @@ async function createMenu(window, items) {
         },
         BackgroundColor: "#1a1a2e",
         BorderRadius: 12
-    }, { parent: window });
+    }, window);
 
     const buttons = [];
 
@@ -840,12 +839,12 @@ async function createMenu(window, items) {
             HoverBackgroundColor: "#4d4d6c",
             PressedBackgroundColor: "#2d2d4c",
             BorderRadius: 8
-        }, { parent: menu });
+        }, menu);
 
         await World.spawn({
             Node: { width: "auto", height: "auto" },
             Text: { value: item.label, font_size: 18, color: "#ffffff" }
-        }, { parent: btn });
+        }, btn);
 
         btn._action = item.action;
         buttons.push(btn);
@@ -883,7 +882,7 @@ System.registerEvent("graphic:entity:interactionChanged", async (req, res) => {
 const scoreLabel = await World.spawn({
     Node: { width: "auto", height: "auto" },
     Text: { value: "Score: 0", font_size: 24, color: "#ffff00" }
-}, { parent: window });
+}, window);
 
 // Update the text (using update to preserve other fields)
 let score = 0;

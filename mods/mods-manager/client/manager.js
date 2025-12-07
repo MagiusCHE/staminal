@@ -122,7 +122,7 @@ export class Manager {
                 font_size: INITIAL_FONT_SIZE * 1.3,
                 color: "#ffffff"
             }
-        }, this.#loadingContainer.id);
+        }, this.#loadingContainer);
 
         this.#progressBarsContainer = await World.spawn({
             Node: {
@@ -135,7 +135,7 @@ export class Manager {
                 row_gap: 4
             },
             //BackgroundColor: "#FF0000",
-        }, this.#loadingContainer.id);
+        }, this.#loadingContainer);
         
         // Main progress bar container (background track) - child of loading container
         // Contains both the fill bar and the text overlay
@@ -149,7 +149,7 @@ export class Manager {
             },
             BackgroundColor: "#333344",
             BorderRadius: 4
-        }, this.#progressBarsContainer.id);
+        }, this.#progressBarsContainer);
        
         // Main progress bar fill (the colored part that grows) - positioned absolute
         this.#mainProgressBarFill = await World.spawn({
@@ -163,7 +163,7 @@ export class Manager {
             },
             BackgroundColor: "#4a9eff",
             BorderRadius: 4
-        }, this.#mainProgressBarContainer.id);
+        }, this.#mainProgressBarContainer);
         
 
         // Progress text - child of progress bar container, centered on top of the fill
@@ -177,7 +177,7 @@ export class Manager {
                 font_size: INITIAL_FONT_SIZE,
                 color: "#ffffff"
             }
-        }, this.#mainProgressBarContainer.id);
+        }, this.#mainProgressBarContainer);
 
         // Secondary download progress bar container - child of loading container
         this.#secondBarContainer = await World.spawn({
@@ -190,7 +190,7 @@ export class Manager {
             },
             BackgroundColor: "#333344",
             BorderRadius: 2
-        }, this.#progressBarsContainer.id);
+        }, this.#progressBarsContainer);
 
         // Secondary download progress bar fill - child of secondary bar container
         this.#secondProgressBarFill = await World.spawn({
@@ -200,7 +200,7 @@ export class Manager {
             },
             BackgroundColor: "#7ac74f",
             BorderRadius: 2
-        }, this.#secondBarContainer.id);
+        }, this.#secondBarContainer);
 
         // Action button - child of loading container, using pure ECS with Interaction + Button components
         this.#actionButton = await World.spawn({
@@ -220,7 +220,7 @@ export class Manager {
                 on_click: this.onActionClicked.bind(this)
             },
             Interaction: {}
-        }, this.#loadingContainer.id);
+        }, this.#loadingContainer);
 
         // Button text - child of action button
         this.#actionButtonText = await World.spawn({
@@ -233,7 +233,7 @@ export class Manager {
                 font_size: INITIAL_FONT_SIZE,
                 color: "#ffffff"
             }
-        }, this.#actionButton.id);
+        }, this.#actionButton);
 
     }
 

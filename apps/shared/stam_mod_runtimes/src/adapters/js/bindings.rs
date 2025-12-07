@@ -2979,14 +2979,14 @@ impl WorldJS {
     /// // Spawn as child of another entity
     /// const child = await World.spawn({
     ///     Node: { width: "100px", height: "50px" }
-    /// }, parent.id);
+    /// }, parentEntity);
     /// ```
     #[qjs(rename = "spawn")]
     pub async fn spawn<'js>(
         &self,
         ctx: Ctx<'js>,
         components: Opt<Object<'js>>,
-        parent: Opt<u64>,
+        parent: Opt<Value<'js>>,
     ) -> rquickjs::Result<rquickjs::Class<'js, EntityJS>> {
         // Get mod ID from global __MOD_ID__ variable for ownership tracking
         let mod_id: String = ctx
@@ -3046,10 +3046,24 @@ impl WorldJS {
             }
         }
 
+        // Extract parent ID from entity object (must have .id property)
+        let parent_id: Option<u64> = if let Some(ref parent_val) = parent.0 {
+            if parent_val.is_undefined() || parent_val.is_null() {
+                None
+            } else if let Some(obj) = parent_val.as_object() {
+                // Entity object with .id property
+                obj.get::<_, u64>("id").ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         // Spawn the entity with optional parent
         let entity_id = self
             .graphic_proxy
-            .spawn_entity(component_map, mod_id, parent.0)
+            .spawn_entity(component_map, mod_id, parent_id)
             .await
             .map_err(|e| {
                 ctx.throw(
