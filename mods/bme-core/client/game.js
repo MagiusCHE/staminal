@@ -106,7 +106,7 @@ export class Game {
             },
             ImageNode: {
                 resource_id: "title-screen-background",
-                image_mode: NodeImageMode.Auto,
+                image_mode: NodeImageMode.Contain,
             },
         },cont.id);
 

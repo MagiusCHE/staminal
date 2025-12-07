@@ -2490,16 +2490,20 @@ pub fn setup_graphic_api(ctx: Ctx, graphic_proxy: Arc<GraphicProxy>) -> Result<(
     ctx.globals().set("ImageScaleModes", scale_modes)?;
 
     // Create NodeImageMode enum (for ECS ImageNode component)
-    // Maps to Bevy's NodeImageMode variants:
+    // Maps to Bevy's NodeImageMode variants plus CSS-like modes:
     // - Auto (0): Image sized automatically based on source image size
     // - Stretch (1): Image stretched to match node size (ignores aspect ratio)
     // - Sliced (2): 9-slice scaling for UI panels
     // - Tiled (3): Image repeats as a pattern
+    // - Contain (4): Scale to fit within bounds while maintaining aspect ratio (may letterbox)
+    // - Cover (5): Scale to cover the entire area while maintaining aspect ratio (may crop)
     let node_image_mode = Object::new(ctx.clone())?;
     node_image_mode.set("Auto", 0u32)?;
     node_image_mode.set("Stretch", 1u32)?;
     node_image_mode.set("Sliced", 2u32)?;
     node_image_mode.set("Tiled", 3u32)?;
+    node_image_mode.set("Contain", 4u32)?;
+    node_image_mode.set("Cover", 5u32)?;
     ctx.globals().set("NodeImageMode", node_image_mode)?;
 
     Ok(())

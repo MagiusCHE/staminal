@@ -1605,7 +1605,7 @@ mod native_component_converters {
     /// ```json
     /// {
     ///   "resource_id": "my-image-alias",  // Required: alias from Resource.load()
-    ///   "image_mode": 0,                  // Optional: NodeImageMode enum value (0=Auto, 1=Stretch, 2=Sliced, 3=Tiled)
+    ///   "image_mode": 0,                  // Optional: NodeImageMode enum value (0=Auto, 1=Stretch, 2=Sliced, 3=Tiled, 4=Contain, 5=Cover)
     ///   "flip_x": false,                  // Optional: horizontal flip
     ///   "flip_y": false,                  // Optional: vertical flip
     ///   "color": "#FFFFFF"                // Optional: tint color
@@ -1614,47 +1614,62 @@ mod native_component_converters {
     pub struct ImageNodeConfig {
         pub resource_id: String,
         pub image_mode: bevy::ui::widget::NodeImageMode,
+        /// Original scale mode requested (for Cover/Contain which use Stretch internally)
+        pub scale_mode: Option<ImageScaleMode>,
         pub flip_x: bool,
         pub flip_y: bool,
         pub color: Option<Color>,
     }
 
     /// Parse NodeImageMode from JSON value
-    /// Accepts: number (0-3), string ("auto", "stretch", "sliced", "tiled"), or object with mode config
-    pub fn parse_node_image_mode(json: &Value) -> Result<bevy::ui::widget::NodeImageMode, String> {
+    /// Accepts: number (0-5), string ("auto", "stretch", "sliced", "tiled", "contain", "cover"), or object with mode config
+    ///
+    /// Returns: (NodeImageMode, Option<ImageScaleMode>)
+    /// For Cover/Contain, returns Stretch as the base mode and the original ImageScaleMode
+    pub fn parse_node_image_mode(json: &Value) -> Result<(bevy::ui::widget::NodeImageMode, Option<ImageScaleMode>), String> {
         // Handle number
         if let Some(n) = json.as_u64() {
             return match n {
-                0 => Ok(bevy::ui::widget::NodeImageMode::Auto),
-                1 => Ok(bevy::ui::widget::NodeImageMode::Stretch),
+                0 => Ok((bevy::ui::widget::NodeImageMode::Auto, None)),
+                1 => Ok((bevy::ui::widget::NodeImageMode::Stretch, None)),
                 2 => {
                     // Sliced with default values
-                    Ok(bevy::ui::widget::NodeImageMode::Sliced(bevy::sprite::TextureSlicer::default()))
+                    Ok((bevy::ui::widget::NodeImageMode::Sliced(bevy::sprite::TextureSlicer::default()), None))
                 }
                 3 => {
                     // Tiled with default values
-                    Ok(bevy::ui::widget::NodeImageMode::Tiled {
+                    Ok((bevy::ui::widget::NodeImageMode::Tiled {
                         tile_x: true,
                         tile_y: true,
                         stretch_value: 1.0,
-                    })
+                    }, None))
                 }
-                _ => Err(format!("Invalid image_mode: {}. Use 0=Auto, 1=Stretch, 2=Sliced, 3=Tiled", n)),
+                4 => {
+                    // Contain - uses Stretch internally, sizing handled by CoverContainImage system
+                    Ok((bevy::ui::widget::NodeImageMode::Stretch, Some(ImageScaleMode::Contain)))
+                }
+                5 => {
+                    // Cover - uses Stretch internally, sizing handled by CoverContainImage system
+                    Ok((bevy::ui::widget::NodeImageMode::Stretch, Some(ImageScaleMode::Cover)))
+                }
+                _ => Err(format!("Invalid image_mode: {}. Use 0=Auto, 1=Stretch, 2=Sliced, 3=Tiled, 4=Contain, 5=Cover", n)),
             };
         }
 
         // Handle string
         if let Some(s) = json.as_str() {
             return match s.to_lowercase().as_str() {
-                "auto" => Ok(bevy::ui::widget::NodeImageMode::Auto),
-                "stretch" => Ok(bevy::ui::widget::NodeImageMode::Stretch),
-                "sliced" => Ok(bevy::ui::widget::NodeImageMode::Sliced(bevy::sprite::TextureSlicer::default())),
-                "tiled" => Ok(bevy::ui::widget::NodeImageMode::Tiled {
+                "auto" => Ok((bevy::ui::widget::NodeImageMode::Auto, None)),
+                "stretch" => Ok((bevy::ui::widget::NodeImageMode::Stretch, None)),
+                "sliced" => Ok((bevy::ui::widget::NodeImageMode::Sliced(bevy::sprite::TextureSlicer::default()), None)),
+                "tiled" => Ok((bevy::ui::widget::NodeImageMode::Tiled {
                     tile_x: true,
                     tile_y: true,
                     stretch_value: 1.0,
-                }),
-                _ => Err(format!("Invalid image_mode: '{}'. Use 'auto', 'stretch', 'sliced', or 'tiled'", s)),
+                }, None)),
+                "contain" => Ok((bevy::ui::widget::NodeImageMode::Stretch, Some(ImageScaleMode::Contain))),
+                "cover" => Ok((bevy::ui::widget::NodeImageMode::Stretch, Some(ImageScaleMode::Cover))),
+                _ => Err(format!("Invalid image_mode: '{}'. Use 'auto', 'stretch', 'sliced', 'tiled', 'contain', or 'cover'", s)),
             };
         }
 
@@ -1662,8 +1677,8 @@ mod native_component_converters {
         if let Some(obj) = json.as_object() {
             if let Some(mode_type) = obj.get("type").and_then(|v| v.as_str()) {
                 return match mode_type.to_lowercase().as_str() {
-                    "auto" => Ok(bevy::ui::widget::NodeImageMode::Auto),
-                    "stretch" => Ok(bevy::ui::widget::NodeImageMode::Stretch),
+                    "auto" => Ok((bevy::ui::widget::NodeImageMode::Auto, None)),
+                    "stretch" => Ok((bevy::ui::widget::NodeImageMode::Stretch, None)),
                     "sliced" => {
                         // Parse TextureSlicer configuration
                         let border = obj.get("border").and_then(|b| b.as_object());
@@ -1672,31 +1687,33 @@ mod native_component_converters {
                         let bottom = border.and_then(|b| b.get("bottom")).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
                         let left = border.and_then(|b| b.get("left")).and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
 
-                        Ok(bevy::ui::widget::NodeImageMode::Sliced(bevy::sprite::TextureSlicer {
+                        Ok((bevy::ui::widget::NodeImageMode::Sliced(bevy::sprite::TextureSlicer {
                             border: bevy::sprite::BorderRect { top, right, bottom, left },
                             center_scale_mode: bevy::sprite::SliceScaleMode::Stretch,
                             sides_scale_mode: bevy::sprite::SliceScaleMode::Stretch,
                             max_corner_scale: 1.0,
-                        }))
+                        }), None))
                     }
                     "tiled" => {
                         let tile_x = obj.get("tile_x").and_then(|v| v.as_bool()).unwrap_or(true);
                         let tile_y = obj.get("tile_y").and_then(|v| v.as_bool()).unwrap_or(true);
                         let stretch_value = obj.get("stretch_value").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32;
 
-                        Ok(bevy::ui::widget::NodeImageMode::Tiled {
+                        Ok((bevy::ui::widget::NodeImageMode::Tiled {
                             tile_x,
                             tile_y,
                             stretch_value,
-                        })
+                        }, None))
                     }
-                    _ => Err(format!("Invalid image_mode type: '{}'. Use 'auto', 'stretch', 'sliced', or 'tiled'", mode_type)),
+                    "contain" => Ok((bevy::ui::widget::NodeImageMode::Stretch, Some(ImageScaleMode::Contain))),
+                    "cover" => Ok((bevy::ui::widget::NodeImageMode::Stretch, Some(ImageScaleMode::Cover))),
+                    _ => Err(format!("Invalid image_mode type: '{}'. Use 'auto', 'stretch', 'sliced', 'tiled', 'contain', or 'cover'", mode_type)),
                 };
             }
         }
 
         // Default to Auto
-        Ok(bevy::ui::widget::NodeImageMode::Auto)
+        Ok((bevy::ui::widget::NodeImageMode::Auto, None))
     }
 
     /// Parse ImageNode configuration from JSON
@@ -1711,10 +1728,11 @@ mod native_component_converters {
             .to_string();
 
         // Parse image_mode (optional, defaults to Auto)
-        let image_mode = if let Some(mode_val) = obj.get("image_mode") {
+        // Returns (NodeImageMode, Option<ImageScaleMode>) for Cover/Contain support
+        let (image_mode, scale_mode) = if let Some(mode_val) = obj.get("image_mode") {
             parse_node_image_mode(mode_val)?
         } else {
-            bevy::ui::widget::NodeImageMode::Auto
+            (bevy::ui::widget::NodeImageMode::Auto, None)
         };
 
         // Parse flip options
@@ -1731,6 +1749,7 @@ mod native_component_converters {
         Ok(ImageNodeConfig {
             resource_id,
             image_mode,
+            scale_mode,
             flip_x,
             flip_y,
             color,
@@ -2597,11 +2616,11 @@ fn process_commands(
                             NativeComponent::ImageNode => {
                                 match json_to_image_node_config(&component_data) {
                                     Ok(config) => {
-                                        tracing::debug!("ImageNode config: resource='{}', image_mode={:?}, flip_x={}, flip_y={}",
-                                            config.resource_id, config.image_mode, config.flip_x, config.flip_y);
+                                        tracing::debug!("ImageNode config: resource='{}', image_mode={:?}, scale_mode={:?}, flip_x={}, flip_y={}",
+                                            config.resource_id, config.image_mode, config.scale_mode, config.flip_x, config.flip_y);
                                         // Look up the image handle from the resource registry
                                         if let Some(image_handle) = resource_registry.get_image_handle(&config.resource_id) {
-                                            let mut image_node = bevy::ui::widget::ImageNode::new(image_handle);
+                                            let mut image_node = bevy::ui::widget::ImageNode::new(image_handle.clone());
                                             image_node.image_mode = config.image_mode;
                                             image_node.flip_x = config.flip_x;
                                             image_node.flip_y = config.flip_y;
@@ -2609,6 +2628,23 @@ fn process_commands(
                                                 image_node.color = color;
                                             }
                                             entity_commands.insert(image_node);
+
+                                            // If Cover or Contain mode, add the CoverContainImage component
+                                            // and configure the Node for proper positioning
+                                            if let Some(ref scale_mode) = config.scale_mode {
+                                                match scale_mode {
+                                                    ImageScaleMode::Cover | ImageScaleMode::Contain => {
+                                                        entity_commands.insert(CoverContainImage {
+                                                            scale_mode: scale_mode.clone(),
+                                                            image_handle: image_handle.clone(),
+                                                            last_container_size: Vec2::ZERO,
+                                                        });
+                                                        tracing::debug!("Added CoverContainImage component for {:?} mode on entity {}", scale_mode, script_id);
+                                                    }
+                                                    _ => {}
+                                                }
+                                            }
+
                                             is_ui_entity = true;  // Mark as UI entity
                                             tracing::debug!("Added native ImageNode component to entity {} with resource '{}'", script_id, config.resource_id);
                                         } else {
@@ -2828,7 +2864,7 @@ fn process_commands(
                             NativeComponent::ImageNode => {
                                 let config = json_to_image_node_config(&component_data)?;
                                 if let Some(image_handle) = resource_registry.get_image_handle(&config.resource_id) {
-                                    let mut image_node = bevy::ui::widget::ImageNode::new(image_handle);
+                                    let mut image_node = bevy::ui::widget::ImageNode::new(image_handle.clone());
                                     image_node.image_mode = config.image_mode;
                                     image_node.flip_x = config.flip_x;
                                     image_node.flip_y = config.flip_y;
@@ -2836,6 +2872,28 @@ fn process_commands(
                                         image_node.color = color;
                                     }
                                     commands.entity(entity).insert(image_node);
+
+                                    // Handle Cover/Contain modes
+                                    if let Some(ref scale_mode) = config.scale_mode {
+                                        match scale_mode {
+                                            ImageScaleMode::Cover | ImageScaleMode::Contain => {
+                                                commands.entity(entity).insert(CoverContainImage {
+                                                    scale_mode: scale_mode.clone(),
+                                                    image_handle: image_handle.clone(),
+                                                    last_container_size: Vec2::ZERO,
+                                                });
+                                                tracing::debug!("Added CoverContainImage component for {:?} mode on entity {}", scale_mode, entity_id);
+                                            }
+                                            _ => {
+                                                // Remove CoverContainImage if switching away from Cover/Contain
+                                                commands.entity(entity).remove::<CoverContainImage>();
+                                            }
+                                        }
+                                    } else {
+                                        // Remove CoverContainImage if no special scale mode
+                                        commands.entity(entity).remove::<CoverContainImage>();
+                                    }
+
                                     tracing::debug!("Inserted/Updated native ImageNode on entity {} with resource '{}'", entity_id, config.resource_id);
                                 } else {
                                     return Err(format!("Resource '{}' not found. Make sure to call Resource.load() first.", config.resource_id));
@@ -3942,6 +4000,12 @@ fn update_cover_contain_images(
             cover_contain.scale_mode
         );
 
+        // For both Cover and Contain, we use absolute positioning with transform centering.
+        // Set position_type to Absolute and position at 50%/50%, then use negative margins to center.
+        node.position_type = PositionType::Absolute;
+        node.left = Val::Percent(50.0);
+        node.top = Val::Percent(50.0);
+
         match cover_contain.scale_mode {
             ImageScaleMode::Cover => {
                 // For Cover: the node must fill the container completely while maintaining aspect ratio.
@@ -3950,7 +4014,7 @@ fn update_cover_contain_images(
                 // - At least one dimension fills the container exactly
                 // - The other dimension overflows (and is clipped by the parent)
                 // - The aspect ratio of the node matches the image aspect ratio
-                // - The node is centered using negative margins
+                // - The node is centered using position: absolute + left/top: 50% + negative margins
 
                 let (node_width, node_height) = if image_ratio > container_ratio {
                     // Image is relatively wider than container
@@ -3985,7 +4049,7 @@ fn update_cover_contain_images(
                 // - At least one dimension fills the container exactly
                 // - The other dimension is smaller (letterboxing)
                 // - The aspect ratio of the node matches the image aspect ratio
-                // - The node is centered using negative margins
+                // - The node is centered using position: absolute + left/top: 50% + negative margins
 
                 let (node_width, node_height) = if image_ratio > container_ratio {
                     // Image is relatively wider than container
