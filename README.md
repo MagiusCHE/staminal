@@ -63,7 +63,7 @@ staminal/
 
 ### Prerequisites
 - Rust (latest stable)
-- Node.js (for npm scripts)
+- Node.js (for npm scripts, it will removed in favor of cargo scripts in the near future)
 
 ### Running the Engine
 
