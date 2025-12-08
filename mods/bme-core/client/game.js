@@ -70,7 +70,14 @@ export class Game {
             resizable: this.#config.graphic.resizable,
             mode: this.#config.graphic.mode,
             positionMode: WindowPositionModes.Centered,
+            // onMousePressed: async (win, button, x, y) => {
+            //     console.log(`Main window mouse pressed: button=${button}, x=${x}, y=${y}`);
+            // }
         });
+
+        // mainWin.onMousePressed = async (win, button, x, y) => { 
+        //     console.log(`Main window mouse pressed: button=${button}, x=${x}, y=${y}`);
+        // }
 
         Graphic.setMainWindow(mainWin);
 

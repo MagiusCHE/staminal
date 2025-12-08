@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use tracing::{debug, error, trace};
+use tracing::{debug, error, trace, warn};
 
 /// Registry to track already-logged promise rejections to avoid duplicates
 /// QuickJS calls the rejection tracker multiple times for the same rejection
@@ -1974,6 +1974,163 @@ impl JsRuntimeAdapter {
         // No callback found in any context
         Ok(false)
     }
+
+    /// Dispatch a window event callback (async implementation)
+    ///
+    /// This looks up the callback in __WINDOW_EVENT_CALLBACKS__[windowId][eventType]
+    /// and invokes it with the window object and event data.
+    pub async fn dispatch_window_event_callback_async(
+        &self,
+        window_id: u64,
+        event_type: &str,
+        event_data: serde_json::Value,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        // Window callbacks are registered globally, not per-mod
+        // We need to iterate through all contexts to find the one with the callback
+        for loaded_mod in self.loaded_mods.values() {
+            let event_type_owned = event_type.to_string();
+            let event_data_clone = event_data.clone();
+            let graphic_proxy = self.graphic_proxy.clone();
+
+            let result: Result<bool, String> = loaded_mod
+                .context
+                .with(|ctx| {
+                    // Get the callback registry
+                    let globals = ctx.globals();
+                    let registry: Option<rquickjs::Object> = globals.get("__WINDOW_EVENT_CALLBACKS__").ok();
+
+                    let registry = match registry {
+                        Some(r) => r,
+                        None => return Ok(false), // No callbacks registered in this context
+                    };
+
+                    // Get callbacks for this window
+                    let window_callbacks: Option<rquickjs::Object> = registry.get(&window_id.to_string()).ok();
+                    let window_callbacks = match window_callbacks {
+                        Some(c) => c,
+                        None => return Ok(false), // No callbacks for this window
+                    };
+
+                    // Get callback for this event type
+                    let callback: Option<rquickjs::Function> = window_callbacks.get(&event_type_owned).ok();
+                    let callback = match callback {
+                        Some(c) => c,
+                        None => return Ok(false), // No callback for this event type
+                    };
+
+                    // Create the Window object to pass as first argument
+                    let window_obj = if let Some(proxy) = graphic_proxy.as_ref() {
+                        rquickjs::Class::instance(
+                            ctx.clone(),
+                            crate::adapters::js::bindings::WindowJS::new(window_id, proxy.clone()),
+                        )
+                        .map_err(|e| format!("Failed to create Window object: {:?}", e))?
+                    } else {
+                        return Err("GraphicProxy not available".to_string());
+                    };
+
+                    // Build arguments based on event type
+                    match event_type_owned.as_str() {
+                        "close" => {
+                            // onClose(win)
+                            callback.call::<_, ()>((window_obj,))
+                                .map_err(|e| format!("Callback execution failed: {:?}", e))?;
+                        }
+                        "resize" => {
+                            // onResize(win, width, height)
+                            let width = event_data_clone.get("width").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                            let height = event_data_clone.get("height").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                            callback.call::<_, ()>((window_obj, width, height))
+                                .map_err(|e| format!("Callback execution failed: {:?}", e))?;
+                        }
+                        "focus" => {
+                            // onFocus(win, focused)
+                            let focused = event_data_clone.get("focused").and_then(|v| v.as_bool()).unwrap_or(false);
+                            callback.call::<_, ()>((window_obj, focused))
+                                .map_err(|e| format!("Callback execution failed: {:?}", e))?;
+                        }
+                        "move" => {
+                            // onMove(win, x, y)
+                            let x = event_data_clone.get("x").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                            let y = event_data_clone.get("y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                            callback.call::<_, ()>((window_obj, x, y))
+                                .map_err(|e| format!("Callback execution failed: {:?}", e))?;
+                        }
+                        "keyPressed" | "keyReleased" => {
+                            // onKeyPressed/onKeyReleased(win, key, modifiers)
+                            let key = event_data_clone.get("key").and_then(|v| v.as_str()).unwrap_or("");
+                            let modifiers_obj = rquickjs::Object::new(ctx.clone())
+                                .map_err(|e| format!("Failed to create modifiers object: {:?}", e))?;
+                            if let Some(mods) = event_data_clone.get("modifiers").and_then(|v| v.as_object()) {
+                                if let Some(shift) = mods.get("shift").and_then(|v| v.as_bool()) {
+                                    modifiers_obj.set("shift", shift).ok();
+                                }
+                                if let Some(ctrl) = mods.get("ctrl").and_then(|v| v.as_bool()) {
+                                    modifiers_obj.set("ctrl", ctrl).ok();
+                                }
+                                if let Some(alt) = mods.get("alt").and_then(|v| v.as_bool()) {
+                                    modifiers_obj.set("alt", alt).ok();
+                                }
+                                if let Some(meta) = mods.get("meta").and_then(|v| v.as_bool()) {
+                                    modifiers_obj.set("meta", meta).ok();
+                                }
+                            }
+                            callback.call::<_, ()>((window_obj, key, modifiers_obj))
+                                .map_err(|e| format!("Callback execution failed: {:?}", e))?;
+                        }
+                        "character" => {
+                            // onCharacter(win, character)
+                            let character = event_data_clone.get("character").and_then(|v| v.as_str()).unwrap_or("");
+                            callback.call::<_, ()>((window_obj, character))
+                                .map_err(|e| format!("Callback execution failed: {:?}", e))?;
+                        }
+                        "mouseMove" => {
+                            // onMouseMove(win, x, y)
+                            let x = event_data_clone.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                            let y = event_data_clone.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                            callback.call::<_, ()>((window_obj, x, y))
+                                .map_err(|e| format!("Callback execution failed: {:?}", e))?;
+                        }
+                        "mousePressed" | "mouseReleased" => {
+                            // onMousePressed/onMouseReleased(win, button, x, y)
+                            let button = event_data_clone.get("button").and_then(|v| v.as_str()).unwrap_or("left");
+                            let x = event_data_clone.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                            let y = event_data_clone.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                            callback.call::<_, ()>((window_obj, button, x, y))
+                                .map_err(|e| format!("Callback execution failed: {:?}", e))?;
+                        }
+                        "mouseWheel" => {
+                            // onMouseWheel(win, deltaX, deltaY)
+                            let delta_x = event_data_clone.get("deltaX").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                            let delta_y = event_data_clone.get("deltaY").and_then(|v| v.as_f64()).unwrap_or(0.0) as f32;
+                            callback.call::<_, ()>((window_obj, delta_x, delta_y))
+                                .map_err(|e| format!("Callback execution failed: {:?}", e))?;
+                        }
+                        _ => {
+                            warn!("Unknown window event type: {}", event_type_owned);
+                            return Ok(false);
+                        }
+                    }
+
+                    trace!(
+                        "Window event callback invoked: window_id={}, event_type={}",
+                        window_id,
+                        event_type_owned
+                    );
+                    Ok(true)
+                })
+                .await;
+
+            match result {
+                Ok(true) => return Ok(true), // Callback found and invoked
+                Ok(false) => continue, // Not in this context, try next
+                Err(e) => return Err(e.into()), // Error during invocation
+            }
+        }
+
+        // No callback found in any context
+        Ok(false)
+    }
 }
 
 impl Drop for JsRuntimeAdapter {
@@ -2086,6 +2243,18 @@ impl RuntimeAdapter for JsRuntimeAdapter {
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
                 .block_on(self.dispatch_entity_event_callback_async(entity_id, event_type, event_data))
+        })
+    }
+
+    fn dispatch_window_event_callback(
+        &self,
+        window_id: u64,
+        event_type: &str,
+        event_data: serde_json::Value,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current()
+                .block_on(self.dispatch_window_event_callback_async(window_id, event_type, event_data))
         })
     }
 }

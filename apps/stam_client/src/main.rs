@@ -1758,67 +1758,123 @@ fn handle_graphic_event(
             }
         }
         GraphicEvent::WindowCreated { window_id } => {
-            trace!("Window {} created", window_id);
-            warn!("TODO: Dispatch window:created event to mods");
+            warn!("TODO: Dispatch window:created event to mods (window_id={})", window_id);
         }
         GraphicEvent::WindowClosed { window_id } => {
-            trace!("Window {} closed, dispatching GraphicEngineWindowClosed event", window_id);
 
-            // Dispatch GraphicEngineWindowClosed to all registered handlers
+            // Dispatch to window.onClose callback first
             if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
-                let request = GraphicEngineWindowClosedRequest::new(window_id);
-                let response = runtime_manager.dispatch_graphic_engine_window_closed(&request);
+                let event_data = serde_json::json!({});
+                let _ = runtime_manager.dispatch_window_event_callback(window_id, "close", event_data);
 
-            //     if response.handled {
-            //         debug!("GraphicEngineWindowClosed was handled by a mod");
-            //     } else {
-            //         debug!("GraphicEngineWindowClosed was not handled (no handlers or all handlers declined)");
-            //     }
-            // } else {
-            //     debug!("No runtime manager available to dispatch GraphicEngineWindowClosed");
+                // Also dispatch GraphicEngineWindowClosed to all registered handlers (for cross-script events)
+                let request = GraphicEngineWindowClosedRequest::new(window_id);
+                let _response = runtime_manager.dispatch_graphic_engine_window_closed(&request);
             }
         }
         GraphicEvent::WindowResized { window_id, width, height } => {
-            trace!("Window {} resized to {}x{}", window_id, width, height);
-            warn!("TODO: Dispatch window:resized event to mods");
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                let event_data = serde_json::json!({
+                    "width": width,
+                    "height": height
+                });
+                let _ = runtime_manager.dispatch_window_event_callback(window_id, "resize", event_data);
+            }
         }
         GraphicEvent::WindowFocused { window_id, focused } => {
-            trace!("Window {} focus changed: {}", window_id, focused);
-            warn!("TODO: Dispatch window:focused event to mods");
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                let event_data = serde_json::json!({
+                    "focused": focused
+                });
+                let _ = runtime_manager.dispatch_window_event_callback(window_id, "focus", event_data);
+            }
         }
         GraphicEvent::WindowMoved { window_id, x, y } => {
-            trace!("Window {} moved to ({}, {})", window_id, x, y);
-            warn!("TODO: Dispatch window:moved event to mods");
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                let event_data = serde_json::json!({
+                    "x": x,
+                    "y": y
+                });
+                let _ = runtime_manager.dispatch_window_event_callback(window_id, "move", event_data);
+            }
         }
         GraphicEvent::KeyPressed { window_id, key, modifiers } => {
-            trace!("Key pressed in window {}: {} (mods: {:?})", window_id, key, modifiers);
-            warn!("TODO: Dispatch input:keyPressed event to mods");
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                let event_data = serde_json::json!({
+                    "key": key,
+                    "modifiers": {
+                        "shift": modifiers.shift,
+                        "ctrl": modifiers.ctrl,
+                        "alt": modifiers.alt,
+                        "meta": modifiers.meta
+                    }
+                });
+                let _ = runtime_manager.dispatch_window_event_callback(window_id, "keyPressed", event_data);
+            }
         }
         GraphicEvent::KeyReleased { window_id, key, modifiers } => {
-            trace!("Key released in window {}: {} (mods: {:?})", window_id, key, modifiers);
-            warn!("TODO: Dispatch input:keyReleased event to mods");
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                let event_data = serde_json::json!({
+                    "key": key,
+                    "modifiers": {
+                        "shift": modifiers.shift,
+                        "ctrl": modifiers.ctrl,
+                        "alt": modifiers.alt,
+                        "meta": modifiers.meta
+                    }
+                });
+                let _ = runtime_manager.dispatch_window_event_callback(window_id, "keyReleased", event_data);
+            }
         }
         GraphicEvent::CharacterInput { window_id, character } => {
-            trace!("Character input in window {}: '{}'", window_id, character);
-            warn!("TODO: Dispatch input:character event to mods");
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                let event_data = serde_json::json!({
+                    "character": character.to_string()
+                });
+                let _ = runtime_manager.dispatch_window_event_callback(window_id, "character", event_data);
+            }
         }
         GraphicEvent::MouseMoved { window_id, x, y } => {
             // Too verbose for debug, use trace if needed
             // trace!("Mouse moved in window {}: ({}, {})", window_id, x, y);
-            let _ = (window_id, x, y); // Suppress unused warnings
-            warn!("TODO: Dispatch input:mouseMoved event to mods");
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                let event_data = serde_json::json!({
+                    "x": x,
+                    "y": y
+                });
+                let _ = runtime_manager.dispatch_window_event_callback(window_id, "mouseMove", event_data);
+            }
         }
         GraphicEvent::MouseButtonPressed { window_id, button, x, y } => {
-            trace!("Mouse button {:?} pressed in window {} at ({}, {})", button, window_id, x, y);
-            warn!("TODO: Dispatch input:mousePressed event to mods");
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                let button_str = format!("{:?}", button).to_lowercase();
+                let event_data = serde_json::json!({
+                    "button": button_str,
+                    "x": x,
+                    "y": y
+                });
+                let _ = runtime_manager.dispatch_window_event_callback(window_id, "mousePressed", event_data);
+            }
         }
         GraphicEvent::MouseButtonReleased { window_id, button, x, y } => {
-            trace!("Mouse button {:?} released in window {} at ({}, {})", button, window_id, x, y);
-            warn!("TODO: Dispatch input:mouseReleased event to mods");
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                let button_str = format!("{:?}", button).to_lowercase();
+                let event_data = serde_json::json!({
+                    "button": button_str,
+                    "x": x,
+                    "y": y
+                });
+                let _ = runtime_manager.dispatch_window_event_callback(window_id, "mouseReleased", event_data);
+            }
         }
         GraphicEvent::MouseWheel { window_id, delta_x, delta_y } => {
-            trace!("Mouse wheel in window {}: ({}, {})", window_id, delta_x, delta_y);
-            warn!("TODO: Dispatch input:mouseWheel event to mods");
+            if let Some(runtime_manager) = runtime_manager_opt.as_ref() {
+                let event_data = serde_json::json!({
+                    "deltaX": delta_x,
+                    "deltaY": delta_y
+                });
+                let _ = runtime_manager.dispatch_window_event_callback(window_id, "mouseWheel", event_data);
+            }
         }
         GraphicEvent::FrameStart { window_id, delta_time } => {
             // Too verbose for debug

@@ -117,6 +117,7 @@ impl GraphicEngine for BevyEngine {
         app.insert_resource(EventSenderRes(event_tx.clone()));
         app.insert_resource(WindowRegistry::default());
         app.insert_resource(WindowUIRegistry::default());
+        app.insert_resource(FocusedWindow::default());
         app.insert_resource(FontRegistry::default());
         app.insert_resource(ResourceRegistry::default());
         app.insert_resource(PendingAssetRegistry::default());
@@ -302,6 +303,13 @@ impl WindowRegistry {
 // ============================================================================
 // Widget System Resources and Components
 // ============================================================================
+
+/// Tracks which window currently has focus (for input routing)
+#[derive(Resource, Default)]
+struct FocusedWindow {
+    /// The window ID that currently has focus (None if no window has focus)
+    window_id: Option<u64>,
+}
 
 /// Registry for window UI infrastructure (cameras and root nodes)
 ///
@@ -3792,10 +3800,14 @@ fn send_frame_events(event_tx: Res<EventSenderRes>, time: Res<Time>) {
 /// System to handle keyboard input
 fn handle_keyboard_input(
     event_tx: Res<EventSenderRes>,
+    focused_window: Res<FocusedWindow>,
     keyboard: Res<ButtonInput<KeyCode>>,
 ) {
-    // Get the primary window ID (or default to 1)
-    let window_id = 1u64; // TODO: proper multi-window support
+    // Only send keyboard events if a window has focus
+    let window_id = match focused_window.window_id {
+        Some(id) => id,
+        None => return, // No window focused, skip keyboard events
+    };
 
     // Get current modifiers
     let modifiers = KeyModifiers {
@@ -3829,20 +3841,24 @@ fn handle_keyboard_input(
 /// System to handle mouse input
 fn handle_mouse_input(
     event_tx: Res<EventSenderRes>,
+    focused_window: Res<FocusedWindow>,
+    registry: Res<WindowRegistry>,
     mouse_button: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
-    windows: Query<&Window, With<PrimaryWindow>>,
+    windows: Query<(Entity, &Window)>,
 ) {
-    let window_id = 1u64; // TODO: proper multi-window support
-
-    // Get cursor position
-    let (x, y) = if let Ok(window) = windows.single() {
-        window
-            .cursor_position()
-            .map(|pos| (pos.x, pos.y))
-            .unwrap_or((0.0, 0.0))
-    } else {
-        (0.0, 0.0)
+    // Only send mouse events if a window has focus
+    let window_id = match focused_window.window_id {
+        Some(id) => id,
+        None => return, // No window focused, skip mouse events
     };
+
+    // Get cursor position from the focused window
+    let (x, y) = windows
+        .iter()
+        .find(|(entity, _)| registry.get_id(*entity) == Some(window_id))
+        .and_then(|(_, window)| window.cursor_position())
+        .map(|pos| (pos.x, pos.y))
+        .unwrap_or((0.0, 0.0));
 
     // Send mouse button pressed events
     for button in mouse_button.get_just_pressed() {
@@ -3885,6 +3901,7 @@ fn handle_mouse_input(
 fn handle_window_events(
     event_tx: Res<EventSenderRes>,
     registry: Res<WindowRegistry>,
+    mut focused_window: ResMut<FocusedWindow>,
     mut resize_events: EventReader<bevy::window::WindowResized>,
     mut focus_events: EventReader<bevy::window::WindowFocused>,
     mut moved_events: EventReader<bevy::window::WindowMoved>,
@@ -3902,6 +3919,14 @@ fn handle_window_events(
 
     for event in focus_events.read() {
         if let Some(window_id) = registry.get_id(event.window) {
+            // Update the focused window tracker
+            if event.focused {
+                focused_window.window_id = Some(window_id);
+            } else if focused_window.window_id == Some(window_id) {
+                // Only clear if this window was the focused one
+                focused_window.window_id = None;
+            }
+
             let _ = event_tx.0.try_send(GraphicEvent::WindowFocused {
                 window_id,
                 focused: event.focused,
@@ -3923,6 +3948,10 @@ fn handle_window_events(
     for event in close_requested_events.read() {
         if let Some(window_id) = registry.get_id(event.window) {
             tracing::debug!("Window {} close requested by user", window_id);
+            // Clear focused window if it was the one being closed
+            if focused_window.window_id == Some(window_id) {
+                focused_window.window_id = None;
+            }
             let _ = event_tx.0.try_send(GraphicEvent::WindowClosed { window_id });
         }
     }

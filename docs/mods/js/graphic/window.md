@@ -260,6 +260,17 @@ Creates a new window.
   - `resizable`: `boolean` (default: `true`)
   - `visible`: `boolean` (default: `true`)
   - `positionMode`: `WindowPositionModes` (default: `Centered`)
+  - `onClose`: `function` - Callback when window closes
+  - `onResize`: `function` - Callback when window resizes
+  - `onFocus`: `function` - Callback when window gains/loses focus
+  - `onMove`: `function` - Callback when window moves
+  - `onKeyPressed`: `function` - Callback when key is pressed
+  - `onKeyReleased`: `function` - Callback when key is released
+  - `onCharacter`: `function` - Callback when character is typed
+  - `onMouseMove`: `function` - Callback when mouse moves
+  - `onMousePressed`: `function` - Callback when mouse button is pressed
+  - `onMouseReleased`: `function` - Callback when mouse button is released
+  - `onMouseWheel`: `function` - Callback when mouse wheel is scrolled
 
 **Returns:** `Promise<Window>`
 
@@ -270,6 +281,26 @@ const debugWindow = await Graphic.createWindow({
     width: 600,
     height: 400,
     resizable: true
+});
+```
+
+**Example with callbacks:**
+```javascript
+const mainWin = await Graphic.createWindow({
+    title: "My Game",
+    width: 1280,
+    height: 720,
+    onMousePressed: async (win, button, x, y) => {
+        console.log(`Mouse ${button} pressed at (${x}, ${y})`);
+    },
+    onKeyPressed: async (win, key, modifiers) => {
+        if (key === "Escape") {
+            console.log("Escape pressed - opening menu");
+        }
+    },
+    onResize: async (win, width, height) => {
+        console.log(`Window resized to ${width}x${height}`);
+    }
 });
 ```
 
@@ -508,6 +539,181 @@ Closes the window.
 
 ```javascript
 await debugWindow.close();
+```
+
+---
+
+## Window Event Callbacks
+
+Windows support event callbacks that are invoked directly on the window object. These are useful for handling input events and window lifecycle events.
+
+### `window.onClose`
+
+Called when the window is about to close.
+
+```javascript
+mainWin.onClose = async (win) => {
+    console.log("Window closing...");
+    // Save game state, cleanup, etc.
+};
+```
+
+---
+
+### `window.onResize`
+
+Called when the window is resized.
+
+```javascript
+mainWin.onResize = async (win, width, height) => {
+    console.log(`Window resized to ${width}x${height}`);
+    // Update UI layout
+};
+```
+
+---
+
+### `window.onFocus`
+
+Called when the window gains or loses focus.
+
+```javascript
+mainWin.onFocus = async (win, focused) => {
+    if (focused) {
+        console.log("Window gained focus");
+        // Resume game
+    } else {
+        console.log("Window lost focus");
+        // Pause game
+    }
+};
+```
+
+---
+
+### `window.onMove`
+
+Called when the window is moved.
+
+```javascript
+mainWin.onMove = async (win, x, y) => {
+    console.log(`Window moved to (${x}, ${y})`);
+};
+```
+
+---
+
+### `window.onKeyPressed`
+
+Called when a key is pressed.
+
+```javascript
+mainWin.onKeyPressed = async (win, key, modifiers) => {
+    console.log(`Key pressed: ${key}`);
+    if (modifiers.ctrl && key === "KeyS") {
+        console.log("Ctrl+S pressed - save game");
+    }
+};
+```
+
+**Parameters:**
+- `win`: `Window` - The window object
+- `key`: `string` - Key identifier (e.g., "KeyA", "Space", "Escape")
+- `modifiers`: `object` - Active modifier keys
+  - `shift`: `boolean`
+  - `ctrl`: `boolean`
+  - `alt`: `boolean`
+  - `meta`: `boolean`
+
+---
+
+### `window.onKeyReleased`
+
+Called when a key is released.
+
+```javascript
+mainWin.onKeyReleased = async (win, key, modifiers) => {
+    console.log(`Key released: ${key}`);
+};
+```
+
+---
+
+### `window.onCharacter`
+
+Called when a character is typed (useful for text input).
+
+```javascript
+mainWin.onCharacter = async (win, character) => {
+    console.log(`Character typed: ${character}`);
+};
+```
+
+---
+
+### `window.onMouseMove`
+
+Called when the mouse moves within the window.
+
+> **Note:** This event fires frequently. Avoid heavy operations in the callback.
+
+```javascript
+mainWin.onMouseMove = async (win, x, y) => {
+    // Update cursor position display
+};
+```
+
+---
+
+### `window.onMousePressed`
+
+Called when a mouse button is pressed.
+
+```javascript
+mainWin.onMousePressed = async (win, button, x, y) => {
+    console.log(`Mouse button ${button} pressed at (${x}, ${y})`);
+};
+```
+
+**Parameters:**
+- `win`: `Window` - The window object
+- `button`: `string` - Button identifier ("left", "right", "middle")
+- `x`: `number` - X position in pixels
+- `y`: `number` - Y position in pixels
+
+---
+
+### `window.onMouseReleased`
+
+Called when a mouse button is released.
+
+```javascript
+mainWin.onMouseReleased = async (win, button, x, y) => {
+    console.log(`Mouse button ${button} released at (${x}, ${y})`);
+};
+```
+
+---
+
+### `window.onMouseWheel`
+
+Called when the mouse wheel is scrolled.
+
+```javascript
+mainWin.onMouseWheel = async (win, deltaX, deltaY) => {
+    console.log(`Mouse wheel: (${deltaX}, ${deltaY})`);
+    // Zoom in/out based on deltaY
+};
+```
+
+---
+
+### Removing Callbacks
+
+Set the callback to `null` or `undefined` to remove it:
+
+```javascript
+mainWin.onKeyPressed = null; // Remove the callback
 ```
 
 ---

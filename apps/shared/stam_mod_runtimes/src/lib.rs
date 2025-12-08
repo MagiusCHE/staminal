@@ -186,6 +186,30 @@ pub trait RuntimeAdapter {
         // Default: no callback registered
         Ok(false)
     }
+
+    /// Dispatch a window event callback
+    ///
+    /// This is called when a window event occurs (resize, focus, key press, etc.).
+    /// Unlike global events, this uses a direct callback mechanism where the callback
+    /// function is stored on the Window object via `window.onClose = ...` etc.
+    ///
+    /// # Arguments
+    /// * `window_id` - The window ID that triggered the event
+    /// * `event_type` - The event type (e.g., "close", "resize", "keyPressed", etc.)
+    /// * `event_data` - Event-specific data as JSON object
+    ///
+    /// # Returns
+    /// Ok(true) if a callback was found and invoked, Ok(false) if no callback registered,
+    /// Err if invocation failed
+    fn dispatch_window_event_callback(
+        &self,
+        _window_id: u64,
+        _event_type: &str,
+        _event_data: serde_json::Value,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        // Default: no callback registered
+        Ok(false)
+    }
 }
 
 /// Manager for all mod runtimes
@@ -459,6 +483,33 @@ impl RuntimeManager {
         // Dispatch to all runtimes - the one that registered the callback will handle it
         for runtime in self.runtimes.values() {
             if runtime.dispatch_entity_event_callback(entity_id, event_type, event_data.clone())? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Dispatch a direct window event callback
+    ///
+    /// This is called when a window event occurs (resize, focus, key press, etc.).
+    /// The callback is invoked directly without going through the global event system.
+    ///
+    /// # Arguments
+    /// * `window_id` - The window ID that triggered the event
+    /// * `event_type` - The event type (e.g., "close", "resize", "keyPressed", etc.)
+    /// * `event_data` - Event-specific data as JSON object
+    ///
+    /// # Returns
+    /// Ok(true) if a callback was found and invoked by any runtime, Ok(false) if none
+    pub fn dispatch_window_event_callback(
+        &self,
+        window_id: u64,
+        event_type: &str,
+        event_data: serde_json::Value,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        // Dispatch to all runtimes - the one that registered the callback will handle it
+        for runtime in self.runtimes.values() {
+            if runtime.dispatch_window_event_callback(window_id, event_type, event_data.clone())? {
                 return Ok(true);
             }
         }

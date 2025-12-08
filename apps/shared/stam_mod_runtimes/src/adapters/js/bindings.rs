@@ -1822,6 +1822,25 @@ impl GraphicJS {
     ) -> rquickjs::Result<rquickjs::Class<'js, WindowJS>> {
         tracing::debug!("GraphicJS::create_window called");
 
+        // Extract callbacks from config before consuming it for window config
+        let callbacks: Vec<(&str, Option<Function<'js>>)> = if let Some(ref cfg) = config.0 {
+            vec![
+                ("close", cfg.get::<_, Function>("onClose").ok()),
+                ("resize", cfg.get::<_, Function>("onResize").ok()),
+                ("focus", cfg.get::<_, Function>("onFocus").ok()),
+                ("move", cfg.get::<_, Function>("onMove").ok()),
+                ("keyPressed", cfg.get::<_, Function>("onKeyPressed").ok()),
+                ("keyReleased", cfg.get::<_, Function>("onKeyReleased").ok()),
+                ("character", cfg.get::<_, Function>("onCharacter").ok()),
+                ("mouseMove", cfg.get::<_, Function>("onMouseMove").ok()),
+                ("mousePressed", cfg.get::<_, Function>("onMousePressed").ok()),
+                ("mouseReleased", cfg.get::<_, Function>("onMouseReleased").ok()),
+                ("mouseWheel", cfg.get::<_, Function>("onMouseWheel").ok()),
+            ]
+        } else {
+            vec![]
+        };
+
         let window_config = if let Some(cfg) = config.0 {
             let fullscreen = cfg.get::<_, bool>("fullscreen").unwrap_or(false);
             WindowConfig {
@@ -1848,13 +1867,19 @@ impl GraphicJS {
             .await
             .map_err(|e| ctx.throw(rquickjs::String::from_str(ctx.clone(), &e).unwrap().into()))?;
 
-        rquickjs::Class::<WindowJS>::instance(
-            ctx,
-            WindowJS {
-                id: window_id,
-                graphic_proxy: self.graphic_proxy.clone(),
-            },
-        )
+        let window_js = WindowJS {
+            id: window_id,
+            graphic_proxy: self.graphic_proxy.clone(),
+        };
+
+        // Register any callbacks that were provided in the config
+        for (event_type, callback) in callbacks {
+            if callback.is_some() {
+                window_js.set_window_callback(&ctx, event_type, callback)?;
+            }
+        }
+
+        rquickjs::Class::<WindowJS>::instance(ctx, window_js)
     }
 
     /// Load a custom font from a file
@@ -1972,6 +1997,13 @@ pub struct WindowJS {
     id: u64,
     #[qjs(skip_trace)]
     graphic_proxy: Arc<GraphicProxy>,
+}
+
+impl WindowJS {
+    /// Create a new WindowJS instance
+    pub fn new(id: u64, graphic_proxy: Arc<GraphicProxy>) -> Self {
+        Self { id, graphic_proxy }
+    }
 }
 
 #[rquickjs::methods]
@@ -2154,6 +2186,232 @@ impl WindowJS {
         })?;
 
         Ok(info.config.mode.to_u32())
+    }
+
+    // ========================================================================
+    // Window Event Callbacks
+    // ========================================================================
+    // These callbacks allow mods to handle window events directly on the window object.
+    // Callbacks are stored in __WINDOW_EVENT_CALLBACKS__[windowId][eventType] = callback
+    //
+    // Available callbacks:
+    // - onClose: Called when the window close button is clicked
+    // - onResize: Called when the window is resized (width, height)
+    // - onFocus: Called when the window gains/loses focus (focused: boolean)
+    // - onMove: Called when the window is moved (x, y)
+    // - onKeyPressed: Called when a key is pressed (key, modifiers)
+    // - onKeyReleased: Called when a key is released (key, modifiers)
+    // - onCharacter: Called when a character is typed (character)
+    // - onMouseMove: Called when the mouse moves (x, y)
+    // - onMousePressed: Called when a mouse button is pressed (button, x, y)
+    // - onMouseReleased: Called when a mouse button is released (button, x, y)
+    // - onMouseWheel: Called when the mouse wheel is scrolled (deltaX, deltaY)
+
+    /// Get/Set callback for window close event
+    ///
+    /// # Example
+    /// ```javascript
+    /// mainWin.onClose = async (win) => {
+    ///     console.log("Window closing...");
+    /// };
+    /// ```
+    #[qjs(get, rename = "onClose")]
+    pub fn get_on_close<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        self.get_window_callback(&ctx, "close")
+    }
+
+    #[qjs(set, rename = "onClose")]
+    pub fn set_on_close<'js>(&self, ctx: Ctx<'js>, callback: Opt<Function<'js>>) -> rquickjs::Result<()> {
+        self.set_window_callback(&ctx, "close", callback.0)
+    }
+
+    /// Get/Set callback for window resize event
+    #[qjs(get, rename = "onResize")]
+    pub fn get_on_resize<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        self.get_window_callback(&ctx, "resize")
+    }
+
+    #[qjs(set, rename = "onResize")]
+    pub fn set_on_resize<'js>(&self, ctx: Ctx<'js>, callback: Opt<Function<'js>>) -> rquickjs::Result<()> {
+        self.set_window_callback(&ctx, "resize", callback.0)
+    }
+
+    /// Get/Set callback for window focus event
+    #[qjs(get, rename = "onFocus")]
+    pub fn get_on_focus<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        self.get_window_callback(&ctx, "focus")
+    }
+
+    #[qjs(set, rename = "onFocus")]
+    pub fn set_on_focus<'js>(&self, ctx: Ctx<'js>, callback: Opt<Function<'js>>) -> rquickjs::Result<()> {
+        self.set_window_callback(&ctx, "focus", callback.0)
+    }
+
+    /// Get/Set callback for window move event
+    #[qjs(get, rename = "onMove")]
+    pub fn get_on_move<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        self.get_window_callback(&ctx, "move")
+    }
+
+    #[qjs(set, rename = "onMove")]
+    pub fn set_on_move<'js>(&self, ctx: Ctx<'js>, callback: Opt<Function<'js>>) -> rquickjs::Result<()> {
+        self.set_window_callback(&ctx, "move", callback.0)
+    }
+
+    /// Get/Set callback for key pressed event
+    #[qjs(get, rename = "onKeyPressed")]
+    pub fn get_on_key_pressed<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        self.get_window_callback(&ctx, "keyPressed")
+    }
+
+    #[qjs(set, rename = "onKeyPressed")]
+    pub fn set_on_key_pressed<'js>(&self, ctx: Ctx<'js>, callback: Opt<Function<'js>>) -> rquickjs::Result<()> {
+        self.set_window_callback(&ctx, "keyPressed", callback.0)
+    }
+
+    /// Get/Set callback for key released event
+    #[qjs(get, rename = "onKeyReleased")]
+    pub fn get_on_key_released<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        self.get_window_callback(&ctx, "keyReleased")
+    }
+
+    #[qjs(set, rename = "onKeyReleased")]
+    pub fn set_on_key_released<'js>(&self, ctx: Ctx<'js>, callback: Opt<Function<'js>>) -> rquickjs::Result<()> {
+        self.set_window_callback(&ctx, "keyReleased", callback.0)
+    }
+
+    /// Get/Set callback for character input event
+    #[qjs(get, rename = "onCharacter")]
+    pub fn get_on_character<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        self.get_window_callback(&ctx, "character")
+    }
+
+    #[qjs(set, rename = "onCharacter")]
+    pub fn set_on_character<'js>(&self, ctx: Ctx<'js>, callback: Opt<Function<'js>>) -> rquickjs::Result<()> {
+        self.set_window_callback(&ctx, "character", callback.0)
+    }
+
+    /// Get/Set callback for mouse move event
+    #[qjs(get, rename = "onMouseMove")]
+    pub fn get_on_mouse_move<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        self.get_window_callback(&ctx, "mouseMove")
+    }
+
+    #[qjs(set, rename = "onMouseMove")]
+    pub fn set_on_mouse_move<'js>(&self, ctx: Ctx<'js>, callback: Opt<Function<'js>>) -> rquickjs::Result<()> {
+        self.set_window_callback(&ctx, "mouseMove", callback.0)
+    }
+
+    /// Get/Set callback for mouse button pressed event
+    #[qjs(get, rename = "onMousePressed")]
+    pub fn get_on_mouse_pressed<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        self.get_window_callback(&ctx, "mousePressed")
+    }
+
+    #[qjs(set, rename = "onMousePressed")]
+    pub fn set_on_mouse_pressed<'js>(&self, ctx: Ctx<'js>, callback: Opt<Function<'js>>) -> rquickjs::Result<()> {
+        self.set_window_callback(&ctx, "mousePressed", callback.0)
+    }
+
+    /// Get/Set callback for mouse button released event
+    #[qjs(get, rename = "onMouseReleased")]
+    pub fn get_on_mouse_released<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        self.get_window_callback(&ctx, "mouseReleased")
+    }
+
+    #[qjs(set, rename = "onMouseReleased")]
+    pub fn set_on_mouse_released<'js>(&self, ctx: Ctx<'js>, callback: Opt<Function<'js>>) -> rquickjs::Result<()> {
+        self.set_window_callback(&ctx, "mouseReleased", callback.0)
+    }
+
+    /// Get/Set callback for mouse wheel event
+    #[qjs(get, rename = "onMouseWheel")]
+    pub fn get_on_mouse_wheel<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+        self.get_window_callback(&ctx, "mouseWheel")
+    }
+
+    #[qjs(set, rename = "onMouseWheel")]
+    pub fn set_on_mouse_wheel<'js>(&self, ctx: Ctx<'js>, callback: Opt<Function<'js>>) -> rquickjs::Result<()> {
+        self.set_window_callback(&ctx, "mouseWheel", callback.0)
+    }
+}
+
+impl WindowJS {
+    /// Helper to get a window callback from the global registry
+    fn get_window_callback<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        event_type: &str,
+    ) -> rquickjs::Result<Value<'js>> {
+        let globals = ctx.globals();
+
+        // Get the window callback registry
+        let registry: Option<Object> = globals.get("__WINDOW_EVENT_CALLBACKS__").ok();
+        let registry = match registry {
+            Some(r) => r,
+            None => return Ok(Value::new_null(ctx.clone())),
+        };
+
+        let window_id_str = self.id.to_string();
+
+        // Get this window's callback map
+        let window_callbacks: Option<Object> = registry.get(&window_id_str as &str).ok();
+        let window_callbacks = match window_callbacks {
+            Some(c) => c,
+            None => return Ok(Value::new_null(ctx.clone())),
+        };
+
+        // Get the callback for this event type
+        let callback: Option<Function> = window_callbacks.get(event_type).ok();
+        match callback {
+            Some(func) => Ok(func.into_value()),
+            None => Ok(Value::new_null(ctx.clone())),
+        }
+    }
+
+    /// Helper to set a window callback in the global registry
+    fn set_window_callback<'js>(
+        &self,
+        ctx: &Ctx<'js>,
+        event_type: &str,
+        callback: Option<Function<'js>>,
+    ) -> rquickjs::Result<()> {
+        let globals = ctx.globals();
+
+        // Get or create the window callback registry
+        let registry: Object = match globals.get("__WINDOW_EVENT_CALLBACKS__") {
+            Ok(r) => r,
+            Err(_) => {
+                let new_registry = Object::new(ctx.clone())?;
+                globals.set("__WINDOW_EVENT_CALLBACKS__", new_registry.clone())?;
+                new_registry
+            }
+        };
+
+        let window_id_str = self.id.to_string();
+
+        // Get or create this window's callback map
+        let window_callbacks: Object = match registry.get(&window_id_str as &str) {
+            Ok(obj) => obj,
+            Err(_) => {
+                let new_obj = Object::new(ctx.clone())?;
+                registry.set(&window_id_str as &str, new_obj.clone())?;
+                new_obj
+            }
+        };
+
+        // Set or remove the callback
+        if let Some(func) = callback {
+            window_callbacks.set(event_type, func)?;
+            tracing::debug!("Registered window {} callback: {}", self.id, event_type);
+        } else {
+            // Remove the callback by setting it to null
+            let null_val = Value::new_null(ctx.clone());
+            window_callbacks.set(event_type, null_val)?;
+            tracing::debug!("Removed window {} callback: {}", self.id, event_type);
+        }
+
+        Ok(())
     }
 }
 
