@@ -1,5 +1,7 @@
 # Staminal
 
+> **⚠️ Early Development**: This project is in a very early stage and is currently more of a proof-of-concept than a production-ready engine.
+
 **An Undifferentiated Game Engine Core**
 
 Staminal is a modular game engine written in Rust where the core provides only the platform (networking, virtual filesystem, security) while all game logic is delivered through **Mods**. Inspired by stem cells, the engine remains "undifferentiated" — it doesn't dictate what kind of game you build.
