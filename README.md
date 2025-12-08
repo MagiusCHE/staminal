@@ -19,6 +19,17 @@ Planned runtimes: Lua, C#, Rust, C++
 - **Bootstrap mods**: Entry points that start game logic (`onBootstrap()`)
 - **Library mods**: Utility modules imported by other mods (`onAttach()` only)
 
+### Client & Server Scripts
+Each mod can have separate scripts for client and server:
+```
+mods/my-mod/
+├── mod.json       # Mod manifest
+├── client/        # Client-side scripts (UI, rendering, input)
+│   └── index.js
+└── server/        # Server-side scripts (game state, validation)
+    └── index.js
+```
+
 ### Cross-Mod Imports
 Mods can import from each other using the `@mod-id` syntax:
 ```javascript
