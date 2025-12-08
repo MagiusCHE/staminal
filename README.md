@@ -120,6 +120,7 @@ Mods have access to these global objects:
 | `File` | Secure file read/write |
 | `Locale` | Localization and translations |
 | `Resource` | Asset loading (images, fonts) |
+| `Network` | requests, downloads and multiplayer packets |
 | `Process` | Application paths and environment |
 | `console` | Standard logging |
 
