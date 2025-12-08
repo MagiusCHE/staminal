@@ -1,6 +1,6 @@
 # Staminal Protocol - Connection Flow
 
-Schema del flusso di connessione basato su `stam_protocol`, `stam_client` e `stam_server`.
+Schema of the connection flow based on `stam_protocol`, `stam_client` and `stam_server`.
 
 ## Overview
 
@@ -34,7 +34,7 @@ Schema del flusso di connessione basato su `stam_protocol`, `stam_client` e `sta
 
 ## Flow A: PrimalLogin (Server List)
 
-Utilizzato per ottenere la lista dei server disponibili.
+Used to obtain the list of available servers.
 
 ```
        ├─────────────────────────────────────────────────────────────┤
@@ -62,7 +62,7 @@ Utilizzato per ottenere la lista dei server disponibili.
 
 ## Flow B: GameLogin (Game Session)
 
-Utilizzato per entrare in una sessione di gioco.
+Used to enter a game session.
 
 ```
        ├─────────────────────────────────────────────────────────────┤
@@ -82,7 +82,7 @@ Utilizzato per entrare in una sessione di gioco.
 
 ## Phase 2: Game Stream
 
-Dopo un `GameLogin` valido, la connessione passa al Game Stream.
+After a valid `GameLogin`, the connection transitions to the Game Stream.
 
 ```
 ╔═════════════════════════════════════════════════════════════════════════════════╗
@@ -113,17 +113,17 @@ Dopo un `GameLogin` valido, la connessione passa al Game Stream.
 
 ## Error Handling
 
-In qualsiasi momento, il server può inviare messaggi di errore:
+At any time, the server can send error messages:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                              ERROR HANDLING                                     │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                 │
-│   PrimalMessage::Error { message }       →  Disconnessione immediata            │
-│   PrimalMessage::Disconnect { message }  →  Disconnessione graceful             │
-│   GameMessage::Error { message }         →  Errore di gioco                     │
-│   GameMessage::Disconnect { message }    →  Disconnessione graceful dal gioco   │
+│   PrimalMessage::Error { message }       →  Immediate disconnection             │
+│   PrimalMessage::Disconnect { message }  →  Graceful disconnection              │
+│   GameMessage::Error { message }         →  Game error                          │
+│   GameMessage::Disconnect { message }    →  Graceful disconnection from game    │
 │                                                                                 │
 └─────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -132,15 +132,15 @@ In qualsiasi momento, il server può inviare messaggi di errore:
 
 ### IntentType (enum)
 
-| Variante      | Descrizione                          |
-|---------------|--------------------------------------|
-| `PrimalLogin` | Ottiene la lista dei server          |
-| `GameLogin`   | Entra in un gioco                    |
-| `ServerLogin` | Connessione server-to-server (future)|
+| Variant       | Description                           |
+|---------------|---------------------------------------|
+| `PrimalLogin` | Get the server list                   |
+| `GameLogin`   | Enter a game                          |
+| `ServerLogin` | Server-to-server connection (future)  |
 
 ### ServerInfo
 
-| Campo     | Tipo     | Esempio                              |
+| Field     | Type     | Example                              |
 |-----------|----------|--------------------------------------|
 | `game_id` | `String` | `"demo"`                             |
 | `name`    | `String` | `"Demo Game Server"`                 |
@@ -148,7 +148,7 @@ In qualsiasi momento, il server può inviare messaggi di errore:
 
 ### ModInfo
 
-| Campo          | Tipo     | Esempio                                      |
+| Field          | Type     | Example                                      |
 |----------------|----------|----------------------------------------------|
 | `mod_id`       | `String` | `"mods-manager"`                             |
 | `mod_type`     | `String` | `"bootstrap"`, `"library"`                   |
@@ -156,14 +156,14 @@ In qualsiasi momento, il server può inviare messaggi di errore:
 
 ## Mod Download (via Event System)
 
-Il client riceve `ModInfo` con `download_url` e scarica i mod mancanti tramite l'Event System:
+The client receives `ModInfo` with `download_url` and downloads missing mods via the Event System:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                         MOD DOWNLOAD (via Event System)                         │
 ├─────────────────────────────────────────────────────────────────────────────────┤
 │                                                                                 │
-│   Client riceve ModInfo con download_url:                                       │
+│   Client receives ModInfo with download_url:                                    │
 │   "stam://localhost:9999/mods-manager/download?mod_id=some-mod"                 │
 │                                                                                 │
 │   ┌──────────┐                                              ┌──────────────┐   │
@@ -192,8 +192,8 @@ Il client riceve `ModInfo` con `download_url` e scarica i mod mancanti tramite l
 
 ## Source Files
 
-- [`primal_message.rs`](../apps/shared/stam_protocol/src/primal_message.rs) - Definisce `PrimalMessage`, `IntentType`, `ServerInfo`
-- [`game_message.rs`](../apps/shared/stam_protocol/src/game_message.rs) - Definisce `GameMessage`, `ModInfo`
-- [`primal_client.rs`](../apps/stam_server/src/primal_client.rs) - Gestione lato server del primal handshake
-- [`game_client.rs`](../apps/stam_server/src/game_client.rs) - Gestione lato server della game session
-- [`main.rs`](../apps/stam_client/src/main.rs) - Implementazione client
+- [`primal_message.rs`](../apps/shared/stam_protocol/src/primal_message.rs) - Defines `PrimalMessage`, `IntentType`, `ServerInfo`
+- [`game_message.rs`](../apps/shared/stam_protocol/src/game_message.rs) - Defines `GameMessage`, `ModInfo`
+- [`primal_client.rs`](../apps/stam_server/src/primal_client.rs) - Server-side handling of the primal handshake
+- [`game_client.rs`](../apps/stam_server/src/game_client.rs) - Server-side handling of the game session
+- [`main.rs`](../apps/stam_client/src/main.rs) - Client implementation

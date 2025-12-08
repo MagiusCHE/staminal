@@ -2,68 +2,68 @@
 
 ## Overview
 
-Il sistema di runtime modulare permette ai mod di utilizzare diversi linguaggi di scripting (JavaScript, Lua, C#, Rust, C++) in modo trasparente. Il client determina automaticamente quale runtime utilizzare in base all'estensione del file `entry_point` specificato nel manifest del mod.
+The modular runtime system allows mods to use different scripting languages (JavaScript, Lua, C#, Rust, C++) transparently. The client automatically determines which runtime to use based on the `entry_point` file extension specified in the mod manifest.
 
-## Architettura
+## Architecture
 
-### Componenti Principali
+### Main Components
 
-1. **`ModRuntimeManager`** - Gestisce tutti i runtime e dispatcha le chiamate al runtime appropriato
-2. **`RuntimeAdapter` trait** - Interfaccia comune che tutti i runtime devono implementare
-3. **Runtime specifici** - Adapter per ogni linguaggio (es. `JsRuntimeAdapter`)
-4. **`RuntimeType` enum** - Identifica il tipo di runtime in base all'estensione del file
+1. **`ModRuntimeManager`** - Manages all runtimes and dispatches calls to the appropriate runtime
+2. **`RuntimeAdapter` trait** - Common interface that all runtimes must implement
+3. **Language-specific runtimes** - Adapter for each language (e.g., `JsRuntimeAdapter`)
+4. **`RuntimeType` enum** - Identifies the runtime type based on file extension
 
 ### File Structure
 
 ```
 src/mod_runtime/
-├── mod.rs              # ModRuntimeManager e RuntimeAdapter trait
-├── runtime_type.rs     # RuntimeType enum e logica di detection
-└── js_adapter.rs       # Adapter per JavaScript/QuickJS
+├── mod.rs              # ModRuntimeManager and RuntimeAdapter trait
+├── runtime_type.rs     # RuntimeType enum and detection logic
+└── js_adapter.rs       # JavaScript/QuickJS adapter
 ```
 
-## Come Funziona
+## How It Works
 
-### 1. Inizializzazione
+### 1. Initialization
 
-Quando il client viene avviato e si connette a un game server:
+When the client starts and connects to a game server:
 
 ```rust
-// Crea il manager
+// Create the manager
 let mut runtime_manager = ModRuntimeManager::new();
 
-// Registra il runtime JavaScript (uno condiviso per tutti i mod JS)
+// Register the JavaScript runtime (one shared for all JS mods)
 let js_runtime = JsRuntime::new(runtime_config)?;
 runtime_manager.register_js_runtime(JsRuntimeAdapter::new(js_runtime));
 
-// In futuro:
+// In the future:
 // runtime_manager.register_lua_runtime(...);
 // runtime_manager.register_csharp_runtime(...);
 ```
 
-### 2. Caricamento Mod
+### 2. Loading Mods
 
-Il runtime viene selezionato automaticamente in base all'estensione del file:
+The runtime is automatically selected based on the file extension:
 
 ```rust
-// Il manager determina automaticamente il runtime da entry_point
+// The manager automatically determines the runtime from entry_point
 runtime_manager.load_mod("my-mod", Path::new("./mods/my-mod/main.js"))?;
-// -> Usa JavaScript runtime
+// -> Uses JavaScript runtime
 
 runtime_manager.load_mod("another-mod", Path::new("./mods/another-mod/init.lua"))?;
-// -> Userebbe Lua runtime (quando implementato)
+// -> Would use Lua runtime (when implemented)
 ```
 
-### 3. Chiamata Funzioni
+### 3. Calling Functions
 
-Le chiamate alle funzioni dei mod sono completamente astratte:
+Calls to mod functions are completely abstracted:
 
 ```rust
-// Il client non sa (e non deve sapere) quale runtime usa questo mod
+// The client doesn't know (and doesn't need to know) which runtime this mod uses
 runtime_manager.call_mod_function("my-mod", "onAttach")?;
 runtime_manager.call_mod_function("my-mod", "onBootstrap")?;
 
-// Con valori di ritorno
+// With return values
 let result = runtime_manager.call_mod_function_with_return("my-mod", "getVersion")?;
 match result {
     ModReturnValue::String(s) => println!("Version: {}", s),
@@ -73,31 +73,31 @@ match result {
 }
 ```
 
-## Mapping Estensioni → Runtime
+## Extension → Runtime Mapping
 
-| Estensione | Runtime Type | Status |
-|------------|-------------|---------|
-| `.js` | JavaScript (QuickJS) | ✅ Implementato |
-| `.lua` | Lua | 🔄 Futuro |
-| `.cs` | C# (Mono/CoreCLR) | 🔄 Futuro |
-| `.rs` | Rust (compiled) | 🔄 Futuro |
-| `.cpp`, `.cc`, `.cxx` | C++ (compiled) | 🔄 Futuro |
+| Extension | Runtime Type | Status |
+|-----------|-------------|---------|
+| `.js` | JavaScript (QuickJS) | ✅ Implemented |
+| `.lua` | Lua | 🔄 Future |
+| `.cs` | C# (Mono/CoreCLR) | 🔄 Future |
+| `.rs` | Rust (compiled) | 🔄 Future |
+| `.cpp`, `.cc`, `.cxx` | C++ (compiled) | 🔄 Future |
 
 ## RuntimeAdapter Trait
 
-Tutti i runtime devono implementare questo trait:
+All runtimes must implement this trait:
 
 ```rust
 pub trait RuntimeAdapter {
-    /// Carica un mod script in questo runtime
+    /// Load a mod script into this runtime
     fn load_mod(&mut self, mod_path: &Path, mod_id: &str)
         -> Result<(), Box<dyn std::error::Error>>;
 
-    /// Chiama una funzione in un mod senza valore di ritorno
+    /// Call a function in a mod without return value
     fn call_mod_function(&mut self, mod_id: &str, function_name: &str)
         -> Result<(), Box<dyn std::error::Error>>;
 
-    /// Chiama una funzione in un mod con valore di ritorno
+    /// Call a function in a mod with return value
     fn call_mod_function_with_return(
         &mut self,
         mod_id: &str,
@@ -106,29 +106,29 @@ pub trait RuntimeAdapter {
 }
 ```
 
-## Vantaggi dell'Architettura
+## Architecture Benefits
 
-### 1. **Un Runtime per Tipo**
-Invece di creare un'istanza di runtime per ogni mod, si crea un'unica istanza per tipo di linguaggio:
-- 5 mod JavaScript → 1 solo runtime JavaScript condiviso
-- 3 mod Lua → 1 solo runtime Lua condiviso
-- Risparmio di memoria e overhead
+### 1. **One Runtime Per Type**
+Instead of creating a runtime instance per mod, a single instance is created per language type:
+- 5 JavaScript mods → 1 shared JavaScript runtime
+- 3 Lua mods → 1 shared Lua runtime
+- Saves memory and overhead
 
-### 2. **Dispatch Dinamico**
-Il client non ha bisogno di sapere quale runtime usa un mod:
+### 2. **Dynamic Dispatch**
+The client doesn't need to know which runtime a mod uses:
 ```rust
-// Funziona con qualsiasi tipo di mod!
+// Works with any mod type!
 runtime_manager.call_mod_function(mod_id, "onAttach")?;
 ```
 
-### 3. **Estensibilità**
-Aggiungere un nuovo runtime richiede solo:
-1. Implementare `RuntimeAdapter` trait
-2. Aggiungere l'estensione in `RuntimeType::from_extension()`
-3. Registrare il runtime nel manager
+### 3. **Extensibility**
+Adding a new runtime only requires:
+1. Implementing the `RuntimeAdapter` trait
+2. Adding the extension in `RuntimeType::from_extension()`
+3. Registering the runtime in the manager
 
 ### 4. **Type Safety**
-I valori di ritorno sono type-safe grazie all'enum `ModReturnValue`:
+Return values are type-safe thanks to the `ModReturnValue` enum:
 ```rust
 pub enum ModReturnValue {
     None,
@@ -138,9 +138,9 @@ pub enum ModReturnValue {
 }
 ```
 
-## Esempio Completo
+## Complete Example
 
-### Manifest del Mod (manifest.json)
+### Mod Manifest (manifest.json)
 ```json
 {
     "name": "My JavaScript Mod",
@@ -150,7 +150,7 @@ pub enum ModReturnValue {
 }
 ```
 
-### Codice Mod (main.js)
+### Mod Code (main.js)
 ```javascript
 function onAttach() {
     console.log("Mod attached!");
@@ -166,31 +166,31 @@ function getModInfo() {
 }
 ```
 
-### Codice Client (Rust)
+### Client Code (Rust)
 ```rust
-// Inizializza
+// Initialize
 let mut runtime_manager = ModRuntimeManager::new();
 runtime_manager.register_js_runtime(js_adapter);
 
-// Carica mod (automaticamente riconosce .js)
+// Load mod (automatically recognizes .js)
 runtime_manager.load_mod("my-mod", Path::new("./mods/my-mod/main.js"))?;
 
-// Chiama lifecycle hooks
+// Call lifecycle hooks
 runtime_manager.call_mod_function("my-mod", "onAttach")?;
 runtime_manager.call_mod_function("my-mod", "onBootstrap")?;
 
-// Ottieni informazioni
+// Get information
 let info = runtime_manager.call_mod_function_with_return("my-mod", "getModInfo")?;
 if let ModReturnValue::String(s) = info {
     println!("Mod info: {}", s);
 }
 ```
 
-## Implementazione Futuri Runtime
+## Implementing Future Runtimes
 
-### Esempio: Aggiungere Lua
+### Example: Adding Lua
 
-1. **Creare adapter** (`src/mod_runtime/lua_adapter.rs`):
+1. **Create adapter** (`src/mod_runtime/lua_adapter.rs`):
 ```rust
 pub struct LuaRuntimeAdapter {
     runtime: LuaRuntime,
@@ -198,27 +198,27 @@ pub struct LuaRuntimeAdapter {
 
 impl RuntimeAdapter for LuaRuntimeAdapter {
     fn load_mod(&mut self, mod_path: &Path, mod_id: &str) -> Result<(), Box<dyn Error>> {
-        // Carica script Lua
+        // Load Lua script
     }
 
     fn call_mod_function(&mut self, mod_id: &str, function_name: &str) -> Result<(), Box<dyn Error>> {
-        // Chiama funzione Lua
+        // Call Lua function
     }
 
     // ...
 }
 ```
 
-2. **Aggiornare RuntimeType**:
+2. **Update RuntimeType**:
 ```rust
 match extension {
     "js" => Ok(RuntimeType::JavaScript),
-    "lua" => Ok(RuntimeType::Lua),  // <-- Aggiungi qui
+    "lua" => Ok(RuntimeType::Lua),  // <-- Add here
     // ...
 }
 ```
 
-3. **Registrare nel client**:
+3. **Register in client**:
 ```rust
 let lua_runtime = LuaRuntime::new()?;
 runtime_manager.register_lua_runtime(LuaRuntimeAdapter::new(lua_runtime));
@@ -226,34 +226,34 @@ runtime_manager.register_lua_runtime(LuaRuntimeAdapter::new(lua_runtime));
 
 ## Best Practices
 
-1. **Condivisione Runtime**: Un runtime per tipo di linguaggio, non per mod
-2. **Error Handling**: Tutti gli errori sono propagati con dettagli specifici del runtime
-3. **Lifecycle Hooks**: Tutti i mod supportano `onAttach`, `onBootstrap`, ecc.
-4. **Type Conversion**: I valori di ritorno sono convertiti in tipi Rust standard
+1. **Runtime Sharing**: One runtime per language type, not per mod
+2. **Error Handling**: All errors are propagated with runtime-specific details
+3. **Lifecycle Hooks**: All mods support `onAttach`, `onBootstrap`, etc.
+4. **Type Conversion**: Return values are converted to standard Rust types
 
 ## Timer System (setTimeout/setInterval)
 
-### Architettura Multi-Runtime Safe
+### Multi-Runtime Safe Architecture
 
-Il sistema dei timer è progettato per funzionare correttamente con **multipli runtime simultanei** (JavaScript, Lua, C#, ecc.).
+The timer system is designed to work correctly with **multiple simultaneous runtimes** (JavaScript, Lua, C#, etc.).
 
-#### Componenti Chiave
+#### Key Components
 
-1. **`NEXT_TIMER_ID`** (AtomicU32 globale)
-   - Contatore atomico che garantisce ID unici **attraverso TUTTI i runtime**
-   - Se JavaScript crea timer 1, 2, 3 → Lua otterrà 4, 5, 6 → C# otterrà 7, 8, 9
-   - **Nessuna collisione possibile** tra runtime diversi
+1. **`NEXT_TIMER_ID`** (Global AtomicU32)
+   - Atomic counter that guarantees unique IDs **across ALL runtimes**
+   - If JavaScript creates timers 1, 2, 3 → Lua will get 4, 5, 6 → C# will get 7, 8, 9
+   - **No collision possible** between different runtimes
 
-2. **`TIMER_ABORT_HANDLES`** (HashMap globale)
-   - Registry condiviso: `timer_id -> Arc<Notify>`
-   - Permette a `clearTimeout(id)` di funzionare indipendentemente da quale runtime ha creato il timer
-   - Thread-safe tramite `Mutex`
+2. **`TIMER_ABORT_HANDLES`** (Global HashMap)
+   - Shared registry: `timer_id -> Arc<Notify>`
+   - Allows `clearTimeout(id)` to work regardless of which runtime created the timer
+   - Thread-safe via `Mutex`
 
-#### Schema Architetturale
+#### Architecture Schema
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                     PROCESSO CLIENT                          │
+│                     CLIENT PROCESS                           │
 ├─────────────────────────────────────────────────────────────┤
 │  NEXT_TIMER_ID (AtomicU32) ─────────────────────────────────│
 │  TIMER_ABORT_HANDLES (Mutex<HashMap>) ──────────────────────│
@@ -268,7 +268,7 @@ Il sistema dei timer è progettato per funzionare correttamente con **multipli r
 └─────────────────────────────────────────────────────────────┘
 ```
 
-#### Implementazione JavaScript (rquickjs)
+#### JavaScript Implementation (rquickjs)
 
 ```rust
 // In bindings.rs
@@ -307,9 +307,9 @@ fn set_timeout_interval<'js>(
 }
 ```
 
-#### Event Loop JavaScript
+#### JavaScript Event Loop
 
-Per far funzionare i timer, il client deve eseguire il JS event loop:
+For timers to work, the client must run the JS event loop:
 
 ```rust
 // In main.rs
@@ -323,39 +323,39 @@ if let Some(js_runtime) = js_runtime_handle {
 }
 ```
 
-#### API Disponibili per i Mod
+#### APIs Available to Mods
 
 ```javascript
-// setTimeout - esegue callback dopo delay
+// setTimeout - executes callback after delay
 const id = setTimeout(() => {
     console.log("Fired after 1000ms");
 }, 1000);
 
-// clearTimeout - cancella un timeout pendente
+// clearTimeout - cancels a pending timeout
 clearTimeout(id);
 
-// setInterval - esegue callback ogni N ms
+// setInterval - executes callback every N ms
 const intervalId = setInterval(() => {
     console.log("Tick!");
 }, 500);
 
-// clearInterval - cancella un interval
+// clearInterval - cancels an interval
 clearInterval(intervalId);
 ```
 
-#### Note Implementative per Nuovi Runtime
+#### Implementation Notes for New Runtimes
 
-Quando implementi timer per un nuovo runtime (Lua, C#, ecc.), usa le funzioni helper pubbliche esposte in `bindings.rs`:
+When implementing timers for a new runtime (Lua, C#, etc.), use the public helper functions exposed in `bindings.rs`:
 
 ```rust
-// Funzioni pubbliche disponibili per tutti i runtime:
-pub fn next_timer_id() -> u32;                                    // Genera ID unico
-pub fn clear_timer(timer_id: u32);                                // Cancella timer
-pub fn register_timer_abort_handle(timer_id: u32, abort: Arc<Notify>);  // Registra handle
-pub fn remove_timer_abort_handle(timer_id: u32);                  // Rimuove handle
+// Public functions available for all runtimes:
+pub fn next_timer_id() -> u32;                                    // Generate unique ID
+pub fn clear_timer(timer_id: u32);                                // Cancel timer
+pub fn register_timer_abort_handle(timer_id: u32, abort: Arc<Notify>);  // Register handle
+pub fn remove_timer_abort_handle(timer_id: u32);                  // Remove handle
 ```
 
-**Esempio per Lua adapter:**
+**Example for Lua adapter:**
 
 ```rust
 use stam_mod_runtimes::adapters::js::bindings::{
@@ -365,7 +365,7 @@ use tokio::sync::Notify;
 use std::sync::Arc;
 
 pub fn lua_set_timeout(delay_ms: u64, callback: LuaCallback) -> u32 {
-    let id = next_timer_id();  // ID globalmente unico
+    let id = next_timer_id();  // Globally unique ID
 
     let abort = Arc::new(Notify::new());
     register_timer_abort_handle(id, abort.clone());
@@ -385,21 +385,21 @@ pub fn lua_set_timeout(delay_ms: u64, callback: LuaCallback) -> u32 {
 }
 
 pub fn lua_clear_timeout(timer_id: u32) {
-    clear_timer(timer_id);  // Funziona anche per timer JS!
+    clear_timer(timer_id);  // Works even for JS timers!
 }
 ```
 
-## Limitazioni Attuali
+## Current Limitations
 
-1. Solo JavaScript è implementato
-2. I valori di ritorno sono limitati a: None, String, Bool, Int
-3. Non supporta ancora oggetti complessi o array (ma possibile via JSON)
+1. Only JavaScript is implemented
+2. Return values are limited to: None, String, Bool, Int
+3. Complex objects or arrays are not yet supported (but possible via JSON)
 
 ## Roadmap
 
-- [x] Implementare setTimeout/setInterval per JavaScript
-- [ ] Implementare runtime Lua
-- [ ] Implementare runtime C#
-- [ ] Supportare valori di ritorno complessi (oggetti, array)
-- [ ] Aggiungere sandboxing per sicurezza
-- [ ] Hot-reload dei mod senza riavviare il client
+- [x] Implement setTimeout/setInterval for JavaScript
+- [ ] Implement Lua runtime
+- [ ] Implement C# runtime
+- [ ] Support complex return values (objects, arrays)
+- [ ] Add sandboxing for security
+- [ ] Hot-reload mods without restarting the client
