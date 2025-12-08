@@ -492,7 +492,20 @@ await entity.insert("Text", {
     color: "#ffffff",     // or { r, g, b, a }
     font: "my-font-alias" // Optional: loaded via Graphic.loadFont()
 });
+
+// Text with shadow effect
+await entity.insert("Text", {
+    value: "Shadowed Text",
+    font_size: 48,
+    color: "#ffffff",
+    shadow: {
+        color: "#000000",           // Shadow color (default: semi-transparent black)
+        offset: { x: 2, y: 2 }      // Shadow offset in pixels (default: 4, 4)
+    }
+});
 ```
+
+**Note:** The `shadow.size` field (blur radius) is not supported by Bevy and will be ignored.
 
 ### BorderRadius
 

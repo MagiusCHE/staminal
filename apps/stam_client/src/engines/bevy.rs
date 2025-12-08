@@ -1438,12 +1438,20 @@ mod native_component_converters {
         pub color: bevy::text::TextColor,
     }
 
+    /// Shadow configuration for text
+    #[derive(Clone, Debug)]
+    pub struct TextShadowConfig {
+        pub offset: bevy::math::Vec2,
+        pub color: bevy::color::Color,
+    }
+
     /// Parsed text configuration from JSON (without font handle resolution)
     pub struct TextConfig {
         pub content: String,
         pub font_alias: Option<String>,
         pub font_size: f32,
         pub color: bevy::color::Color,
+        pub shadow: Option<TextShadowConfig>,
     }
 
     /// Parse Text config from JSON without resolving font handle
@@ -1471,11 +1479,50 @@ mod native_component_converters {
                 bevy::color::Color::WHITE
             };
 
+            // Parse shadow configuration if present
+            let shadow = if let Some(shadow_val) = obj.get("shadow") {
+                if let Some(shadow_obj) = shadow_val.as_object() {
+                    // Parse shadow color (default: semi-transparent black)
+                    let shadow_color = shadow_obj.get("color")
+                        .and_then(|c| json_to_color(c).ok())
+                        .unwrap_or(bevy::color::Color::linear_rgba(0., 0., 0., 0.75));
+
+                    // Parse shadow offset
+                    let offset = if let Some(offset_val) = shadow_obj.get("offset") {
+                        if let Some(offset_obj) = offset_val.as_object() {
+                            let x = offset_obj.get("x").and_then(|v| v.as_f64()).unwrap_or(4.0) as f32;
+                            let y = offset_obj.get("y").and_then(|v| v.as_f64()).unwrap_or(4.0) as f32;
+                            bevy::math::Vec2::new(x, y)
+                        } else {
+                            bevy::math::Vec2::splat(4.0)
+                        }
+                    } else {
+                        bevy::math::Vec2::splat(4.0)
+                    };
+
+                    // Log warning if 'size' is specified (not supported by Bevy's TextShadow)
+                    if shadow_obj.contains_key("size") {
+                        tracing::warn!("TODO: Text shadow 'size' (blur radius) is not supported by Bevy's TextShadow component - it will be ignored");
+                    }
+
+                    Some(TextShadowConfig { offset, color: shadow_color })
+                } else {
+                    // If shadow is just `true` or any non-object value, use defaults
+                    Some(TextShadowConfig {
+                        offset: bevy::math::Vec2::splat(4.0),
+                        color: bevy::color::Color::linear_rgba(0., 0., 0., 0.75),
+                    })
+                }
+            } else {
+                None
+            };
+
             Ok(TextConfig {
                 content,
                 font_alias,
                 font_size,
                 color,
+                shadow,
             })
         } else if let Some(s) = json.as_str() {
             Ok(TextConfig {
@@ -1483,9 +1530,10 @@ mod native_component_converters {
                 font_alias: None,
                 font_size: 16.0,
                 color: bevy::color::Color::WHITE,
+                shadow: None,
             })
         } else {
-            Err("Text must be {value: string, font?: string, font_size?: number, color?: string} or a string".to_string())
+            Err("Text must be {value: string, font?: string, font_size?: number, color?: string, shadow?: {color?, offset?: {x, y}}} or a string".to_string())
         }
     }
 
@@ -2632,10 +2680,20 @@ fn process_commands(
                                         };
 
                                         entity_commands.insert((
-                                            bevy::prelude::Text::new(config.content),
+                                            bevy::prelude::Text::new(config.content.clone()),
                                             text_font,
                                             bevy::text::TextColor(config.color),
                                         ));
+
+                                        // Add TextShadow if shadow config is present
+                                        if let Some(shadow_config) = &config.shadow {
+                                            entity_commands.insert(bevy::ui::widget::TextShadow {
+                                                offset: shadow_config.offset,
+                                                color: shadow_config.color,
+                                            });
+                                            tracing::debug!("Added TextShadow to entity {}", script_id);
+                                        }
+
                                         is_ui_entity = true;  // Mark as UI entity
                                         tracing::debug!("Added native Text component to entity {}", script_id);
                                     }
@@ -2905,10 +2963,23 @@ fn process_commands(
                                 };
 
                                 commands.entity(entity).insert((
-                                    bevy::prelude::Text::new(config.content),
+                                    bevy::prelude::Text::new(config.content.clone()),
                                     text_font,
                                     bevy::text::TextColor(config.color),
                                 ));
+
+                                // Add or remove TextShadow based on config
+                                if let Some(shadow_config) = &config.shadow {
+                                    commands.entity(entity).insert(bevy::ui::widget::TextShadow {
+                                        offset: shadow_config.offset,
+                                        color: shadow_config.color,
+                                    });
+                                    tracing::debug!("Updated TextShadow on entity {}", entity_id);
+                                } else {
+                                    // Remove TextShadow if no shadow config is present
+                                    commands.entity(entity).remove::<bevy::ui::widget::TextShadow>();
+                                }
+
                                 tracing::debug!("Updated native Text on entity {}", entity_id);
                             }
                             NativeComponent::BorderRadius => {
@@ -4067,12 +4138,12 @@ fn update_cover_contain_images(
         let anchor_x = cover_contain.anchor_position.x;
         let anchor_y = cover_contain.anchor_position.y;
 
-        tracing::debug!(
-            "Cover/Contain sizing for entity {:?}: image={}x{} (ratio={:.3}), container={}x{} (ratio={:.3}), mode={:?}, anchor=({:.2}, {:.2})",
-            entity, image_width, image_height, image_ratio,
-            container_width, container_height, container_ratio,
-            cover_contain.scale_mode, anchor_x, anchor_y
-        );
+        // tracing::debug!(
+        //     "Cover/Contain sizing for entity {:?}: image={}x{} (ratio={:.3}), container={}x{} (ratio={:.3}), mode={:?}, anchor=({:.2}, {:.2})",
+        //     entity, image_width, image_height, image_ratio,
+        //     container_width, container_height, container_ratio,
+        //     cover_contain.scale_mode, anchor_x, anchor_y
+        // );
 
         // For both Cover and Contain, we use absolute positioning.
         // Position at anchor percentage, then use negative margins based on anchor to position correctly.
@@ -4148,10 +4219,10 @@ fn update_cover_contain_images(
                 node.margin.left = Val::Px(-node_width * anchor_x);
                 node.margin.top = Val::Px(-node_height * anchor_y);
 
-                tracing::debug!(
-                    "Contain applied: width={:.1}px, height={:.1}px, margin=({:.1}, {:.1}), anchor=({:.2}, {:.2}) (container: {:.1}x{:.1})",
-                    node_width, node_height, -node_width * anchor_x, -node_height * anchor_y, anchor_x, anchor_y, container_width, container_height
-                );
+                // tracing::debug!(
+                //     "Contain applied: width={:.1}px, height={:.1}px, margin=({:.1}, {:.1}), anchor=({:.2}, {:.2}) (container: {:.1}x{:.1})",
+                //     node_width, node_height, -node_width * anchor_x, -node_height * anchor_y, anchor_x, anchor_y, container_width, container_height
+                // );
             }
             _ => {
                 // Other modes shouldn't have this component

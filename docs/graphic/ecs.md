@@ -763,6 +763,20 @@ await label.insert("Text", {
     value: "Updated text!",
     font_size: 32
 });
+
+// Text with shadow
+const shadowedText = await World.spawn({
+    Node: { width: "auto", height: "auto" },
+    Text: {
+        value: "Shadowed Text",
+        font_size: 48,
+        color: "#ffffff",
+        shadow: {
+            color: "#000000",
+            offset: { x: 2, y: 2 }
+        }
+    }
+});
 ```
 
 **Fields:**
@@ -770,6 +784,11 @@ await label.insert("Text", {
 - `font_size`: Font size in pixels (number)
 - `color`: Text color (`{ r, g, b, a }` or hex string)
 - `font`: Font asset path (optional)
+- `shadow`: Text shadow configuration (optional)
+  - `color`: Shadow color (`{ r, g, b, a }` or hex string, default: semi-transparent black)
+  - `offset`: Shadow offset `{ x, y }` in pixels (default: `{ x: 4, y: 4 }`)
+
+**Note:** The `shadow.size` field (blur radius) is not currently supported by Bevy's TextShadow component. If specified, it will be ignored and a warning will be logged.
 
 #### BorderRadius
 

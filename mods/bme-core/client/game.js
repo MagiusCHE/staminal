@@ -106,16 +106,33 @@ export class Game {
             },
             ImageNode: {
                 resource_id: "title-screen-background",
-                image_mode: NodeImageMode.Cover,
+                image_mode: NodeImageMode.Contain,
                 // cover_position: {
                 //     x: "50%",
                 //     y: "50%",
                 // },
             },
-        },  cont );
+            BackgroundColor: "#FF0000",
+        }, cont);
+
+        const text = await World.spawn({
+            Node: {
+                width: "auto",
+                height: "auto",
+            },
+            Text: {
+                value: "Welcome to Staminal!",
+                font_size: 48,
+                color: "#ffffff",
+                shadow: {
+                    color: "#000000",
+                    offset: { x: 3, y: 3 }
+                }
+            },
+        }, bkg);
 
         // Set parent relationship
-        
+
 
     }
     async startGame() {
