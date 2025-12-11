@@ -107,7 +107,7 @@ import { helper } from '@js-helper';
 
 ### Testing & Running
 1. **Always build before testing**: `cargo build` in the relevant app directory
-2. **ALWAYS use npm scripts**: Use `npm run server:debug` and `npm run client:debug` to run the applications. These scripts set the correct environment variables (`STAM_URI`, `STAM_LANG`, `STAM_HOME`, etc.) needed for proper operation. Never run the binaries directly with `cargo run` as this will miss required configuration.
+2. **ALWAYS use npm scripts**: Use `npm run server:debug` and `npm run client:debug` to run the applications. These scripts set the correct environment variables (`STAM_URI`, `STAM_LANG`, `STAM_HOME`, `STAM_GAME`, etc.) needed for proper operation. Never run the binaries directly with `cargo run` as this will miss required configuration.
 3. **Check logs**: When debugging, enable `STAM_LOG_FILE=1` to capture full logs
 4. **Log file locations**: In development, server and client produce log files in their respective project directories:
    - Server: `apps/stam_server/stam_server.log`

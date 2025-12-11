@@ -2042,6 +2042,10 @@ struct Args {
     /// Log level (trace, debug, info, warn, error)
     #[arg(long, env = "STAM_LOG_LEVEL", default_value = "info")]
     log_level: String,
+
+    /// Game to connect to (by game_id or game_name). If not specified, connects to first available.
+    #[arg(short, long, env = "STAM_GAME")]
+    game: Option<String>,
 }
 
 // ============================================================================
@@ -2453,19 +2457,61 @@ async fn run_client(args: Args, engine_request_tx: std_mpsc::Sender<EnableEngine
                 );
             }
 
-            // Connect to first server in list
-            let first_server = &servers[0];
+            // Select server based on --game argument or use first available
+            let selected_server = if let Some(ref game_filter) = args.game {
+                // Try to find server by game_id or game_name
+                servers
+                    .iter()
+                    .find(|s| s.game_id == *game_filter || s.game_name == *game_filter)
+            } else {
+                // Default to first server
+                servers.first()
+            };
+
+            let selected_server = match selected_server {
+                Some(server) => server,
+                None => {
+                    // Game not found - show available games
+                    let available: Vec<String> = servers
+                        .iter()
+                        .map(|s| format!("{} ({})", s.game_name, s.game_id))
+                        .collect();
+                    error!(
+                        "{}",
+                        locale.get_with_args(
+                            "game-not-found",
+                            Some(&fluent_args! {
+                                "game" => args.game.as_deref().unwrap_or(""),
+                                "available" => available.join(", ").as_str()
+                            })
+                        )
+                    );
+                    return 1;
+                }
+            };
+
+            info!(
+                "{}",
+                locale.get_with_args(
+                    "game-selected",
+                    Some(&fluent_args! {
+                        "game_name" => selected_server.game_name.as_str(),
+                        "game_id" => selected_server.game_id.as_str()
+                    })
+                )
+            );
+
             debug!(
                 "Attempting to connect to game server: {} on {} (game_id: {}, uri: {})",
-                first_server.game_name, first_server.server_name, first_server.game_id, first_server.uri
+                selected_server.game_name, selected_server.server_name, selected_server.game_id, selected_server.uri
             );
 
             // Parse game server URI and connect
             if let Err(e) = connect_to_game_server(
-                &first_server.uri,
+                &selected_server.uri,
                 &username,
                 &password,
-                &first_server.game_id,
+                &selected_server.game_id,
                 locale.clone(),
                 &app_paths,
                 engine_request_tx,

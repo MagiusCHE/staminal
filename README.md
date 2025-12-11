@@ -100,7 +100,7 @@ npm run client:debug
 | `STAM_URI` | Server connection URI (`stam://user:pass@host:port`) |
 | `STAM_LANG` | Locale code (e.g., `en-US`, `it-IT`) |
 | `STAM_HOME` | Data directory path |
-| `STAM_GAME` | Game identifier |
+| `STAM_GAME` | Game to connect to (by `game_id` or `game_name`). If not specified, connects to the first available game. |
 | `STAM_LOG_LEVEL` | Log level (`trace`, `debug`, `info`, `warn`, `error`) |
 | `STAM_LOGDEPS` | Enable external dependency logs (`0` or `1`) |
 

@@ -20,6 +20,8 @@ server-welcome = Ricevuto benvenuto dal server, versione: {$version}
 server-list-received = Ricevuta lista server con {$count} server
 server-list-empty = Lista server vuota, nessun game server disponibile
 server-error = Errore del server: {$message}
+game-not-found = Game "{$game}" non trovato nella lista server. Game disponibili: {$available}
+game-selected = Game selezionato: {$game_name} ({$game_id})
 
 ## Client di gioco
 game-connecting = Connessione al game server a {$host}

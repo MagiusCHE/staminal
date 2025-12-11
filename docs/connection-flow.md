@@ -60,6 +60,26 @@ Used to obtain the list of available servers.
        │                                                             │
 ```
 
+### Game Selection
+
+After receiving the `ServerList`, the client selects which game to connect to:
+
+1. **With `STAM_GAME` / `--game`**: The client searches for a server matching the specified value by `game_id` or `game_name`. If no match is found, the client displays an error with the available games.
+
+2. **Without `STAM_GAME`**: The client automatically connects to the first available game in the list.
+
+**Example usage:**
+```bash
+# Connect to a specific game by game_id
+STAM_GAME="demo" npm run client:debug
+
+# Connect to a specific game by game_name
+STAM_GAME="Beyond Midgard Era" npm run client:debug
+
+# Or via command line flag
+npm run client:debug -- --game demo
+```
+
 ## Flow B: GameLogin (Game Session)
 
 Used to enter a game session.
