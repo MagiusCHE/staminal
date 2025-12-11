@@ -295,6 +295,29 @@ async fn main() {
                 }
             }
 
+            // Handle incoming TCP connections (high priority - before tick and terminal)
+            result = listener.accept() => {
+                match result {
+                    Ok((stream, addr)) => {
+                        warn!(">>> Accepted TCP connection from {}", addr);
+
+                        // Clone config, client_manager, and game_runtimes for the spawned task
+                        let config_clone = config.clone();
+                        let client_manager_clone = client_manager.clone();
+                        let game_runtimes_clone = Arc::clone(&game_runtimes);
+
+                        // Spawn a task to handle this client
+                        tokio::spawn(async move {
+                            let client = PrimalClient::new(stream, addr, config_clone, client_manager_clone, game_runtimes_clone);
+                            client.handle().await;
+                        });
+                    }
+                    Err(e) => {
+                        error!("Error accepting connection: {}", e);
+                    }
+                }
+            }
+
             // Handle terminal key events (raw mode input)
             key_request = async {
                 if let Some(ref mut rx) = terminal_rx {
@@ -371,29 +394,6 @@ async fn main() {
                 // In un vero engine, qui calcoleremmo il "Delta Time"
                 // Simula lavoro del server
                 // server.process_packets();
-            }
-
-            // Handle incoming TCP connections
-            result = listener.accept() => {
-                match result {
-                    Ok((stream, addr)) => {
-                        info!("Accepted connection from {}", addr);
-
-                        // Clone config, client_manager, and game_runtimes for the spawned task
-                        let config_clone = config.clone();
-                        let client_manager_clone = client_manager.clone();
-                        let game_runtimes_clone = Arc::clone(&game_runtimes);
-
-                        // Spawn a task to handle this client
-                        tokio::spawn(async move {
-                            let client = PrimalClient::new(stream, addr, config_clone, client_manager_clone, game_runtimes_clone);
-                            client.handle().await;
-                        });
-                    }
-                    Err(e) => {
-                        error!("Error accepting connection: {}", e);
-                    }
-                }
             }
         }
     }

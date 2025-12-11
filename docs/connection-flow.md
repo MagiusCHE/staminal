@@ -53,7 +53,7 @@ Used to obtain the list of available servers.
        │        ┌─────────────────────────────────────────────────┐ │
        │        │ PrimalMessage::ServerList                       │ │
        │<───────│   • servers: Vec<ServerInfo>                    │─│
-       │        │     [{ game_id, name, uri }, ...]               │ │
+       │        │     [{ game_id, game_name, server_name, uri }]  │ │
        │        └─────────────────────────────────────────────────┘ │
        │                                                             │
        │                  (Connection closes)                        │
@@ -91,10 +91,13 @@ After a valid `GameLogin`, the connection transitions to the Game Stream.
        │                                                             │
        │        ┌─────────────────────────────────────────────────┐ │
        │        │ GameMessage::LoginSuccess                       │ │
-       │<───────│   • game_name: "Demo Game"                      │─│
+       │<───────│   • server_name: "CHE Realm"                    │─│
+       │        │   • game_name: "Demo Game"                      │ │
        │        │   • game_version: "1.0.0"                       │ │
        │        │   • mods: Vec<ModInfo>                          │ │
-       │        │     [{ mod_id, mod_type, download_url }, ...]   │ │
+       │        │     [{ mod_id, mod_type, download_url,          │ │
+       │        │        archive_sha512, archive_bytes,           │ │
+       │        │        uncompressed_bytes }, ...]               │ │
        │        └─────────────────────────────────────────────────┘ │
        │                                                             │
        │  (Client checks mods, downloads missing ones via HTTP)     │
@@ -132,27 +135,32 @@ At any time, the server can send error messages:
 
 ### IntentType (enum)
 
-| Variant       | Description                           |
-|---------------|---------------------------------------|
-| `PrimalLogin` | Get the server list                   |
-| `GameLogin`   | Enter a game                          |
-| `ServerLogin` | Server-to-server connection (future)  |
+| Variant       | Description                                              |
+|---------------|----------------------------------------------------------|
+| `PrimalLogin` | Get the server list                                      |
+| `GameLogin`   | Enter a game                                             |
+| `ServerLogin` | Server-to-server connection (future)                     |
+| `RequestUri`  | One-shot request for downloading resources via stam://   |
 
 ### ServerInfo
 
-| Field     | Type     | Example                              |
-|-----------|----------|--------------------------------------|
-| `game_id` | `String` | `"demo"`                             |
-| `name`    | `String` | `"Demo Game Server"`                 |
-| `uri`     | `String` | `"stam://game.example.com:9999"`     |
+| Field         | Type     | Example                              |
+|---------------|----------|--------------------------------------|
+| `game_id`     | `String` | `"demo"`                             |
+| `game_name`   | `String` | `"Demo Game"`                        |
+| `server_name` | `String` | `"CHE Realm"`                        |
+| `uri`         | `String` | `"stam://game.example.com:9999"`     |
 
 ### ModInfo
 
-| Field          | Type     | Example                                      |
-|----------------|----------|----------------------------------------------|
-| `mod_id`       | `String` | `"mods-manager"`                             |
-| `mod_type`     | `String` | `"bootstrap"`, `"library"`                   |
-| `download_url` | `String` | `"stam://server/mods-manager/download"`      |
+| Field              | Type     | Example                                      |
+|--------------------|----------|----------------------------------------------|
+| `mod_id`           | `String` | `"mods-manager"`                             |
+| `mod_type`         | `String` | `"bootstrap"`, `"library"`                   |
+| `download_url`     | `String` | `"stam://server/mods-manager/download"`      |
+| `archive_sha512`   | `String` | `"sha512:abc123..."`                         |
+| `archive_bytes`    | `u64`    | `12345`                                      |
+| `uncompressed_bytes` | `u64`  | `54321`                                      |
 
 ## Mod Download (via Event System)
 

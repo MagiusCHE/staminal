@@ -467,15 +467,6 @@ async fn connect_to_game_server(
     app_paths: &AppPaths,
     engine_request_tx: std_mpsc::Sender<EnableEngineRequest>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize game-specific directory
-    debug!("Initializing directories for game '{}'...", game_id);
-    let game_root = app_paths.game_root(game_id)?;
-    let mods_dir = game_root.join("mods");
-
-    debug!("Game directories:");
-    debug!("  Root: {}", game_root.display());
-    debug!("  Mods: {}", mods_dir.display());
-
     // Parse game server URI (stam://host:port)
     if !uri.starts_with("stam://") {
         return Err(locale
@@ -489,6 +480,10 @@ async fn connect_to_game_server(
     }
 
     let host_port = uri.strip_prefix("stam://").unwrap();
+
+    // Extract host (without port) for directory naming (will be used after LoginSuccess)
+    let host = host_port.split(':').next().unwrap_or(host_port).to_string();
+
     info!(
         "{}",
         locale.get_with_args(
@@ -595,9 +590,18 @@ async fn connect_to_game_server(
     let mut game_root_opt: Option<std::path::PathBuf> = None;
 
     match stream.read_game_message().await {
-        Ok(GameMessage::LoginSuccess { game_name, game_version, mods }) => {
-            info!("{} {} [{}]", locale.get("game-login-success"), game_name, game_version);
+        Ok(GameMessage::LoginSuccess { server_name, game_name, game_version, mods }) => {
+            info!("{} {} [{}] on {}", locale.get("game-login-success"), game_name, game_version, server_name);
             let active_game_version = game_version.clone();
+
+            // Initialize game-specific directory with server context (now we know the server_name)
+            debug!("Initializing directories for game '{}' on server '{}' ({})...", game_id, server_name, host);
+            let game_root = app_paths.game_root(&host, &server_name, game_id)?;
+            let mods_dir = game_root.join("mods");
+
+            debug!("Game directories:");
+            debug!("  Root: {}", game_root.display());
+            debug!("  Mods: {}", mods_dir.display());
 
             // Log mod list received
             if !mods.is_empty() {
@@ -868,7 +872,7 @@ async fn connect_to_game_server(
                 let mut runtime_manager = ModRuntimeManager::new();
 
                 // Initialize JavaScript runtime (one shared runtime for all JS mods)
-                let runtime_config = create_js_runtime_config(&app_paths, &game_id)?;
+                let runtime_config = create_js_runtime_config(&game_root)?;
                 let mut js_adapter = JsRuntimeAdapter::new(runtime_config)?;
 
                 // Set home directory for mod installation (used by system.install_mod_from_path)
@@ -2440,9 +2444,10 @@ async fn run_client(args: Args, engine_request_tx: std_mpsc::Sender<EnableEngine
 
             for (i, server) in servers.iter().enumerate() {
                 debug!(
-                    "  [{}] {} (game_id: {}) - {}",
+                    "  [{}] {} on {} (game_id: {}) - {}",
                     i + 1,
-                    server.name,
+                    server.game_name,
+                    server.server_name,
                     server.game_id,
                     server.uri
                 );
@@ -2451,8 +2456,8 @@ async fn run_client(args: Args, engine_request_tx: std_mpsc::Sender<EnableEngine
             // Connect to first server in list
             let first_server = &servers[0];
             debug!(
-                "Attempting to connect to game server: {} (game_id: {}, uri: {})",
-                first_server.name, first_server.game_id, first_server.uri
+                "Attempting to connect to game server: {} on {} (game_id: {}, uri: {})",
+                first_server.game_name, first_server.server_name, first_server.game_id, first_server.uri
             );
 
             // Parse game server URI and connect

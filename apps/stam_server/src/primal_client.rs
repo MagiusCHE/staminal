@@ -233,7 +233,12 @@ impl PrimalClient {
         let server_list = self.get_server_list();
 
         if server_list.is_empty() {
-            debug!("No enabled games available for user '{}'", username);
+            warn!("No enabled games available for user '{}'", username);
+        } else {
+            info!("Sending server list with {} games to user '{}'", server_list.len(), username);
+            for server in &server_list {
+                debug!("  - {} (game_id: {}, server: {}, uri: {})", server.game_name, server.game_id, server.server_name, server.uri);
+            }
         }
 
         // Send server list (client will handle empty list)
@@ -242,7 +247,7 @@ impl PrimalClient {
         }).await {
             error!("Failed to send server list to {}: {}", self.addr, e);
         } else {
-            debug!("Sent server list to {}", self.addr);
+            info!("Server list sent successfully to {}", self.addr);
         }
     }
 
@@ -553,23 +558,28 @@ impl PrimalClient {
 
     /// Get list of available game servers from configuration
     /// Returns one ServerInfo for each enabled game in the configuration
-    /// Returns empty list if public_uri is not configured or no enabled games available
+    /// Each game can have its own URI (for proxy/redirect) or use the server's public_uri
+    /// Games without a URI (neither game-specific nor server public_uri) are skipped
+    /// Note: server_name here is this server's name (used for display in server list).
+    /// The actual server_name for directory creation comes from LoginSuccess on the target server.
     fn get_server_list(&self) -> Vec<ServerInfo> {
-        if let Some(uri) = &self.config.public_uri {
-            // Create a ServerInfo for each enabled configured game
-            self.config.games.iter()
-                .filter(|(_, game_config)| game_config.enabled)
-                .map(|(game_id, game_config)| {
-                    ServerInfo {
-                        game_id: game_id.clone(),
-                        name: game_config.name.clone(),
-                        uri: uri.clone(),
-                    }
-                }).collect()
-        } else {
-            // No public_uri configured, return empty list
-            Vec::new()
-        }
+        let server_name = self.config.name.clone();
+
+        self.config.games.iter()
+            .filter(|(_, game_config)| game_config.enabled)
+            .filter_map(|(game_id, game_config)| {
+                // Use game-specific URI if present, otherwise fall back to server's public_uri
+                let uri = game_config.uri.clone()
+                    .or_else(|| self.config.public_uri.clone())?;
+
+                Some(ServerInfo {
+                    game_id: game_id.clone(),
+                    game_name: game_config.name.clone(),
+                    server_name: server_name.clone(),
+                    uri,
+                })
+            })
+            .collect()
     }
 
     /// Check if client version is compatible with server version

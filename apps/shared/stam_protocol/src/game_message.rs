@@ -23,6 +23,8 @@ pub enum GameMessage {
     // Server -> Client messages
     /// Authentication successful (sent immediately after GameLogin Intent)
     LoginSuccess {
+        /// Human-readable server name (e.g., "CHE Realm")
+        server_name: String,
         /// Human-readable game name
         game_name: String,
         /// Game version from server configuration

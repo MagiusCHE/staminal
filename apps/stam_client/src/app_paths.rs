@@ -7,6 +7,37 @@ use std::path::PathBuf;
 use std::fs;
 use tracing::debug;
 
+/// Sanitize a string to be used as a directory name
+/// Replaces invalid characters and normalizes whitespace
+pub fn sanitize_dirname(name: &str) -> String {
+    let mut result = String::new();
+    let mut last_was_space = false;
+
+    for c in name.chars() {
+        // Replace invalid filesystem characters with underscore
+        let safe_char = match c {
+            '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0' => '_',
+            // Normalize whitespace
+            ' ' | '\t' | '\n' | '\r' => ' ',
+            _ => c,
+        };
+
+        // Avoid duplicate spaces
+        if safe_char == ' ' {
+            if !last_was_space && !result.is_empty() {
+                result.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            result.push(safe_char);
+            last_was_space = false;
+        }
+    }
+
+    // Trim trailing spaces
+    result.trim_end().to_string()
+}
+
 #[derive(Clone)]
 pub struct AppPaths {
     config_dir: PathBuf,
@@ -78,12 +109,27 @@ impl AppPaths {
 
     /// Get the game-specific data directory
     ///
+    /// Directory structure: data_dir/<server_dir>/<game_id>/
+    /// Where server_dir is: "<host> - <server_name>" (sanitized)
+    ///
     /// # Arguments
+    /// * `host` - Server host (e.g., "127.0.0.1", "magius.it")
+    /// * `server_name` - Human-readable server name (e.g., "Develop Realm")
     /// * `game_id` - Game identifier
-    pub fn game_root(&self, game_id: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let game_root = self.data_dir.join(game_id);
+    pub fn game_root(&self, host: &str, server_name: &str, game_id: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        // Build server directory name: "<host> - <server_name>" (sanitized)
+        let server_dir_name = sanitize_dirname(&format!("{} - {}", host, server_name));
+        let server_dir = self.data_dir.join(&server_dir_name);
 
-        // Create directory if it doesn't exist
+        // Create server directory if it doesn't exist
+        if !server_dir.exists() {
+            fs::create_dir_all(&server_dir)?;
+            debug!("Created server directory: {}", server_dir.display());
+        }
+
+        let game_root = server_dir.join(game_id);
+
+        // Create game directory if it doesn't exist
         if !game_root.exists() {
             fs::create_dir_all(&game_root)?;
             debug!("Created game root directory: {}", game_root.display());

@@ -59,13 +59,15 @@ impl GameClient {
             })
     }
 
-    /// Get game name and version from configuration
-    fn get_game_info(&self) -> (String, String) {
+    /// Get server name, game name and version from configuration
+    /// Returns (server_name, game_name, game_version)
+    fn get_game_info(&self) -> (String, String, String) {
+        let server_name = self.config.name.clone();
         self.config.games.get(&self.game_id)
-            .map(|game_config| (game_config.name.clone(), game_config.version.clone()))
+            .map(|game_config| (server_name.clone(), game_config.name.clone(), game_config.version.clone()))
             .unwrap_or_else(|| {
                 error!("Game '{}' not found in configuration", self.game_id);
-                (self.game_id.clone(), "unknown".to_string())
+                (server_name, self.game_id.clone(), "unknown".to_string())
             })
     }
 
@@ -82,10 +84,11 @@ impl GameClient {
 
         // Get pre-built mod list from config
         let mods = self.get_mod_list().to_vec();
-        let (game_name, game_version) = self.get_game_info();
+        let (server_name, game_name, game_version) = self.get_game_info();
 
         // Send LoginSuccess with mod list (already authenticated via Intent)
         if let Err(e) = self.stream.write_game_message(&GameMessage::LoginSuccess {
+            server_name,
             game_name,
             game_version,
             mods,

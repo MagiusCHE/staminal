@@ -6,7 +6,9 @@ pub struct ServerInfo {
     /// Game ID (unique identifier for the game)
     pub game_id: String,
     /// Game name (human-readable)
-    pub name: String,
+    pub game_name: String,
+    /// Server name (human-readable, e.g., "CHE Realm")
+    pub server_name: String,
     /// Server URI (e.g., "stam://game.example.com:9999")
     pub uri: String,
 }

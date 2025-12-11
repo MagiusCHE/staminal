@@ -166,6 +166,10 @@ pub struct GameConfig {
     pub name: String,
     /// Game version
     pub version: String,
+    /// Custom URI for this game (optional, overrides server's public_uri)
+    /// Use this to redirect clients to a different server for this game
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
     /// Mods configuration for this game
     #[serde(default)]
     pub mods: HashMap<String, ModConfig>,

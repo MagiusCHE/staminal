@@ -28,8 +28,8 @@
     "postinstall": "cd apps/server_mods_packer && npm install",
     "server:debug": "(pkill stam_server -9 || true) && npm run pack:mods:purge && cd apps/stam_server && STAM_HOME=\"./workspace_data\" cargo run --bin stam_server -- --config workspace_data/configs/develop.json --log-file",
     "server:test": "cd apps/stam_server && cargo test && cargo test -p stam_mod_runtimes -p stam_protocol -p stam_schema",
-    "client:debug": "(pkill stam_client -9 || true) && npm run client:sync-mods && cd apps/stam_client && STAM_URI=\"stam://magius:324fd324@localhost:9999\" STAM_LANG=\"it-IT\" STAM_HOME=\"./workspace_data\" STAM_LOG_LEVEL=\"trace\" STAM_LOGDEPS=\"0\" cargo run --bin stam_client -- --log-file",
-    "client:sync-mods": "node apps/client_develop_prepare/sync-client-mods.mjs ./mods apps/stam_client/workspace_data/beyond_midgard_era/mods",
+    "client:debug": "(pkill stam_client -9 || true) && npm run client:sync-mods && cd apps/stam_client && STAM_URI=\"stam://magius:324fd324@127.0.0.1:9999\" STAM_LANG=\"it-IT\" STAM_HOME=\"./workspace_data\" STAM_LOG_LEVEL=\"trace\" STAM_LOGDEPS=\"0\" cargo run --bin stam_client -- --log-file",
+    "client:sync-mods": "node apps/client_develop_prepare/sync-client-mods.mjs ./mods \"apps/stam_client/workspace_data/127.0.0.1 - Develop Realm/beyond_midgard_era/mods\"",
     "client:test": "cd apps/stam_client && cargo test",
     "pack:mods": "cd apps/server_mods_packer && node mods-packer.mjs ../../apps/stam_server/workspace_data/mods ../../apps/stam_server/workspace_data/mod-packages",
     "pack:mods:purge": "cd apps/server_mods_packer && node mods-packer.mjs ../../apps/stam_server/workspace_data/mods ../../apps/stam_server/workspace_data/mod-packages --purge"
