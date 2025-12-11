@@ -686,6 +686,24 @@ async fn connect_to_game_server(
                 if !tmp_dir.exists() {
                     std::fs::create_dir_all(&tmp_dir)?;
                     debug!("Created game tmp directory: {}", tmp_dir.display());
+                } else {
+                    // Clean up any orphaned temp files from previous sessions
+                    if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
+                        let mut cleaned = 0;
+                        for entry in entries.flatten() {
+                            let path = entry.path();
+                            if path.is_file() {
+                                if let Err(e) = std::fs::remove_file(&path) {
+                                    warn!("Failed to clean up orphaned temp file '{}': {}", path.display(), e);
+                                } else {
+                                    cleaned += 1;
+                                }
+                            }
+                        }
+                        if cleaned > 0 {
+                            debug!("Cleaned up {} orphaned temp file(s) from previous session", cleaned);
+                        }
+                    }
                 }
 
                 // Keep downloading until all dependencies are satisfied
@@ -808,13 +826,18 @@ async fn connect_to_game_server(
                         let mod_target_dir = mods_dir.join(&mod_info.mod_id);
                         debug!("  Extracting to {}...", mod_target_dir.display());
 
-                        extract_mod_archive(&archive_path, &mod_target_dir)
-                            .map_err(|e| format!("Failed to extract mod '{}': {}", mod_info.mod_id, e))?;
+                        // Extract and always clean up temp file (even on error)
+                        let extract_result = extract_mod_archive(&archive_path, &mod_target_dir);
+
+                        // Always clean up archive file after extraction attempt
+                        if let Err(e) = std::fs::remove_file(&archive_path) {
+                            warn!("Failed to clean up temp file '{}': {}", archive_path.display(), e);
+                        }
+
+                        // Now check extraction result
+                        extract_result.map_err(|e| format!("Failed to extract mod '{}': {}", mod_info.mod_id, e))?;
 
                         debug!("  ✓ Mod '{}' installed successfully", mod_info.mod_id);
-
-                        // Clean up archive file
-                        std::fs::remove_file(&archive_path)?;
 
                         // Immediately load the manifest of the newly downloaded mod
                         // so that its dependencies can be discovered in the next iteration
@@ -2458,11 +2481,17 @@ async fn run_client(args: Args, engine_request_tx: std_mpsc::Sender<EnableEngine
             }
 
             // Select server based on --game argument or use first available
-            let selected_server = if let Some(ref game_filter) = args.game {
+            // Treat empty string as None (use first available)
+            let game_filter = args.game.as_ref().and_then(|g| {
+                let trimmed = g.trim();
+                if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+            });
+
+            let selected_server = if let Some(ref filter) = game_filter {
                 // Try to find server by game_id or game_name
                 servers
                     .iter()
-                    .find(|s| s.game_id == *game_filter || s.game_name == *game_filter)
+                    .find(|s| s.game_id == *filter || s.game_name == *filter)
             } else {
                 // Default to first server
                 servers.first()
@@ -2481,7 +2510,7 @@ async fn run_client(args: Args, engine_request_tx: std_mpsc::Sender<EnableEngine
                         locale.get_with_args(
                             "game-not-found",
                             Some(&fluent_args! {
-                                "game" => args.game.as_deref().unwrap_or(""),
+                                "game" => game_filter.as_deref().unwrap_or(""),
                                 "available" => available.join(", ").as_str()
                             })
                         )
